@@ -8,7 +8,7 @@ Cook Mantra is a recipe generator for people who already have some ingredients a
 
 The user takes a photo of the ingredients, Cook Mantra recognizes what is visible, and then asks the user to check the list. It also shows a separate list of common pantry ingredients such as salt, oil, turmeric, chilli powder, cumin, onion, garlic, and ginger. The user can confirm, add, edit, or remove anything before recipes are generated.
 
-Once the ingredient list is confirmed, Cook Mantra suggests a few dishes, gives a short summary and nutrition estimate, and generates an image showing how the dish may look. After the user picks one, the app creates the full recipe.
+Once the ingredient list is confirmed, Cook Mantra suggests a few dishes, gives a short summary and nutrition estimate, and generates an image showing how each dish may look. The user can select one or more dishes. Cook Mantra then creates every selected recipe in parallel.
 
 ## Why we are building this
 
@@ -35,13 +35,59 @@ So the important idea here is simple: **Cook Mantra can suggest pantry ingredien
 5. Cook Mantra also shows a separate, editable list of common pantry ingredients.
 6. The user confirms which pantry ingredients are actually available.
 7. The app creates one final confirmed ingredient list.
-8. The Master / Chef Agent generates a few recipe options using that confirmed list.
+8. The Master Chef Agent generates a batch of recipe options using that confirmed list and excluding recipes already shown in the current session.
 9. The Nutrition Agent estimates calories, macros, and useful diet tags.
 10. The Image Agent creates an illustrative preview of how each dish might look.
-11. The user chooses a recipe.
-12. A Specialized Recipe Agent creates the complete recipe with quantities, steps, cooking time, servings, tips, and substitutions.
+11. The user selects one or more recipes or requests more options.
+12. If the user requests more, steps 8–10 run again and produce a fresh batch without repeating previously shown recipes.
+13. For each selected recipe, the backend starts a separate Specialized Recipe Agent. These agents run in parallel.
+14. Each agent creates one complete recipe with quantities, steps, cooking time, servings, tips, and substitutions. The backend collects the results and returns all selected recipes together.
 
 The user should also be able to go back and choose another recipe without uploading the image again.
+
+## User and agent flow
+
+Rounded nodes are user actions, rectangles are orchestration steps, and hexagons are agents.
+
+```mermaid
+flowchart TD
+    Upload(["1. User uploads an ingredient photo"])
+    Extractor{{"2. Ingredient Extraction Agent"}}
+    Confirm(["3. User reviews, edits, and confirms ingredients"])
+    Chef{{"4. Master Chef Agent"}}
+    Nutrition{{"5a. Nutrition Agent"}}
+    ImageAgent{{"5b. Image Agent"}}
+    Assemble["6. Combine options, nutrition, and images"]
+    Options(["7. User reviews recipe options"])
+    Select(["8a. User selects one or more recipes"])
+    More(["8b. User taps More"])
+    Exclude["Remember and exclude all recipes already shown"]
+    FanOut["9. Start one agent per selected recipe in parallel"]
+    SpecialistA{{"Specialized Recipe Agent — Recipe A"}}
+    SpecialistB{{"Specialized Recipe Agent — Recipe B"}}
+    Collect["10. Collect all completed recipes"]
+    Recipe(["11. User views the complete recipes"])
+
+    Upload --> Extractor
+    Extractor --> Confirm
+    Confirm --> Chef
+    Chef --> Nutrition
+    Chef --> ImageAgent
+    Chef --> Assemble
+    Nutrition --> Assemble
+    ImageAgent --> Assemble
+    Assemble --> Options
+    Options --> Select
+    Options --> More
+    More --> Exclude
+    Exclude -->|"Generate a fresh batch"| Chef
+    Select --> FanOut
+    FanOut --> SpecialistA
+    FanOut --> SpecialistB
+    SpecialistA --> Collect
+    SpecialistB --> Collect
+    Collect --> Recipe
+```
 
 ## One rule we should not break
 
@@ -88,8 +134,10 @@ This is only a starting list. The user can select, deselect, add, or remove item
 - Showing missing or optional ingredients honestly
 - Nutrition estimates and diet tags
 - An AI-generated dish preview clearly marked as an illustration
-- A complete recipe after selection
+- Selecting one or more recipe options
+- Complete recipes for every selected option, generated in parallel
 - The ability to return to the recipe options
+- The ability to request more recipe options without re-uploading the image or repeating previously shown recipes
 
 ## What each agent does
 
@@ -115,7 +163,7 @@ Generates a visual interpretation of the proposed dish. The result should be lab
 
 ### Specialized Recipe Agent
 
-Takes the selected recipe and turns it into something the user can actually cook. When prompting the agent it will be the Specialized Cheif Agent expert in that country and in that dish. It should provide ingredients, quantities, numbered steps, servings, cooking time, tips, and substitutions. As the [Master Chef Agent](#master-chef-agent), this agent will also knowing about the taste of dishes and ingredients, but this agent will be a master in the that cuisine and dish.
+Takes one selected recipe and turns it into something the user can actually cook. The backend starts a separate instance for every selected recipe and runs those instances in parallel. Each agent specializes in the recipe's cuisine and dish, and provides ingredients, quantities, numbered steps, servings, cooking time, tips, and substitutions. The backend collects all completed recipes before returning them to the user.
 
 ## Main product requirements
 
@@ -128,6 +176,9 @@ Takes the selected recipe and turns it into something the user can actually cook
 - Dietary preferences should be respected where possible.
 - Possible allergens should be highlighted.
 - A generated recipe should include quantities, numbered steps, time, servings, and substitutions.
+- The user must be able to select one or more recipe options.
+- The backend must run one Specialized Recipe Agent per selected recipe in parallel and return the completed recipes together.
+- Requests for more recipe options must exclude every recipe already shown in the current session.
 - Errors should fail gracefully. For example, if image recognition is weak, the user should still be able to enter ingredients manually.
 
 ## A few simple user stories
@@ -152,9 +203,9 @@ This works when each option shows what the dish is, how long it takes, how diffi
 
 ### Following the recipe
 
-As a user, I want the final recipe to match the ingredients I confirmed.
+As a user, I want complete recipes for every option I select.
 
-This works when the recipe gives proper quantities, numbered instructions, cooking time, servings, substitutions, and clear assumptions.
+This works when each selected option is handled by a separate Specialized Recipe Agent, the agents run in parallel, and every returned recipe includes proper quantities, numbered instructions, cooking time, servings, substitutions, and clear assumptions.
 
 ## Risks we should keep in mind
 
@@ -163,3 +214,4 @@ This works when the recipe gives proper quantities, numbered instructions, cooki
 - **Unrealistic dish previews:** label them as illustrative.
 - **Wrong nutrition expectations:** make it clear that the values are estimates.
 - **Diet or allergen mistakes:** highlight uncertainty and ask for user preferences.
+- **Repeated recipe suggestions:** remember previous options and exclude them from every later batch in the session.
