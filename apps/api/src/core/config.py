@@ -1,13 +1,13 @@
 """Application and Ollama model configuration."""
 
-import os
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 
-from dotenv import load_dotenv
+from pydantic import AnyHttpUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 class Model(StrEnum):
@@ -43,13 +43,22 @@ AGENT_MODELS: dict[Agent, Model] = {
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".local.env",
+        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
-    llm_timeout_seconds: float = os.getenv("LLM_TIMEOUT_SECONDS")
-    ollama_base_url: str = os.getenv("OLLAMA_BASE_URL")
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
+    ollama_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:11434")
+    llm_timeout_seconds: float = 300.0
+    max_concurrent_jobs: int = 2
+    max_concurrent_model_calls: int = 2
+    session_ttl_seconds: int = 21_600
+    artifact_root: Path = PROJECT_ROOT / "tmp" / "cook-mantra-api"
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str = "cook-mantra"
 
     def model_for(self, agent: Agent) -> Model:
         """Return the Ollama model configured for an agent."""

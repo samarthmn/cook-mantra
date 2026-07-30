@@ -55,7 +55,7 @@ def get_model(
 
     return ChatOllama(
         model=resolved_model.value,
-        base_url=settings.ollama_base_url.rstrip("/"),
+        base_url=str(settings.ollama_base_url).rstrip("/"),
         temperature=temperature,
         reasoning=thinking,
         client_kwargs={"timeout": resolved_timeout},
