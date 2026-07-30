@@ -2,6 +2,7 @@
 
 import json
 from typing import Protocol
+from unicodedata import normalize as normalize_unicode
 
 from langchain_core.messages import HumanMessage
 
@@ -51,7 +52,7 @@ class OllamaSpecializedRecipeAgent:
             ).with_structured_output(CompleteRecipe)
 
         normalized_confirmed = _normalize_confirmed_names(confirmed_ingredients)
-        recipe = await invoke_structured(
+        model_result = await invoke_structured(
             model,
             [
                 HumanMessage(
@@ -59,19 +60,14 @@ class OllamaSpecializedRecipeAgent:
                 )
             ],
         )
+        recipe = _revalidate_model_recipe(model_result)
+        recipe = _merge_server_owned_fields(recipe, option, preferences)
         _validate_ingredient_availability(recipe, option, normalized_confirmed)
-        return recipe.model_copy(
-            update={
-                "option_id": option.id,
-                "name": option.name,
-                "cuisine": option.cuisine,
-                "servings": preferences.servings,
-            }
-        )
+        return recipe
 
 
 def _normalize_name(name: str) -> str:
-    return " ".join(name.split())
+    return " ".join(normalize_unicode("NFC", name).split())
 
 
 def _normalize_confirmed_names(names: list[str]) -> list[str]:
@@ -118,20 +114,58 @@ and allergen_notice explicit and appropriately cautious. Retain every known miss
 and optional ingredient from the selected option in the complete ingredient list.
 
 Availability is a strict user-confirmation boundary. Only exact confirmed ingredient
-names in Confirmed ingredients JSON, compared after whitespace normalization and
-case-insensitively, may be marked "available". Every other ingredient used in the
-recipe must be marked "missing" or "optional". Do not infer pantry ingredients or
-silently make any unconfirmed item available."""
+names in Confirmed ingredients JSON, compared after Unicode NFC and whitespace
+normalization and case-insensitively, may be marked "available". Every other
+ingredient used in the recipe must be marked "missing" or "optional". Do not infer
+pantry ingredients or silently make any unconfirmed item available."""
 
 
 def _render_json(value: object) -> str:
-    rendered = json.dumps(
+    return json.dumps(
         value,
-        ensure_ascii=False,
+        ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
     )
-    return rendered.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
+
+def _revalidate_model_recipe(model_result: object) -> CompleteRecipe:
+    if not isinstance(model_result, CompleteRecipe):
+        raise _invalid_model_output_error()
+
+    try:
+        payload = model_result.model_dump(
+            mode="python",
+            round_trip=True,
+            warnings="error",
+        )
+        return CompleteRecipe.model_validate(payload)
+    except (AttributeError, TypeError, ValueError):
+        raise _invalid_model_output_error() from None
+
+
+def _merge_server_owned_fields(
+    recipe: CompleteRecipe,
+    option: RecipeOption,
+    preferences: RecipePreferences,
+) -> CompleteRecipe:
+    try:
+        payload = recipe.model_dump(
+            mode="python",
+            round_trip=True,
+            warnings="error",
+        )
+        payload.update(
+            {
+                "option_id": option.id,
+                "name": option.name,
+                "cuisine": option.cuisine,
+                "servings": preferences.servings,
+            }
+        )
+        return CompleteRecipe.model_validate(payload)
+    except (AttributeError, TypeError, ValueError):
+        raise _invalid_model_output_error() from None
 
 
 def _validate_ingredient_availability(
@@ -142,10 +176,12 @@ def _validate_ingredient_availability(
     confirmed_keys = {
         _normalize_name(ingredient).casefold() for ingredient in confirmed_ingredients
     }
-    availability_by_name: dict[str, set[IngredientAvailability]] = {}
+    availability_by_name: dict[str, IngredientAvailability] = {}
     for ingredient in recipe.ingredients:
         key = _normalize_name(ingredient.name).casefold()
-        availability_by_name.setdefault(key, set()).add(ingredient.availability)
+        if key in availability_by_name:
+            raise _invalid_availability_error()
+        availability_by_name[key] = ingredient.availability
         is_confirmed = key in confirmed_keys
         is_available = ingredient.availability is IngredientAvailability.AVAILABLE
         if is_confirmed != is_available:
@@ -158,7 +194,7 @@ def _validate_ingredient_availability(
             if key in confirmed_keys
             else IngredientAvailability.MISSING
         )
-        if expected not in availability_by_name.get(key, set()):
+        if availability_by_name.get(key) is not expected:
             raise _invalid_availability_error()
 
     for requirement in option.optional_ingredients:
@@ -168,8 +204,17 @@ def _validate_ingredient_availability(
             if key in confirmed_keys
             else IngredientAvailability.OPTIONAL
         )
-        if expected not in availability_by_name.get(key, set()):
+        if availability_by_name.get(key) is not expected:
             raise _invalid_availability_error()
+
+
+def _invalid_model_output_error() -> AppError:
+    return AppError(
+        code=ErrorCode.MODEL_OUTPUT_INVALID,
+        message="The model returned invalid structured output.",
+        status_code=502,
+        retryable=True,
+    )
 
 
 def _invalid_availability_error() -> AppError:

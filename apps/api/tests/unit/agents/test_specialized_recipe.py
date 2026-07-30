@@ -8,7 +8,11 @@ from agents import specialized_recipe as specialized_recipe_module
 from agents.specialized_recipe import OllamaSpecializedRecipeAgent
 from core.config import PROJECT_ROOT, Agent, Settings
 from core.errors import AppError, ErrorCode
-from domain.recipe_options import RecipeOption, RecipePreferences
+from domain.recipe_options import (
+    IngredientRequirement,
+    RecipeOption,
+    RecipePreferences,
+)
 from domain.recipes import CompleteRecipe
 
 
@@ -127,6 +131,21 @@ class ValidatingStructuredModel:
         return CompleteRecipe.model_validate(outcome)
 
 
+class UntrustedStructuredModel:
+    def __init__(self, outcomes: list[object | BaseException]) -> None:
+        self.outcomes = outcomes
+        self.attempts = 0
+        self.messages: list[object] = []
+
+    async def ainvoke(self, messages: object) -> object:
+        self.messages.append(messages)
+        outcome = self.outcomes[self.attempts]
+        self.attempts += 1
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
 class StructuredModelFactory:
     def __init__(self, output: dict[str, object]) -> None:
         self.output = output
@@ -146,6 +165,16 @@ def prompt_json(prompt: str, label: str) -> object:
     prefix = f"{label}: "
     line = next(line for line in prompt.splitlines() if line.startswith(prefix))
     return json.loads(line.removeprefix(prefix))
+
+
+def constructed_recipe(**updates: object) -> CompleteRecipe:
+    validated = CompleteRecipe.model_validate(recipe_output())
+    values = {
+        field_name: getattr(validated, field_name)
+        for field_name in CompleteRecipe.model_fields
+    }
+    values.update(updates)
+    return CompleteRecipe.model_construct(**values)
 
 
 @pytest.mark.asyncio
@@ -234,9 +263,13 @@ async def test_prompt_contains_every_input_fact_and_complete_recipe_constraint()
 
 
 @pytest.mark.asyncio
-async def test_prompt_json_escapes_unicode_line_separators() -> None:
+async def test_prompt_json_is_ascii_safe_and_round_trips_unicode_separators() -> None:
     option = recipe_option().model_copy(
-        update={"summary": "First line\u2028second line\u2029third line"}
+        update={
+            "summary": (
+                "Café first line\u0085second line\u2028third line\u2029fourth line"
+            )
+        }
     )
     model = ValidatingStructuredModel([recipe_output()])
 
@@ -247,8 +280,11 @@ async def test_prompt_json_escapes_unicode_line_separators() -> None:
     )
 
     prompt = model.messages[0][0].content
+    assert prompt.isascii()
+    assert "\u0085" not in prompt
     assert "\u2028" not in prompt
     assert "\u2029" not in prompt
+    assert "\\u0085" in prompt
     assert "\\u2028" in prompt
     assert "\\u2029" in prompt
     assert prompt_json(prompt, "Selected option JSON") == option.model_dump(mode="json")
@@ -279,6 +315,110 @@ async def test_server_owned_identity_and_servings_overwrite_model_values() -> No
     assert result.name == option.name
     assert result.cuisine == option.cuisine
     assert result.servings == user_preferences.servings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("option_updates", "preference_updates"),
+    [
+        ({"id": "   "}, {}),
+        ({"name": "   "}, {}),
+        ({"cuisine": "   "}, {}),
+        ({}, {"servings": 0}),
+    ],
+    ids=["blank-option-id", "blank-name", "blank-cuisine", "invalid-servings"],
+)
+async def test_invalid_server_owned_values_are_rejected_after_merge(
+    option_updates: dict[str, object],
+    preference_updates: dict[str, object],
+) -> None:
+    option = recipe_option().model_copy(update=option_updates)
+    user_preferences = preferences().model_copy(update=preference_updates)
+    model = UntrustedStructuredModel([CompleteRecipe.model_validate(recipe_output())])
+
+    with pytest.raises(AppError) as raised:
+        await OllamaSpecializedRecipeAgent(model=model).generate(
+            option,
+            ["Tomato, ripe"],
+            user_preferences,
+        )
+
+    error = raised.value
+    assert error.code is ErrorCode.MODEL_OUTPUT_INVALID
+    assert error.message == "The model returned invalid structured output."
+    assert error.status_code == 502
+    assert error.retryable is True
+    assert error.details == {}
+    assert model.attempts == 1
+
+
+def invalid_constructed_recipes() -> list[CompleteRecipe]:
+    valid = CompleteRecipe.model_validate(recipe_output())
+    invalid_ingredient = valid.ingredients[0].model_copy(update={"quantity": "   "})
+    invalid_step = valid.steps[0].model_copy(update={"duration_minutes": 0})
+    return [
+        constructed_recipe(steps=()),
+        constructed_recipe(ingredients=(invalid_ingredient, *valid.ingredients[1:])),
+        constructed_recipe(steps=(invalid_step, *valid.steps[1:])),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_recipe",
+    invalid_constructed_recipes(),
+    ids=["constructed-empty-steps", "invalid-nested-ingredient", "invalid-nested-step"],
+)
+async def test_constructed_recipe_instances_are_explicitly_revalidated(
+    invalid_recipe: CompleteRecipe,
+) -> None:
+    model = UntrustedStructuredModel([invalid_recipe])
+
+    with pytest.raises(AppError) as raised:
+        await OllamaSpecializedRecipeAgent(model=model).generate(
+            recipe_option(),
+            ["Tomato, ripe"],
+            preferences(),
+        )
+
+    error = raised.value
+    assert error.code is ErrorCode.MODEL_OUTPUT_INVALID
+    assert error.message == "The model returned invalid structured output."
+    assert error.status_code == 502
+    assert error.retryable is True
+    assert error.details == {}
+    assert model.attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsafe_result",
+    [
+        {"private": "PRIVATE_MODEL_PAYLOAD"},
+        constructed_recipe(ingredients=(object(),)),
+    ],
+    ids=["non-complete-recipe", "unserializable-complete-recipe"],
+)
+async def test_non_model_and_unserializable_results_map_to_safe_error(
+    unsafe_result: object,
+) -> None:
+    model = UntrustedStructuredModel([unsafe_result])
+
+    with pytest.raises(AppError) as raised:
+        await OllamaSpecializedRecipeAgent(model=model).generate(
+            recipe_option(),
+            ["Tomato, ripe"],
+            preferences(),
+        )
+
+    error = raised.value
+    assert error.code is ErrorCode.MODEL_OUTPUT_INVALID
+    assert error.message == "The model returned invalid structured output."
+    assert error.status_code == 502
+    assert error.retryable is True
+    assert error.details == {}
+    assert "PRIVATE_MODEL_PAYLOAD" not in str(error)
+    assert model.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -463,6 +603,46 @@ async def test_confirmed_recipe_ingredient_cannot_be_marked_missing() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("duplicate_name", "duplicate_availability"),
+    [
+        ("  tomato,   RIPE  ", "available"),
+        (" CORIANDER ", "missing"),
+    ],
+    ids=["same-availability", "conflicting-availability"],
+)
+async def test_duplicate_normalized_recipe_ingredient_names_are_rejected(
+    duplicate_name: str,
+    duplicate_availability: str,
+) -> None:
+    ingredients = deepcopy(recipe_output()["ingredients"])
+    assert isinstance(ingredients, list)
+    ingredients.append(
+        {
+            "name": duplicate_name,
+            "quantity": "1 tablespoon",
+            "availability": duplicate_availability,
+        }
+    )
+    model = ValidatingStructuredModel([recipe_output(ingredients=ingredients)])
+
+    with pytest.raises(AppError) as raised:
+        await OllamaSpecializedRecipeAgent(model=model).generate(
+            recipe_option(),
+            ["Tomato, ripe"],
+            preferences(),
+        )
+
+    error = raised.value
+    assert error.code is ErrorCode.MODEL_OUTPUT_INVALID
+    assert error.message == "The model returned invalid ingredient availability."
+    assert error.status_code == 502
+    assert error.retryable is True
+    assert error.details == {}
+    assert model.attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_duplicate_confirmed_names_are_normalized_without_mutating_inputs() -> (
     None
 ):
@@ -521,6 +701,55 @@ async def test_duplicate_confirmed_names_are_normalized_without_mutating_inputs(
     assert confirmed == original_confirmed
     assert option.model_dump(mode="json") == original_option
     assert user_preferences.model_dump(mode="json") == original_preferences
+
+
+@pytest.mark.asyncio
+async def test_nfc_matching_deduplicates_without_mutating_input() -> None:
+    option = recipe_option().model_copy(
+        update={
+            "missing_ingredients": [
+                IngredientRequirement(
+                    name="Cafe\u0301 powder",
+                    reason="Needed for the sauce",
+                )
+            ],
+            "optional_ingredients": [],
+        }
+    )
+    confirmed = ["  Cafe\u0301   leaves  ", "café leaves"]
+    original_confirmed = confirmed.copy()
+    model = ValidatingStructuredModel(
+        [
+            recipe_output(
+                ingredients=[
+                    {
+                        "name": "CAFÉ LEAVES",
+                        "quantity": "1 cup",
+                        "availability": "available",
+                    },
+                    {
+                        "name": "Café powder",
+                        "quantity": "1 teaspoon",
+                        "availability": "missing",
+                    },
+                ]
+            )
+        ]
+    )
+
+    result = await OllamaSpecializedRecipeAgent(model=model).generate(
+        option,
+        confirmed,
+        preferences(),
+    )
+
+    prompt = model.messages[0][0].content
+    assert prompt_json(prompt, "Confirmed ingredients JSON") == ["Café leaves"]
+    assert [ingredient.name for ingredient in result.ingredients] == [
+        "CAFÉ LEAVES",
+        "Café powder",
+    ]
+    assert confirmed == original_confirmed
 
 
 @pytest.mark.asyncio
