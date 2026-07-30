@@ -26,7 +26,7 @@ from schemas.ingredients import IngredientReviewRequest
 from schemas.sessions import (
     INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES,
     INGREDIENT_REVIEW_RESPONSE_EXAMPLES,
-    SessionCreatedResponse,
+    QueuedJobResponse,
     SessionResponse,
 )
 from services.artifacts import ArtifactStore
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 @router.post(
     "",
-    response_model=SessionCreatedResponse,
+    response_model=QueuedJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def create_session(
@@ -51,7 +51,7 @@ async def create_session(
         IngredientExtractionRunner,
         Depends(get_ingredient_extraction_runner),
     ],
-) -> SessionCreatedResponse:
+) -> QueuedJobResponse:
     """Validate an ingredient image and queue extraction."""
     try:
         validated = await validator.read(image)
@@ -93,7 +93,7 @@ async def create_session(
         )
         raise
 
-    return SessionCreatedResponse(session_id=session.id, job_id=job.id)
+    return QueuedJobResponse(session_id=session.id, job_id=job.id)
 
 
 @router.get("/{session_id}", response_model=SessionResponse)

@@ -517,6 +517,31 @@ def test_option_route_openapi_errors_use_public_envelope(
     }
 
 
+def test_job_producing_routes_share_generic_queued_job_contract(
+    client: TestClient,
+) -> None:
+    document = client.app.openapi()
+    operations = [
+        document["paths"]["/api/v1/sessions"]["post"],
+        document["paths"]["/api/v1/sessions/{session_id}/recipe-options"]["post"],
+        document["paths"]["/api/v1/sessions/{session_id}/recipe-options/more"]["post"],
+    ]
+
+    for operation in operations:
+        assert operation["responses"]["202"]["content"]["application/json"][
+            "schema"
+        ] == {"$ref": "#/components/schemas/QueuedJobResponse"}
+
+    component = document["components"]["schemas"]["QueuedJobResponse"]
+    assert component["title"] == "QueuedJobResponse"
+    assert component["description"] == (
+        "Identifiers returned after a background job is queued."
+    )
+    assert set(component["properties"]) == {"session_id", "job_id"}
+    assert component["required"] == ["session_id", "job_id"]
+    assert "SessionCreatedResponse" not in document["components"]["schemas"]
+
+
 def test_app_wires_recipe_graph_to_exact_settings_stores_and_shared_limiter(
     project_tmp_path: Path,
 ) -> None:

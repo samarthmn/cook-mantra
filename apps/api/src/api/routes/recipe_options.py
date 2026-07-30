@@ -22,7 +22,7 @@ from orchestration.graphs.recipe_options import ProgressReporter, RecipeOptionsR
 from orchestration.job_runner import JobRunner
 from repositories.session_store import SessionStore
 from schemas.errors import ErrorResponse
-from schemas.sessions import SessionCreatedResponse
+from schemas.sessions import QueuedJobResponse
 
 router = APIRouter(prefix="/sessions", tags=["recipe options"])
 
@@ -44,7 +44,7 @@ _ERROR_RESPONSES = {
 
 @router.post(
     "/{session_id}/recipe-options",
-    response_model=SessionCreatedResponse,
+    response_model=QueuedJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses=_ERROR_RESPONSES,
 )
@@ -57,7 +57,7 @@ async def generate_recipe_options(
         RecipeOptionsRunner,
         Depends(get_recipe_options_runner),
     ],
-) -> SessionCreatedResponse:
+) -> QueuedJobResponse:
     """Queue the first recipe-option batch for confirmed ingredients."""
     return await _queue_recipe_options(
         session_id,
@@ -71,7 +71,7 @@ async def generate_recipe_options(
 
 @router.post(
     "/{session_id}/recipe-options/more",
-    response_model=SessionCreatedResponse,
+    response_model=QueuedJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
     responses=_ERROR_RESPONSES,
 )
@@ -84,7 +84,7 @@ async def generate_more_recipe_options(
         RecipeOptionsRunner,
         Depends(get_recipe_options_runner),
     ],
-) -> SessionCreatedResponse:
+) -> QueuedJobResponse:
     """Queue a fresh recipe-option batch excluding every shown name."""
     return await _queue_recipe_options(
         session_id,
@@ -104,7 +104,7 @@ async def _queue_recipe_options(
     session_store: SessionStore,
     job_runner: JobRunner,
     recipe_options_runner: RecipeOptionsRunner,
-) -> SessionCreatedResponse:
+) -> QueuedJobResponse:
     session = await session_store.require(session_id)
     generating, _previous_stage, generation_context = begin_option_generation(
         session,
@@ -151,7 +151,7 @@ async def _queue_recipe_options(
             )
         )
         raise
-    return SessionCreatedResponse(session_id=persisted.id, job_id=job.id)
+    return QueuedJobResponse(session_id=persisted.id, job_id=job.id)
 
 
 async def _restore_unowned_generation(

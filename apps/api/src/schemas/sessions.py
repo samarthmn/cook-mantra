@@ -58,8 +58,8 @@ INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES = {
 }
 
 
-class SessionCreatedResponse(BaseModel):
-    """Identifiers returned after ingredient extraction is queued."""
+class QueuedJobResponse(BaseModel):
+    """Identifiers returned after a background job is queued."""
 
     session_id: str
     job_id: str
