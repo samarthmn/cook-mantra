@@ -285,3 +285,137 @@ async def test_write_cleans_up_file_when_metadata_construction_fails(
 
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_startup_rejects_a_replaced_intermediate_parent_symlink(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "replaceable-parent"
+    parent.mkdir()
+    root = parent / "artifacts"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.png"
+    sentinel.write_bytes(b"outside")
+    store = ArtifactStore(root, ttl_seconds=60)
+
+    retained_parent = tmp_path / "retained-parent"
+    parent.rename(retained_parent)
+    parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(AppError) as raised:
+        await store.startup()
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+    assert sentinel.read_bytes() == b"outside"
+    assert not (outside / "artifacts").exists()
+
+
+@pytest.mark.asyncio
+async def test_require_returns_the_anchored_path_after_root_and_leaf_replacement(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store = ArtifactStore(root, ttl_seconds=60)
+    await store.startup()
+    artifact = await store.write(
+        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+    )
+
+    retained_root = tmp_path / "retained-artifacts"
+    root.rename(retained_root)
+    sentinel = outside / artifact.path.name
+    sentinel.write_bytes(b"outside")
+    root.symlink_to(outside, target_is_directory=True)
+
+    required = await store.require(artifact.id)
+
+    assert required.path.parent == retained_root
+    assert required.path.read_bytes() == b"image-bytes"
+
+    required.path.unlink()
+    required.path.symlink_to(sentinel)
+    with pytest.raises(AppError) as raised:
+        await store.require(artifact.id)
+
+    assert raised.value.code is ErrorCode.RESOURCE_NOT_FOUND
+    assert sentinel.read_bytes() == b"outside"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_descriptor_is_idempotent_and_disables_operations(
+    tmp_path: Path,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    await store.startup()
+    root_fd = store._root_fd
+
+    assert root_fd is not None
+    await store.shutdown()
+    await store.shutdown()
+
+    with pytest.raises(OSError):
+        os.fstat(root_fd)
+    with pytest.raises(AppError) as raised:
+        await store.write(
+            b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        )
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+
+
+@pytest.mark.asyncio
+async def test_repeated_startup_releases_the_previous_descriptor(
+    tmp_path: Path,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    await store.startup()
+    first_fd = store._root_fd
+    await store.startup()
+    second_fd = store._root_fd
+
+    assert first_fd is not None
+    assert second_fd is not None
+    with pytest.raises(OSError):
+        os.fstat(first_fd)
+
+    await store.shutdown()
+
+    with pytest.raises(OSError):
+        os.fstat(second_fd)
+
+
+@pytest.mark.asyncio
+async def test_startup_maps_missing_descriptor_capabilities_to_artifact_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+
+    with monkeypatch.context() as patch:
+        patch.delattr(artifacts_service.os, "O_DIRECTORY")
+        with pytest.raises(AppError) as raised:
+            await store.startup()
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+
+
+@pytest.mark.asyncio
+async def test_startup_maps_unimplemented_descriptor_operations_to_artifact_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+
+    def raise_not_implemented(*_: object, **__: object) -> int:
+        raise NotImplementedError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(artifacts_service.os, "open", raise_not_implemented)
+        with pytest.raises(AppError) as raised:
+            await store.startup()
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE

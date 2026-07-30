@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - unavailable on non-POSIX platforms.
+    fcntl = None
+
 from core.errors import AppError, ErrorCode
 from domain.artifacts import Artifact
 
@@ -17,13 +22,18 @@ _MISSING = "missing"
 _SAFE = "safe"
 _UNSAFE = "unsafe"
 _UNSAFE_DIRECTORY = "unsafe_directory"
+_PATH_MAX = 1024
+
+
+class _CapabilityError(Exception):
+    """Raised when secure descriptor operations are unavailable."""
 
 
 class ArtifactStore:
     """Store runtime-owned artifacts beneath one dedicated directory."""
 
     def __init__(self, artifact_root: Path, ttl_seconds: int) -> None:
-        self._root = artifact_root.resolve()
+        self._root = artifact_root.absolute()
         self._root_fd: int | None = None
         self._ttl_seconds = ttl_seconds
         self._artifacts: dict[str, Artifact] = {}
@@ -33,17 +43,38 @@ class ArtifactStore:
         """Prepare an empty artifact namespace for this API process."""
         async with self._lock:
             try:
-                root_fd = await asyncio.to_thread(self._open_and_clear_root)
-            except OSError as error:
+                root_fd, root_path = await asyncio.to_thread(self._open_and_clear_root)
+            except _storage_errors() as error:
                 raise _artifact_failure(
                     "Temporary artifact storage is unavailable."
                 ) from error
 
             old_root_fd = self._root_fd
             self._root_fd = root_fd
+            self._root = root_path
             self._artifacts.clear()
             if old_root_fd is not None:
-                await asyncio.to_thread(os.close, old_root_fd)
+                try:
+                    await asyncio.to_thread(os.close, old_root_fd)
+                except OSError as error:
+                    raise _artifact_failure(
+                        "Temporary artifact storage is unavailable."
+                    ) from error
+
+    async def shutdown(self) -> None:
+        """Release the owned directory descriptor when the store stops."""
+        async with self._lock:
+            root_fd = self._root_fd
+            self._root_fd = None
+            self._artifacts.clear()
+            if root_fd is None:
+                return
+            try:
+                await asyncio.to_thread(os.close, root_fd)
+            except OSError as error:
+                raise _artifact_failure(
+                    "Temporary artifact storage is unavailable."
+                ) from error
 
     async def write(
         self,
@@ -62,7 +93,8 @@ class ArtifactStore:
             filename = f"{artifact_id}{suffix}"
             try:
                 await asyncio.to_thread(self._write_new_file, root_fd, filename, data)
-            except OSError as error:
+                root_path = await asyncio.to_thread(self._root_path_from_fd, root_fd)
+            except _storage_errors() as error:
                 await self._remove_after_write_failure(root_fd, filename)
                 raise _artifact_failure("The artifact could not be stored.") from error
 
@@ -70,7 +102,7 @@ class ArtifactStore:
             try:
                 artifact = Artifact(
                     id=artifact_id,
-                    path=self._root / filename,
+                    path=root_path / filename,
                     media_type=media_type,
                     owner_session_id=owner_session_id,
                     created_at=now,
@@ -95,7 +127,7 @@ class ArtifactStore:
                 file_state = await asyncio.to_thread(
                     self._inspect_file, root_fd, artifact.path.name
                 )
-            except OSError as error:
+            except _storage_errors() as error:
                 raise _artifact_failure(
                     "The artifact could not be accessed."
                 ) from error
@@ -111,13 +143,21 @@ class ArtifactStore:
                     await asyncio.to_thread(
                         self._unlink_file, root_fd, artifact.path.name
                     )
-                except OSError as error:
+                except _storage_errors() as error:
                     raise _artifact_failure(
                         "The artifact could not be accessed."
                     ) from error
                 del self._artifacts[artifact_id]
                 raise _artifact_not_found()
 
+            try:
+                artifact.path = (
+                    await asyncio.to_thread(self._root_path_from_fd, root_fd)
+                ) / artifact.path.name
+            except _storage_errors() as error:
+                raise _artifact_failure(
+                    "The artifact could not be accessed."
+                ) from error
             artifact.last_accessed_at = datetime.now(UTC)
             return artifact.model_copy(deep=True)
 
@@ -158,18 +198,61 @@ class ArtifactStore:
                 del self._artifacts[artifact.id]
             return [artifact.id for artifact in artifacts]
 
-    def _open_and_clear_root(self) -> int:
-        self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        flags = os.O_RDONLY | os.O_DIRECTORY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        root_fd = os.open(self._root, flags)
+    def _open_and_clear_root(self) -> tuple[int, Path]:
+        parent_fd, root_name = self._open_parent_directory()
+        root_fd: int | None = None
         try:
+            with suppress(FileExistsError):
+                os.mkdir(root_name, mode=0o700, dir_fd=parent_fd)
+            root_fd = self._open_directory(root_name, parent_fd)
+            root_path = self._root_path_from_fd(root_fd)
             self._clear_runtime_files(root_fd)
+            return root_fd, root_path
         except BaseException:
-            os.close(root_fd)
+            if root_fd is not None:
+                os.close(root_fd)
             raise
-        return root_fd
+        finally:
+            os.close(parent_fd)
+
+    def _open_parent_directory(self) -> tuple[int, str]:
+        parts = self._root.parts
+        if not self._root.is_absolute() or len(parts) < 2:
+            raise _CapabilityError("Artifact root must be an absolute directory.")
+
+        directory_fd = self._open_directory(parts[0])
+        try:
+            for component in parts[1:-1]:
+                try:
+                    next_fd = self._open_directory(component, directory_fd)
+                except FileNotFoundError:
+                    os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                    next_fd = self._open_directory(component, directory_fd)
+                os.close(directory_fd)
+                directory_fd = next_fd
+            return directory_fd, parts[-1]
+        except BaseException:
+            os.close(directory_fd)
+            raise
+
+    @staticmethod
+    def _open_directory(name: str, directory_fd: int | None = None) -> int:
+        if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+            raise _CapabilityError("Secure descriptor operations are unavailable.")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        if directory_fd is None:
+            return os.open(name, flags)
+        return os.open(name, flags, dir_fd=directory_fd)
+
+    @staticmethod
+    def _root_path_from_fd(root_fd: int) -> Path:
+        if fcntl is None or not hasattr(fcntl, "F_GETPATH"):
+            raise _CapabilityError("Descriptor paths are unavailable.")
+        raw_path = fcntl.fcntl(root_fd, fcntl.F_GETPATH, b"\0" * _PATH_MAX)
+        path = Path(os.fsdecode(raw_path).split("\0", maxsplit=1)[0])
+        if not path.is_absolute():
+            raise _CapabilityError("Descriptor path is invalid.")
+        return path
 
     def _clear_runtime_files(self, root_fd: int) -> None:
         for filename in os.listdir(root_fd):
@@ -181,9 +264,7 @@ class ArtifactStore:
 
     @staticmethod
     def _write_new_file(root_fd: int, filename: str, data: bytes) -> None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         descriptor = os.open(filename, flags, 0o600, dir_fd=root_fd)
         try:
             with os.fdopen(descriptor, "wb") as artifact_file:
@@ -204,11 +285,8 @@ class ArtifactStore:
         if not stat.S_ISREG(mode):
             return _UNSAFE
 
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
         try:
-            descriptor = os.open(filename, flags, dir_fd=root_fd)
+            descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
         except FileNotFoundError:
             return _MISSING
         except OSError as error:
@@ -225,13 +303,13 @@ class ArtifactStore:
             await asyncio.to_thread(
                 self._unlink_file, self._require_root_fd(), artifact.path.name
             )
-        except OSError as error:
+        except _storage_errors() as error:
             raise _artifact_failure("The artifact could not be deleted.") from error
 
     async def _remove_after_write_failure(self, root_fd: int, filename: str) -> None:
         try:
             await asyncio.to_thread(self._unlink_file, root_fd, filename)
-        except OSError as error:
+        except _storage_errors() as error:
             raise _artifact_failure("The artifact could not be stored.") from error
 
     @staticmethod
@@ -243,6 +321,10 @@ class ArtifactStore:
         if self._root_fd is None:
             raise _artifact_failure("Temporary artifact storage is unavailable.")
         return self._root_fd
+
+
+def _storage_errors() -> tuple[type[BaseException], ...]:
+    return (OSError, AttributeError, NotImplementedError, TypeError, _CapabilityError)
 
 
 def _artifact_failure(message: str) -> AppError:
