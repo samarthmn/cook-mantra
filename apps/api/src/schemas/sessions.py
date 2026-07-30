@@ -8,6 +8,7 @@ from domain.recipe_options import RecipePreferences
 from domain.sessions import SessionStage
 from schemas.ingredients import IngredientResponse
 from schemas.recipe_options import RecipeOptionResponse
+from schemas.recipes import CompleteRecipeResponse, RecipeFailureResponse
 
 INGREDIENT_REVIEW_RESPONSE_EXAMPLES = {
     "reviewedIngredients": {
@@ -76,6 +77,8 @@ class SessionResponse(BaseModel):
     ingredients: list[IngredientResponse]
     preferences: RecipePreferences
     recipe_options: list[RecipeOptionResponse]
+    complete_recipes: dict[str, CompleteRecipeResponse]
+    recipe_failures: dict[str, RecipeFailureResponse]
     excluded_recipe_names: set[str]
     option_batch_number: int
     warnings: list[str]
