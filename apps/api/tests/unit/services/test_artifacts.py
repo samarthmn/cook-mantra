@@ -86,6 +86,100 @@ async def test_require_returns_isolated_metadata_and_missing_artifacts_are_not_f
 
 
 @pytest.mark.asyncio
+async def test_read_returns_bytes_and_media_type_for_the_owner(
+    project_tmp_path: Path,
+) -> None:
+    store = ArtifactStore(project_tmp_path / "owner-read", ttl_seconds=60)
+    await store.startup()
+    artifact = await store.write(
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+    )
+
+    try:
+        content = await store.read(artifact.id, owner_session_id="session-1")
+    finally:
+        await store.shutdown()
+
+    assert content == (b"image-bytes", "image/png")
+
+
+@pytest.mark.asyncio
+async def test_read_hides_an_artifact_from_a_different_session(
+    project_tmp_path: Path,
+) -> None:
+    store = ArtifactStore(project_tmp_path / "foreign-owner-read", ttl_seconds=60)
+    await store.startup()
+    artifact = await store.write(
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+    )
+
+    try:
+        with pytest.raises(AppError) as raised:
+            await store.read(artifact.id, owner_session_id="session-2")
+
+        assert raised.value.code is ErrorCode.RESOURCE_NOT_FOUND
+        assert await store.read(artifact.id, owner_session_id="session-1") == (
+            b"image-bytes",
+            "image/png",
+        )
+    finally:
+        await store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_read_never_follows_a_leaf_replaced_after_lookup(
+    project_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = project_tmp_path / "descriptor-read"
+    outside = project_tmp_path / "outside.png"
+    outside.write_bytes(b"outside")
+    store = ArtifactStore(root, ttl_seconds=60)
+    await store.startup()
+    artifact = await store.write(
+        b"owned",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+    )
+    actual_to_thread = asyncio.to_thread
+    replaced = False
+
+    async def replace_before_file_read(function, /, *args, **kwargs):
+        nonlocal replaced
+        if getattr(function, "__name__", "") in {
+            "read_bytes",
+            "_read_regular_file",
+        }:
+            artifact.path.unlink()
+            artifact.path.symlink_to(outside)
+            replaced = True
+        return await actual_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(
+        artifacts_service.asyncio,
+        "to_thread",
+        replace_before_file_read,
+    )
+
+    try:
+        with pytest.raises(AppError) as raised:
+            await store.read(artifact.id, owner_session_id="session-1")
+
+        assert replaced is True
+        assert raised.value.code is ErrorCode.RESOURCE_NOT_FOUND
+        assert outside.read_bytes() == b"outside"
+    finally:
+        await store.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_delete_for_session_only_removes_owned_artifacts(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()

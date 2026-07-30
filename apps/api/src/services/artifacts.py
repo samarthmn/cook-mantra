@@ -31,6 +31,10 @@ class _CapabilityError(Exception):
     """Raised when secure descriptor operations are unavailable."""
 
 
+class _UnsafeArtifactError(Exception):
+    """Raised when an opened artifact is not a regular file."""
+
+
 class ArtifactStore:
     """Store runtime-owned artifacts beneath one dedicated directory."""
 
@@ -185,6 +189,49 @@ class ArtifactStore:
             raise _artifact_failure("The artifact could not be accessed.") from error
         artifact.last_accessed_at = datetime.now(UTC)
         return artifact.model_copy(deep=True)
+
+    async def read(
+        self,
+        artifact_id: str,
+        owner_session_id: str,
+    ) -> tuple[bytes, str]:
+        """Return artifact bytes and media type for the owning session."""
+        return await self._run_exclusive(
+            lambda: self._read(artifact_id, owner_session_id)
+        )
+
+    async def _read(
+        self,
+        artifact_id: str,
+        owner_session_id: str,
+    ) -> tuple[bytes, str]:
+        root_fd = self._require_root_fd()
+        artifact = self._artifacts.get(artifact_id)
+        if artifact is None:
+            raise _artifact_not_found()
+        if artifact.owner_session_id != owner_session_id:
+            raise _artifact_not_found()
+        try:
+            data = await asyncio.to_thread(
+                self._read_regular_file,
+                root_fd,
+                artifact.path.name,
+            )
+        except FileNotFoundError:
+            del self._artifacts[artifact_id]
+            raise _artifact_not_found() from None
+        except _UnsafeArtifactError:
+            del self._artifacts[artifact_id]
+            raise _artifact_not_found() from None
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                del self._artifacts[artifact_id]
+                raise _artifact_not_found() from None
+            raise _artifact_failure("The artifact could not be accessed.") from error
+        except _storage_errors() as error:
+            raise _artifact_failure("The artifact could not be accessed.") from error
+        artifact.last_accessed_at = datetime.now(UTC)
+        return data, artifact.media_type
 
     async def delete(self, artifact_id: str) -> None:
         """Delete one artifact when it belongs to this runtime namespace."""
@@ -380,6 +427,20 @@ class ArtifactStore:
             with suppress(FileNotFoundError):
                 os.unlink(filename, dir_fd=root_fd)
             raise
+
+    @staticmethod
+    def _read_regular_file(root_fd: int, filename: str) -> bytes:
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        descriptor = os.open(filename, flags, dir_fd=root_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise _UnsafeArtifactError
+            with os.fdopen(descriptor, "rb", closefd=False) as artifact_file:
+                return artifact_file.read()
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _inspect_file(root_fd: int, filename: str) -> str:

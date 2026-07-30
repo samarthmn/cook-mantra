@@ -1,8 +1,8 @@
 """LangGraph workflow for atomically extracting review ingredients."""
 
-import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import NotRequired, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -21,6 +21,10 @@ from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
+type IngredientExtractionRunner = Callable[
+    [str, str, ProgressReporter],
+    Awaitable[dict[str, object]],
+]
 
 
 class IngredientExtractionState(TypedDict):
@@ -71,13 +75,15 @@ def build_ingredient_extraction_graph(
         state: IngredientExtractionState,
     ) -> dict[str, object]:
         session = await dependencies.session_store.require(state["session_id"])
-        artifact = await dependencies.artifact_store.require(state["artifact_id"])
-        image = await asyncio.to_thread(artifact.path.read_bytes)
+        image, media_type = await dependencies.artifact_store.read(
+            state["artifact_id"],
+            owner_session_id=session.id,
+        )
         await dependencies.progress(15)
         return {
             "session": session,
             "image": image,
-            "media_type": artifact.media_type,
+            "media_type": media_type,
         }
 
     async def extract(
@@ -116,8 +122,8 @@ def build_ingredient_extraction_graph(
                 "warnings": state["warnings"],
             }
         )
-        stored = await dependencies.session_store.replace(replacement)
         await dependencies.progress(100)
+        stored = await dependencies.session_store.replace(replacement)
         return {
             "ingredients": stored.ingredients,
             "warnings": stored.warnings,
@@ -140,6 +146,29 @@ def build_ingredient_extraction_graph(
     return builder.compile()
 
 
+@dataclass(frozen=True, slots=True)
+class DevelopmentIngredientExtractionRuntime:
+    """Own the dependencies, graph, and artifact lifecycle used by development."""
+
+    dependencies: ExtractionDependencies
+    graph: CompiledStateGraph = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "graph",
+            build_ingredient_extraction_graph(self.dependencies),
+        )
+
+    async def startup(self) -> None:
+        """Start the owned artifact store before seeding or invoking the graph."""
+        await self.dependencies.artifact_store.startup()
+
+    async def shutdown(self) -> None:
+        """Release the owned artifact store after development use."""
+        await self.dependencies.artifact_store.shutdown()
+
+
 def build_real_extraction_dependencies() -> ExtractionDependencies:
     """Wire the real extractor and temporary stores for development use."""
     settings = Settings(_env_file=None)
@@ -153,9 +182,17 @@ def build_real_extraction_dependencies() -> ExtractionDependencies:
     )
 
 
+@lru_cache
+def get_development_ingredient_extraction_runtime() -> (
+    DevelopmentIngredientExtractionRuntime
+):
+    """Return the stable, inspectable runtime used by the development factory."""
+    return DevelopmentIngredientExtractionRuntime(build_real_extraction_dependencies())
+
+
 def build_development_ingredient_extraction_graph() -> CompiledStateGraph:
     """Build the real dependency graph exposed to LangGraph development tools."""
-    return build_ingredient_extraction_graph(build_real_extraction_dependencies())
+    return get_development_ingredient_extraction_runtime().graph
 
 
 async def run_ingredient_extraction(
@@ -163,11 +200,11 @@ async def run_ingredient_extraction(
     artifact_id: str,
     progress: ProgressReporter,
     *,
-    dependencies: ExtractionDependencies | None = None,
+    dependencies: ExtractionDependencies,
 ) -> dict[str, object]:
-    """Run extraction with production wiring or explicitly injected dependencies."""
+    """Run extraction with explicitly supplied application dependencies."""
     resolved_dependencies = replace(
-        dependencies or build_real_extraction_dependencies(),
+        dependencies,
         progress=progress,
     )
     graph = build_ingredient_extraction_graph(resolved_dependencies)
@@ -178,3 +215,23 @@ async def run_ingredient_extraction(
         }
     )
     return dict(result)
+
+
+def build_ingredient_extraction_runner(
+    dependencies: ExtractionDependencies,
+) -> IngredientExtractionRunner:
+    """Bind application-owned dependencies to a three-argument job runner."""
+
+    async def run(
+        session_id: str,
+        artifact_id: str,
+        progress: ProgressReporter,
+    ) -> dict[str, object]:
+        return await run_ingredient_extraction(
+            session_id,
+            artifact_id,
+            progress,
+            dependencies=dependencies,
+        )
+
+    return run
