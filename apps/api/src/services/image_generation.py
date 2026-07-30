@@ -152,7 +152,7 @@ class OllamaImageGenerator:
 def _parse_event(line: str) -> dict[str, object] | None:
     try:
         event = json.loads(line)
-    except (json.JSONDecodeError, UnicodeError):
+    except (ValueError, UnicodeError):
         return None
     return event if isinstance(event, dict) else None
 
@@ -165,16 +165,18 @@ def _event_progress(event: dict[str, object]) -> int | None:
         or isinstance(total, bool)
         or not isinstance(completed, (int, float))
         or not isinstance(total, (int, float))
-        or not math.isfinite(completed)
-        or not math.isfinite(total)
-        or total <= 0
     ):
         return None
 
-    percent = completed / total * 100
-    if not math.isfinite(percent):
-        return None
-    return int(max(0, min(percent, 99)))
+    try:
+        if not math.isfinite(completed) or not math.isfinite(total) or total <= 0:
+            return None
+        percent = completed / total * 100
+        if not math.isfinite(percent):
+            return None
+        return int(max(0, min(percent, 99)))
+    except OverflowError:
+        raise _artifact_failure() from None
 
 
 def _decode_and_verify(encoded_image: str) -> GeneratedImage | None:

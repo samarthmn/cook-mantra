@@ -377,6 +377,71 @@ async def test_invalid_provider_output_is_a_safe_non_retryable_artifact_failure(
 
 
 @pytest.mark.asyncio
+async def test_parser_rejected_integer_is_a_safe_artifact_failure() -> None:
+    provider_number = "9" * 5_000
+    transport = StreamingJsonTransport(
+        [(f'{{"completed":{provider_number},"total":1,"done":false}}\n').encode()]
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        generator = OllamaImageGenerator(
+            base_url="http://ollama.test",
+            model="configured-image-model",
+            client=client,
+        )
+
+        with pytest.raises(AppError) as raised:
+            await generator.generate(
+                ImageGenerationRequest(prompt="Tomato curry"),
+                no_progress,
+            )
+
+    assert app_error_snapshot(raised.value) == {
+        "code": ErrorCode.ARTIFACT_FAILURE,
+        "message": "The generated image artifact is invalid.",
+        "status_code": 502,
+        "retryable": False,
+        "details": {},
+    }
+    assert provider_number not in str(raised.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("huge_field", ["completed", "total"])
+async def test_float_overflowing_progress_is_a_safe_artifact_failure(
+    huge_field: str,
+) -> None:
+    provider_number = "9" * 400
+    completed = provider_number if huge_field == "completed" else "1"
+    total = provider_number if huge_field == "total" else "1"
+    transport = StreamingJsonTransport(
+        [(f'{{"completed":{completed},"total":{total},"done":false}}\n').encode()]
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        generator = OllamaImageGenerator(
+            base_url="http://ollama.test",
+            model="configured-image-model",
+            client=client,
+        )
+
+        with pytest.raises(AppError) as raised:
+            await generator.generate(
+                ImageGenerationRequest(prompt="Tomato curry"),
+                no_progress,
+            )
+
+    assert app_error_snapshot(raised.value) == {
+        "code": ErrorCode.ARTIFACT_FAILURE,
+        "message": "The generated image artifact is invalid.",
+        "status_code": 502,
+        "retryable": False,
+        "details": {},
+    }
+    assert provider_number not in str(raised.value)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_location", ["request", "stream"])
 async def test_network_failure_is_mapped_to_ollama_unavailable(
     failure_location: str,
