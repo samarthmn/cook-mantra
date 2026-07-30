@@ -419,3 +419,182 @@ async def test_startup_maps_unimplemented_descriptor_operations_to_artifact_fail
             await store.startup()
 
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+
+
+@pytest.mark.asyncio
+async def test_shutdown_records_a_close_failure_without_retrying_the_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    await store.startup()
+    root_fd = store._root_fd
+
+    assert root_fd is not None
+    actual_close = os.close
+    close_attempts: list[int] = []
+
+    def fail_root_close(descriptor: int) -> None:
+        close_attempts.append(descriptor)
+        if descriptor == root_fd:
+            raise OSError(errno.EIO, "close failed")
+        actual_close(descriptor)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(artifacts_service.os, "close", fail_root_close)
+        with pytest.raises(AppError) as first:
+            await store.shutdown()
+        with pytest.raises(AppError) as second:
+            await store.shutdown()
+
+    assert first.value.code is ErrorCode.ARTIFACT_FAILURE
+    assert second.value.code is ErrorCode.ARTIFACT_FAILURE
+    assert close_attempts == [root_fd]
+    assert root_fd in store._unresolved_close_fds
+    actual_close(root_fd)
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_publish_state_when_closing_previous_descriptor_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    await store.startup()
+    artifact = await store.write(
+        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+    )
+    old_fd = store._root_fd
+    new_fd: int | None = None
+    actual_open_and_clear = store._open_and_clear_root
+    actual_close = os.close
+
+    assert old_fd is not None
+
+    def capture_new_descriptor() -> tuple[int, Path]:
+        nonlocal new_fd
+        new_fd, root_path = actual_open_and_clear()
+        return new_fd, root_path
+
+    def fail_old_close(descriptor: int) -> None:
+        if descriptor == old_fd:
+            raise OSError(errno.EIO, "close failed")
+        actual_close(descriptor)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_open_and_clear_root", capture_new_descriptor)
+        patch.setattr(artifacts_service.os, "close", fail_old_close)
+        with pytest.raises(AppError) as raised:
+            await store.startup()
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+    assert store._root_fd is None
+    assert artifact.id in store._artifacts
+    assert old_fd in store._unresolved_close_fds
+    assert new_fd is not None
+    with pytest.raises(OSError):
+        os.fstat(new_fd)
+    actual_close(old_fd)
+
+
+def test_open_and_clear_root_closes_root_when_parent_close_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    store = ArtifactStore(tmp_path / "artifacts", ttl_seconds=60)
+    opened_root_fd: int | None = None
+    actual_open = os.open
+    actual_close = os.close
+
+    def return_parent() -> tuple[int, str]:
+        return parent_fd, "artifacts"
+
+    def capture_root_open(*args: object, **kwargs: object) -> int:
+        nonlocal opened_root_fd
+        descriptor = actual_open(*args, **kwargs)
+        if args[0] == "artifacts":
+            opened_root_fd = descriptor
+        return descriptor
+
+    def fail_parent_close(descriptor: int) -> None:
+        if descriptor == parent_fd:
+            raise OSError(errno.EIO, "parent close failed")
+        actual_close(descriptor)
+
+    monkeypatch.setattr(store, "_open_parent_directory", return_parent)
+    monkeypatch.setattr(artifacts_service.os, "open", capture_root_open)
+    monkeypatch.setattr(artifacts_service.os, "close", fail_parent_close)
+
+    with pytest.raises(OSError, match="parent close failed"):
+        store._open_and_clear_root()
+
+    assert opened_root_fd is not None
+    with pytest.raises(OSError):
+        os.fstat(opened_root_fd)
+    actual_close(parent_fd)
+
+
+@pytest.mark.asyncio
+async def test_startup_tolerates_a_concurrent_safe_intermediate_directory_creator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intermediate = tmp_path / "concurrent-parent"
+    store = ArtifactStore(intermediate / "artifacts", ttl_seconds=60)
+    original_open_directory = ArtifactStore._open_directory
+    injected = False
+
+    def create_then_report_missing(
+        name: str,
+        directory_fd: int | None = None,
+    ) -> int:
+        nonlocal injected
+        if name == intermediate.name and directory_fd is not None and not injected:
+            injected = True
+            intermediate.mkdir()
+            raise FileNotFoundError
+        return original_open_directory(name, directory_fd)
+
+    monkeypatch.setattr(
+        ArtifactStore, "_open_directory", staticmethod(create_then_report_missing)
+    )
+
+    await store.startup()
+
+    assert intermediate.is_dir()
+    await store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_rejects_a_concurrent_intermediate_symlink_creator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    intermediate = tmp_path / "concurrent-parent"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store = ArtifactStore(intermediate / "artifacts", ttl_seconds=60)
+    original_open_directory = ArtifactStore._open_directory
+    injected = False
+
+    def symlink_then_report_missing(
+        name: str,
+        directory_fd: int | None = None,
+    ) -> int:
+        nonlocal injected
+        if name == intermediate.name and directory_fd is not None and not injected:
+            injected = True
+            intermediate.symlink_to(outside, target_is_directory=True)
+            raise FileNotFoundError
+        return original_open_directory(name, directory_fd)
+
+    monkeypatch.setattr(
+        ArtifactStore, "_open_directory", staticmethod(symlink_then_report_missing)
+    )
+
+    with pytest.raises(AppError) as raised:
+        await store.startup()
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+    assert not (outside / "artifacts").exists()

@@ -35,6 +35,7 @@ class ArtifactStore:
     def __init__(self, artifact_root: Path, ttl_seconds: int) -> None:
         self._root = artifact_root.absolute()
         self._root_fd: int | None = None
+        self._unresolved_close_fds: set[int] = set()
         self._ttl_seconds = ttl_seconds
         self._artifacts: dict[str, Artifact] = {}
         self._lock = asyncio.Lock()
@@ -42,6 +43,7 @@ class ArtifactStore:
     async def startup(self) -> None:
         """Prepare an empty artifact namespace for this API process."""
         async with self._lock:
+            self._raise_if_close_is_unresolved()
             try:
                 root_fd, root_path = await asyncio.to_thread(self._open_and_clear_root)
             except _storage_errors() as error:
@@ -50,31 +52,38 @@ class ArtifactStore:
                 ) from error
 
             old_root_fd = self._root_fd
-            self._root_fd = root_fd
-            self._root = root_path
-            self._artifacts.clear()
             if old_root_fd is not None:
                 try:
                     await asyncio.to_thread(os.close, old_root_fd)
                 except OSError as error:
+                    self._root_fd = None
+                    self._unresolved_close_fds.add(old_root_fd)
+                    await self._close_unpublished_root(root_fd)
                     raise _artifact_failure(
                         "Temporary artifact storage is unavailable."
                     ) from error
 
+            self._root_fd = root_fd
+            self._root = root_path
+            self._artifacts.clear()
+
     async def shutdown(self) -> None:
         """Release the owned directory descriptor when the store stops."""
         async with self._lock:
+            self._raise_if_close_is_unresolved()
             root_fd = self._root_fd
-            self._root_fd = None
-            self._artifacts.clear()
             if root_fd is None:
                 return
             try:
                 await asyncio.to_thread(os.close, root_fd)
             except OSError as error:
+                self._root_fd = None
+                self._unresolved_close_fds.add(root_fd)
                 raise _artifact_failure(
                     "Temporary artifact storage is unavailable."
                 ) from error
+            self._root_fd = None
+            self._artifacts.clear()
 
     async def write(
         self,
@@ -207,13 +216,18 @@ class ArtifactStore:
             root_fd = self._open_directory(root_name, parent_fd)
             root_path = self._root_path_from_fd(root_fd)
             self._clear_runtime_files(root_fd)
-            return root_fd, root_path
         except BaseException:
             if root_fd is not None:
-                os.close(root_fd)
+                self._close_after_failure(root_fd)
+            self._close_after_failure(parent_fd)
             raise
-        finally:
+        try:
             os.close(parent_fd)
+        except OSError:
+            self._unresolved_close_fds.add(parent_fd)
+            self._close_after_failure(root_fd)
+            raise
+        return root_fd, root_path
 
     def _open_parent_directory(self) -> tuple[int, str]:
         parts = self._root.parts
@@ -226,7 +240,8 @@ class ArtifactStore:
                 try:
                     next_fd = self._open_directory(component, directory_fd)
                 except FileNotFoundError:
-                    os.mkdir(component, mode=0o700, dir_fd=directory_fd)
+                    with suppress(FileExistsError):
+                        os.mkdir(component, mode=0o700, dir_fd=directory_fd)
                     next_fd = self._open_directory(component, directory_fd)
                 os.close(directory_fd)
                 directory_fd = next_fd
@@ -318,9 +333,26 @@ class ArtifactStore:
             os.unlink(filename, dir_fd=root_fd)
 
     def _require_root_fd(self) -> int:
+        self._raise_if_close_is_unresolved()
         if self._root_fd is None:
             raise _artifact_failure("Temporary artifact storage is unavailable.")
         return self._root_fd
+
+    async def _close_unpublished_root(self, root_fd: int) -> None:
+        try:
+            await asyncio.to_thread(os.close, root_fd)
+        except OSError:
+            self._unresolved_close_fds.add(root_fd)
+
+    def _close_after_failure(self, descriptor: int) -> None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            self._unresolved_close_fds.add(descriptor)
+
+    def _raise_if_close_is_unresolved(self) -> None:
+        if self._unresolved_close_fds:
+            raise _artifact_failure("Temporary artifact storage is unavailable.")
 
 
 def _storage_errors() -> tuple[type[BaseException], ...]:
