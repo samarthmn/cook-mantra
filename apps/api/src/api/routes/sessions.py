@@ -16,11 +16,18 @@ from api.dependencies import (
     get_upload_validator,
 )
 from domain.jobs import JobOperation
+from domain.session_service import confirm_ingredients, review_ingredients
 from domain.sessions import SessionStage
 from orchestration.graphs.ingredient_extraction import IngredientExtractionRunner
 from orchestration.job_runner import JobRunner
 from repositories.session_store import SessionStore
-from schemas.sessions import SessionCreatedResponse, SessionResponse
+from schemas.ingredients import IngredientReviewRequest
+from schemas.sessions import (
+    INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES,
+    INGREDIENT_REVIEW_RESPONSE_EXAMPLES,
+    SessionCreatedResponse,
+    SessionResponse,
+)
 from services.artifacts import ArtifactStore
 from services.uploads import ImageUploadValidator
 
@@ -95,6 +102,59 @@ async def get_session(
 ) -> SessionResponse:
     """Return the current public state of one cooking session."""
     return SessionResponse.model_validate(await session_store.require(session_id))
+
+
+@router.put(
+    "/{session_id}/ingredients",
+    response_model=SessionResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "content": {
+                "application/json": {
+                    "examples": INGREDIENT_REVIEW_RESPONSE_EXAMPLES,
+                }
+            }
+        }
+    },
+)
+async def update_ingredients(
+    session_id: str,
+    request: IngredientReviewRequest,
+    session_store: Annotated[SessionStore, Depends(get_session_store)],
+) -> SessionResponse:
+    """Replace the user-editable ingredient review list."""
+    session = await session_store.require(session_id)
+    reviewed = review_ingredients(session, request.ingredients)
+    committed = await session_store.replace(
+        reviewed.model_copy(update={"updated_at": session.updated_at})
+    )
+    return SessionResponse.model_validate(committed)
+
+
+@router.post(
+    "/{session_id}/ingredients/confirm",
+    response_model=SessionResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "content": {
+                "application/json": {
+                    "examples": INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES,
+                }
+            }
+        }
+    },
+)
+async def confirm_session_ingredients(
+    session_id: str,
+    session_store: Annotated[SessionStore, Depends(get_session_store)],
+) -> SessionResponse:
+    """Confirm the selected ingredients for recipe generation."""
+    session = await session_store.require(session_id)
+    confirmed = confirm_ingredients(session)
+    committed = await session_store.replace(
+        confirmed.model_copy(update={"updated_at": session.updated_at})
+    )
+    return SessionResponse.model_validate(committed)
 
 
 async def _preserving_cleanup(
