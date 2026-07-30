@@ -21,6 +21,7 @@ from domain.sessions import SessionStage
 from orchestration.graphs.ingredient_extraction import IngredientExtractionRunner
 from orchestration.job_runner import JobRunner
 from repositories.session_store import SessionStore
+from schemas.errors import ErrorResponse
 from schemas.ingredients import IngredientReviewRequest
 from schemas.sessions import (
     INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES,
@@ -114,7 +115,19 @@ async def get_session(
                     "examples": INGREDIENT_REVIEW_RESPONSE_EXAMPLES,
                 }
             }
-        }
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorResponse,
+            "description": "Session not found.",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "Session stage conflict.",
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorResponse,
+            "description": "Invalid ingredient review request.",
+        },
     },
 )
 async def update_ingredients(
@@ -141,7 +154,19 @@ async def update_ingredients(
                     "examples": INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES,
                 }
             }
-        }
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorResponse,
+            "description": "Session not found.",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "Session stage conflict.",
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorResponse,
+            "description": "No ingredient selected.",
+        },
     },
 )
 async def confirm_session_ingredients(

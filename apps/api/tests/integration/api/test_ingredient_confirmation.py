@@ -296,3 +296,31 @@ def test_ingredient_route_response_examples_show_every_source(
             ingredient["source"] for ingredient in example["value"]["ingredients"]
         }
         assert sources == {"detected", "pantry_suggestion", "user_added"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("put", "/api/v1/sessions/{session_id}/ingredients"),
+        ("post", "/api/v1/sessions/{session_id}/ingredients/confirm"),
+    ],
+)
+def test_ingredient_route_openapi_errors_use_the_public_envelope(
+    client: TestClient,
+    method: str,
+    path: str,
+) -> None:
+    responses = client.app.openapi()["paths"][path][method]["responses"]
+    error_schemas = {
+        status_code: responses.get(status_code, {})
+        .get("content", {})
+        .get("application/json", {})
+        .get("schema")
+        for status_code in ("404", "409", "422")
+    }
+
+    assert error_schemas == {
+        "404": {"$ref": "#/components/schemas/ErrorResponse"},
+        "409": {"$ref": "#/components/schemas/ErrorResponse"},
+        "422": {"$ref": "#/components/schemas/ErrorResponse"},
+    }
