@@ -6,7 +6,9 @@ Use the root `tmp/` directory for generated logs, downloads, screenshots, and ot
 
 ## Build, Test, and Development Commands
 
-## Coding Style & Naming Conventions
+## Coding Rules, Style & Naming Conventions
+
+Go through the `docs/` and read the necessary files which are required for the coding rules.
 
 Follow the formatter, linter and prettier. Until language-specific standards exist, use prettier config files. Name files consistently within each language ecosystem—for example, `kebab-case` for all business logic and backend stuff, `PascalCase` front end components, and `*.test.ts` tests.
 
@@ -22,4 +24,4 @@ Pull requests should explain the problem and solution, list verification command
 
 ## Security & Configuration
 
-Never commit credentials, API keys, or local environment files. Provide redacted examples such as `example.env`, and document every required variable. Never read any environment variable files (which are `.*.env`) you are not allowed to read / print / console the variables, the only reference that you will be having of the environment variables will be present in `example.env` file.
+Never commit credentials, API keys, or local environment files. Provide redacted examples such as `example.env`, and document every required variable. Never read any environment variable files (which are `.*.env` or `.env`) you are not allowed to read / print / console the variables, the only reference that you will be having of the environment variables will be present in `example.env` file.
