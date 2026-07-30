@@ -14,6 +14,7 @@ from orchestration.graphs.ingredient_extraction import (
 )
 from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
+from services.concurrency import ModelCallLimiter
 
 
 @dataclass
@@ -42,6 +43,26 @@ class FakeExtractor:
         return self._result
 
 
+class ConcurrencyProbeExtractor:
+    def __init__(self) -> None:
+        self.active = 0
+        self.maximum_active = 0
+        self.first_call_started = asyncio.Event()
+        self.release_calls = asyncio.Event()
+
+    async def extract(self, image: bytes, media_type: str) -> ExtractionResult:
+        assert image == b"ingredient-image"
+        assert media_type == "image/png"
+        self.active += 1
+        self.maximum_active = max(self.maximum_active, self.active)
+        self.first_call_started.set()
+        try:
+            await self.release_calls.wait()
+        finally:
+            self.active -= 1
+        return ExtractionResult(detected=[{"name": "Potato", "confidence": 0.88}])
+
+
 def test_development_factory_uses_the_stable_exposed_runtime() -> None:
     runtime = extraction_graph.get_development_ingredient_extraction_runtime()
 
@@ -67,6 +88,7 @@ async def test_development_runtime_lifecycle_allows_seeding_and_invocation(
             ),
             session_store,
             artifact_store,
+            ModelCallLimiter(max_concurrent_calls=2),
         )
     )
 
@@ -143,6 +165,7 @@ async def test_graph_combines_detection_and_pantry_and_persists_final_review(
             extractor,
             extraction_context.session_store,
             extraction_context.artifact_store,
+            ModelCallLimiter(max_concurrent_calls=2),
             progress=record_progress,
         )
     )
@@ -173,6 +196,70 @@ async def test_graph_combines_detection_and_pantry_and_persists_final_review(
 
 
 @pytest.mark.asyncio
+async def test_shared_model_limiter_caps_concurrent_graph_extractions(
+    extraction_context: ExtractionContext,
+) -> None:
+    second_session = await extraction_context.session_store.create()
+    second_artifact = await extraction_context.artifact_store.write(
+        b"ingredient-image",
+        "image/png",
+        ".png",
+        owner_session_id=second_session.id,
+    )
+    extractor = ConcurrencyProbeExtractor()
+    loaded_artifacts = 0
+    both_artifacts_loaded = asyncio.Event()
+
+    async def record_progress(value: int) -> None:
+        nonlocal loaded_artifacts
+        if value == 15:
+            loaded_artifacts += 1
+            if loaded_artifacts == 2:
+                both_artifacts_loaded.set()
+
+    graph = build_ingredient_extraction_graph(
+        ExtractionDependencies(
+            extractor,
+            extraction_context.session_store,
+            extraction_context.artifact_store,
+            model_call_limiter=ModelCallLimiter(max_concurrent_calls=1),
+            progress=record_progress,
+        )
+    )
+    first = asyncio.create_task(
+        graph.ainvoke(
+            {
+                "session_id": extraction_context.session.id,
+                "artifact_id": extraction_context.artifact_id,
+            }
+        )
+    )
+
+    await extractor.first_call_started.wait()
+    second = asyncio.create_task(
+        graph.ainvoke(
+            {
+                "session_id": second_session.id,
+                "artifact_id": second_artifact.id,
+            }
+        )
+    )
+    await both_artifacts_loaded.wait()
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    try:
+        assert extractor.active == 1
+        extractor.release_calls.set()
+        await asyncio.gather(first, second)
+    finally:
+        extractor.release_calls.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+    assert extractor.maximum_active == 1
+
+
+@pytest.mark.asyncio
 async def test_bound_runner_reuses_application_owned_dependencies(
     extraction_context: ExtractionContext,
 ) -> None:
@@ -192,6 +279,7 @@ async def test_bound_runner_reuses_application_owned_dependencies(
         ),
         extraction_context.session_store,
         extraction_context.artifact_store,
+        ModelCallLimiter(max_concurrent_calls=2),
     )
 
     runner = extraction_graph.build_ingredient_extraction_runner(dependencies)
@@ -227,6 +315,7 @@ async def test_extractor_failure_preserves_the_unmodified_session(
             FakeExtractor(error=RuntimeError("vision model failed")),
             extraction_context.session_store,
             extraction_context.artifact_store,
+            ModelCallLimiter(max_concurrent_calls=2),
             progress=record_progress,
         )
     )
@@ -261,6 +350,7 @@ async def test_graph_rejects_an_artifact_owned_by_another_session(
             ),
             extraction_context.session_store,
             extraction_context.artifact_store,
+            ModelCallLimiter(max_concurrent_calls=2),
         )
     )
 
@@ -296,6 +386,7 @@ async def test_final_progress_failure_preserves_the_unmodified_session(
             ),
             extraction_context.session_store,
             extraction_context.artifact_store,
+            ModelCallLimiter(max_concurrent_calls=2),
             progress=fail_at_completion,
         )
     )
@@ -337,6 +428,7 @@ async def test_stale_final_save_does_not_report_completion(
             ),
             extraction_context.session_store,
             extraction_context.artifact_store,
+            ModelCallLimiter(max_concurrent_calls=2),
             progress=make_session_stale,
         )
     )

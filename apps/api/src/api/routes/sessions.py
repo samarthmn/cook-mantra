@@ -48,7 +48,7 @@ async def create_session(
     try:
         validated = await validator.read(image)
     finally:
-        await image.close()
+        await _run_cancellation_safe(image.close())
 
     session = await session_store.create(SessionStage.EXTRACTING)
     artifact = None
@@ -65,19 +65,23 @@ async def create_session(
             partial(extraction_runner, session.id, artifact.id),
         )
     except asyncio.CancelledError:
-        await _cancellation_safe_rollback(
-            session_store,
-            artifact_store,
-            session_id=session.id,
-            artifact_id=artifact.id if artifact is not None else None,
+        await _run_cancellation_safe(
+            _rollback_created_upload(
+                session_store,
+                artifact_store,
+                session_id=session.id,
+                artifact_id=artifact.id if artifact is not None else None,
+            )
         )
         raise
     except Exception:
-        await _rollback_created_upload(
-            session_store,
-            artifact_store,
-            session_id=session.id,
-            artifact_id=artifact.id if artifact is not None else None,
+        await _run_cancellation_safe(
+            _rollback_created_upload(
+                session_store,
+                artifact_store,
+                session_id=session.id,
+                artifact_id=artifact.id if artifact is not None else None,
+            )
         )
         raise
 
@@ -132,24 +136,16 @@ async def _rollback_created_upload(
     )
 
 
-async def _cancellation_safe_rollback(
-    session_store: SessionStore,
-    artifact_store: ArtifactStore,
-    *,
-    session_id: str,
-    artifact_id: str | None,
-) -> None:
-    cleanup_task = asyncio.create_task(
-        _rollback_created_upload(
-            session_store,
-            artifact_store,
-            session_id=session_id,
-            artifact_id=artifact_id,
-        )
-    )
-    while not cleanup_task.done():
+async def _run_cancellation_safe(operation: Awaitable[None]) -> None:
+    """Drain one owned operation before propagating request cancellation."""
+    operation_task = asyncio.create_task(operation)
+    cancellation: asyncio.CancelledError | None = None
+    while not operation_task.done():
         try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
+            await asyncio.shield(operation_task)
+        except asyncio.CancelledError as error:
+            cancellation = error
             continue
-    cleanup_task.result()
+    operation_task.result()
+    if cancellation is not None:
+        raise cancellation

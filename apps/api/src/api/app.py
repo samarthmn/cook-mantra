@@ -70,12 +70,15 @@ def create_app(
     )
     model_call_limiter = ModelCallLimiter(resolved_settings.max_concurrent_model_calls)
     upload_validator = ImageUploadValidator(resolved_settings.max_upload_bytes)
-    resolved_ingredient_extractor = ingredient_extractor or OllamaIngredientExtractor()
+    resolved_ingredient_extractor = ingredient_extractor or OllamaIngredientExtractor(
+        settings=resolved_settings
+    )
     ingredient_extraction_runner = build_ingredient_extraction_runner(
         ExtractionDependencies(
             resolved_ingredient_extractor,
             session_store,
             artifact_store,
+            model_call_limiter,
         )
     )
     resolved_ollama_health = ollama_health or OllamaHealthService(

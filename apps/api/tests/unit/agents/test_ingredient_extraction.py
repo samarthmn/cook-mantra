@@ -1,7 +1,9 @@
 import pytest
 from langchain_core.messages import HumanMessage
 
+from agents import ingredient_extraction as ingredient_extraction_module
 from agents.ingredient_extraction import OllamaIngredientExtractor
+from core.config import PROJECT_ROOT, Agent, Settings
 from domain.ingredients import ExtractionResult
 
 
@@ -13,6 +15,18 @@ class StructuredModel:
     async def ainvoke(self, messages: list[HumanMessage]) -> ExtractionResult:
         self.messages = messages
         return self.result
+
+
+class StructuredModelFactory:
+    def __init__(self, result: ExtractionResult) -> None:
+        self._result = result
+
+    def with_structured_output(
+        self,
+        schema: type[ExtractionResult],
+    ) -> StructuredModel:
+        assert schema is ExtractionResult
+        return StructuredModel(self._result)
 
 
 @pytest.mark.asyncio
@@ -55,3 +69,38 @@ async def test_extractor_warns_when_no_ingredients_are_detected() -> None:
     assert result.warnings == [
         "No ingredients were confidently detected. Add them manually."
     ]
+
+
+@pytest.mark.asyncio
+async def test_extractor_forwards_its_exact_settings_to_model_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=PROJECT_ROOT / "tmp" / "adapter-settings-test",
+        ollama_base_url="http://configured-ollama.test:11434",
+        llm_timeout_seconds=17,
+    )
+    captured_settings: Settings | None = None
+
+    def capture_model(
+        agent: Agent,
+        *,
+        thinking: bool,
+        settings: Settings,
+    ) -> StructuredModelFactory:
+        nonlocal captured_settings
+        assert agent is Agent.INGREDIENT_EXTRACTION
+        assert thinking is False
+        captured_settings = settings
+        return StructuredModelFactory(
+            ExtractionResult(detected=[{"name": "Tomato", "confidence": 0.94}])
+        )
+
+    monkeypatch.setattr(ingredient_extraction_module, "get_model", capture_model)
+    extractor = OllamaIngredientExtractor(settings=settings)
+
+    result = await extractor.extract(b"png-bytes", "image/png")
+
+    assert result.detected[0].name == "Tomato"
+    assert captured_settings is settings

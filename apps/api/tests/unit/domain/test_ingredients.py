@@ -36,6 +36,18 @@ def test_pantry_suggestions_are_separate_and_unconfirmed() -> None:
     assert salt.confidence is None
 
 
+def test_detected_pantry_name_suppresses_matching_suggestion() -> None:
+    ingredients = assemble_review_ingredients(
+        ExtractionResult(detected=[DetectedIngredient(name=" onion ", confidence=0.92)])
+    )
+
+    onions = [item for item in ingredients if item.name.casefold() == "onion"]
+
+    assert len(onions) == 1
+    assert onions[0].source is IngredientSource.DETECTED
+    assert onions[0].confidence == 0.92
+
+
 @pytest.mark.parametrize(
     ("source", "confidence"),
     [

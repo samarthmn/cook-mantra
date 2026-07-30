@@ -58,6 +58,27 @@ class TrackingUploadValidator:
         return await self._delegate.read(upload)
 
 
+class ImmediateUploadValidator:
+    async def read(self, upload: UploadFile) -> ValidatedImage:
+        return ValidatedImage(
+            data=png_bytes(),
+            media_type="image/png",
+            suffix=".png",
+        )
+
+
+class PausingCloseUpload:
+    def __init__(self) -> None:
+        self.file = BytesIO(png_bytes())
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+
+    async def close(self) -> None:
+        self.close_started.set()
+        await self.allow_close.wait()
+        self.file.close()
+
+
 class ClosureObservingArtifactStore:
     def __init__(
         self,
@@ -530,6 +551,50 @@ def test_job_submit_failure_rolls_back_only_new_session_and_artifact(
 
 
 @pytest.mark.asyncio
+async def test_cancellation_waits_for_upload_close_despite_repeated_cancel() -> None:
+    upload = PausingCloseUpload()
+    session_store = SessionStore(ttl_seconds=21_600)
+    retained_session = await session_store.create()
+
+    async def unused_extraction_runner(session_id, artifact_id, progress):
+        raise AssertionError("Cancellation during close cannot submit a job.")
+
+    request_task = asyncio.create_task(
+        create_session(
+            upload,
+            ImmediateUploadValidator(),
+            session_store,
+            FailingArtifactStore(),
+            FailingJobRunner(),
+            unused_extraction_runner,
+        )
+    )
+
+    try:
+        await upload.close_started.wait()
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        upload.allow_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+        assert upload.file.closed
+        assert await session_store.require(retained_session.id) == retained_session
+    finally:
+        upload.allow_close.set()
+        if not request_task.done():
+            request_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request_task
+
+
+@pytest.mark.asyncio
 async def test_cancellation_waits_for_rollback_and_preserves_neighbors(
     project_tmp_path: Path,
 ) -> None:
@@ -605,6 +670,78 @@ async def test_cancellation_waits_for_rollback_and_preserves_neighbors(
             request_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await request_task
+        await delegate_artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_ordinary_error_rollback_finishes_cleanup(
+    project_tmp_path: Path,
+) -> None:
+    session_store = SessionStore(ttl_seconds=21_600)
+    delegate_artifact_store = ArtifactStore(
+        project_tmp_path / "ordinary-error-cancellation-artifacts",
+        ttl_seconds=21_600,
+    )
+    artifact_store = PausingDeleteArtifactStore(delegate_artifact_store)
+    job_runner = FailingJobRunner()
+
+    async def unused_extraction_runner(session_id, artifact_id, progress):
+        raise AssertionError("The failing runner never starts extraction.")
+
+    await delegate_artifact_store.startup()
+    retained_session = await session_store.create()
+    retained_artifact = await delegate_artifact_store.write(
+        b"retained-image",
+        "image/png",
+        ".png",
+        retained_session.id,
+    )
+    upload = UploadFile(filename="ingredients.png", file=BytesIO(png_bytes()))
+    request_task = asyncio.create_task(
+        create_session(
+            upload,
+            ImageUploadValidator(10 * 1024 * 1024),
+            session_store,
+            artifact_store,
+            job_runner,
+            unused_extraction_runner,
+        )
+    )
+
+    try:
+        await artifact_store.delete_started.wait()
+        assert artifact_store.written is not None
+        created_session_id = artifact_store.written.owner_session_id
+
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        artifact_store.allow_delete.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+        assert await session_store.get(created_session_id) is None
+        with pytest.raises(AppError) as removed_artifact:
+            await delegate_artifact_store.require(artifact_store.written.id)
+        assert removed_artifact.value.code is ErrorCode.RESOURCE_NOT_FOUND
+        assert await session_store.require(retained_session.id) == retained_session
+        assert (
+            await delegate_artifact_store.require(retained_artifact.id)
+        ).id == retained_artifact.id
+    finally:
+        artifact_store.allow_delete.set()
+        if not request_task.done():
+            request_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request_task
+        if artifact_store.written is not None:
+            await delegate_artifact_store.delete(artifact_store.written.id)
+            await session_store.delete(artifact_store.written.owner_session_id)
         await delegate_artifact_store.shutdown()
 
 

@@ -19,6 +19,7 @@ from domain.ingredients import (
 from domain.sessions import Session, SessionStage
 from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
+from services.concurrency import ModelCallLimiter
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
 type IngredientExtractionRunner = Callable[
@@ -63,6 +64,7 @@ class ExtractionDependencies:
     extractor: IngredientExtractor
     session_store: SessionStore
     artifact_store: ArtifactStore
+    model_call_limiter: ModelCallLimiter
     progress: ProgressReporter = _ignore_progress
 
 
@@ -89,9 +91,11 @@ def build_ingredient_extraction_graph(
     async def extract(
         state: IngredientExtractionState,
     ) -> dict[str, object]:
-        result = await dependencies.extractor.extract(
-            state["image"],
-            state["media_type"],
+        result = await dependencies.model_call_limiter.run(
+            lambda: dependencies.extractor.extract(
+                state["image"],
+                state["media_type"],
+            )
         )
         await dependencies.progress(65)
         return {
@@ -175,12 +179,13 @@ def build_real_extraction_dependencies() -> ExtractionDependencies:
     """Wire the real extractor and temporary stores for development use."""
     settings = Settings(_env_file=None)
     return ExtractionDependencies(
-        extractor=OllamaIngredientExtractor(),
+        extractor=OllamaIngredientExtractor(settings=settings),
         session_store=SessionStore(ttl_seconds=settings.session_ttl_seconds),
         artifact_store=ArtifactStore(
             settings.artifact_root,
             ttl_seconds=settings.session_ttl_seconds,
         ),
+        model_call_limiter=ModelCallLimiter(settings.max_concurrent_model_calls),
     )
 
 
