@@ -1,4 +1,5 @@
 import pytest
+from pydantic import BaseModel
 
 from agents import nutrition as nutrition_module
 from agents.nutrition import OllamaNutritionAgent
@@ -37,6 +38,19 @@ def nutrition_estimate(**updates: object) -> NutritionEstimate:
     return NutritionEstimate(**values)
 
 
+def nutrition_output_data(**updates: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "calories_kcal": 420,
+        "protein_g": 16.5,
+        "carbohydrates_g": 55.0,
+        "fat_g": 14.0,
+        "diet_tags": ["vegetarian"],
+        "allergen_warnings": ["dairy"],
+    }
+    values.update(updates)
+    return values
+
+
 class CapturingStructuredModel:
     def __init__(self, output: NutritionEstimate) -> None:
         self.output = output
@@ -56,26 +70,38 @@ class InvalidStructuredModel:
         return nutrition_estimate(calories_kcal=-1)
 
 
+class RawStructuredModel:
+    def __init__(self, schema: type[BaseModel], output: dict[str, object]) -> None:
+        self.schema = schema
+        self.output = output
+
+    async def ainvoke(self, messages: object) -> BaseModel:
+        return self.schema.model_validate(self.output)
+
+
 class StructuredModelFactory:
-    def __init__(self, output: NutritionEstimate) -> None:
+    def __init__(self, output: dict[str, object]) -> None:
         self.output = output
 
     def with_structured_output(
         self,
-        schema: type[NutritionEstimate],
-    ) -> CapturingStructuredModel:
-        assert schema is NutritionEstimate
-        return CapturingStructuredModel(self.output)
+        schema: type[BaseModel],
+    ) -> RawStructuredModel:
+        return RawStructuredModel(schema, self.output)
 
 
 @pytest.mark.asyncio
-async def test_nutrition_overrides_a_model_disclaimer_with_the_product_notice(
+async def test_nutrition_replaces_a_raw_model_disclaimer_with_the_product_notice(
+    monkeypatch: pytest.MonkeyPatch,
     recipe_option_draft,
 ) -> None:
-    model_output = nutrition_estimate().model_copy(
-        update={"disclaimer": "Values are exact and medically verified."}
+    factory = StructuredModelFactory(
+        nutrition_output_data(disclaimer="Values are exact and medically verified.")
     )
-    agent = OllamaNutritionAgent(model=CapturingStructuredModel(model_output))
+    monkeypatch.setattr(
+        nutrition_module, "get_model", lambda *_args, **_kwargs: factory
+    )
+    agent = OllamaNutritionAgent()
 
     estimate = await agent.estimate(recipe_option_draft, RecipePreferences())
 
@@ -141,7 +167,7 @@ async def test_nutrition_defers_model_construction_and_forwards_injected_setting
         settings: Settings,
     ) -> StructuredModelFactory:
         calls.append((agent, thinking, settings))
-        return StructuredModelFactory(nutrition_estimate())
+        return StructuredModelFactory(nutrition_output_data())
 
     monkeypatch.setattr(nutrition_module, "get_model", capture_model)
     nutrition_agent = OllamaNutritionAgent(settings=settings)

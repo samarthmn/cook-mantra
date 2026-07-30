@@ -3,6 +3,7 @@
 from typing import Protocol
 
 from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, ConfigDict, Field
 
 from core import Agent, Settings
 from domain.recipe_options import (
@@ -27,12 +28,25 @@ class NutritionAgent(Protocol):
         raise NotImplementedError
 
 
+class NutritionModelOutput(BaseModel):
+    """Nutrition fields accepted from the model before product normalization."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    calories_kcal: int = Field(ge=0)
+    protein_g: float = Field(ge=0)
+    carbohydrates_g: float = Field(ge=0)
+    fat_g: float = Field(ge=0)
+    diet_tags: list[str] = Field(default_factory=list)
+    allergen_warnings: list[str] = Field(default_factory=list)
+
+
 class OllamaNutritionAgent:
     """Estimate recipe nutrition with the configured Nutrition model."""
 
     def __init__(
         self,
-        model: StructuredModel[NutritionEstimate] | None = None,
+        model: StructuredModel[NutritionModelOutput] | None = None,
         settings: Settings | None = None,
     ) -> None:
         self._model = model
@@ -50,13 +64,16 @@ class OllamaNutritionAgent:
                 Agent.NUTRITION,
                 thinking=False,
                 settings=self._settings,
-            ).with_structured_output(NutritionEstimate)
+            ).with_structured_output(NutritionModelOutput)
 
         estimate = await invoke_structured(
             model,
             [HumanMessage(content=_build_prompt(option, preferences))],
         )
-        return estimate.model_copy(update={"disclaimer": NUTRITION_DISCLAIMER})
+        return NutritionEstimate(
+            **estimate.model_dump(exclude={"disclaimer"}),
+            disclaimer=NUTRITION_DISCLAIMER,
+        )
 
 
 def _build_prompt(option: RecipeOptionDraft, preferences: RecipePreferences) -> str:
