@@ -1,6 +1,7 @@
 """In-process execution for background jobs."""
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 from core.errors import AppError, ErrorCode
@@ -10,6 +11,8 @@ from repositories.job_store import JobStore
 type ProgressReporter = Callable[[int], Awaitable[None]]
 type JobWorker = Callable[[ProgressReporter], Awaitable[dict[str, object]]]
 
+logger = logging.getLogger(__name__)
+
 
 class JobRunner:
     """Run stored background jobs with a bounded level of concurrency."""
@@ -18,6 +21,8 @@ class JobRunner:
         self._store = store
         self._semaphore = asyncio.Semaphore(max_concurrent_jobs)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._lifecycle_lock = asyncio.Lock()
+        self._closed = False
 
     async def submit(
         self,
@@ -26,9 +31,12 @@ class JobRunner:
         worker: JobWorker,
     ) -> Job:
         """Create a queued job and schedule its worker."""
-        job = await self._store.create(operation, session_id)
-        self._tasks[job.id] = asyncio.create_task(self._execute(job.id, worker))
-        return job
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("Job runner is shut down.")
+            job = await self._store.create(operation, session_id)
+            self._tasks[job.id] = asyncio.create_task(self._execute(job.id, worker))
+            return job
 
     async def wait(self, job_id: str) -> None:
         """Wait for a submitted task; used by tests."""
@@ -38,7 +46,9 @@ class JobRunner:
 
     async def shutdown(self) -> None:
         """Cancel and await every currently active job task."""
-        tasks = list(self._tasks.items())
+        async with self._lifecycle_lock:
+            self._closed = True
+            tasks = list(self._tasks.items())
         for _, task in tasks:
             task.cancel()
         if tasks:
@@ -59,7 +69,7 @@ class JobRunner:
         except asyncio.CancelledError:
             raise
         except AppError as error:
-            await self._store.mark_failed(
+            await self._record_failure(
                 job_id,
                 JobError(
                     code=error.code,
@@ -69,7 +79,7 @@ class JobRunner:
                 ),
             )
         except Exception:
-            await self._store.mark_failed(
+            await self._record_failure(
                 job_id,
                 JobError(
                     code=ErrorCode.INTERNAL_ERROR,
@@ -79,3 +89,11 @@ class JobRunner:
             )
         finally:
             self._tasks.pop(job_id, None)
+
+    async def _record_failure(self, job_id: str, error: JobError) -> None:
+        try:
+            await self._store.mark_failed(job_id, error)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to record background job failure")

@@ -1,4 +1,5 @@
 import asyncio
+import gc
 
 import pytest
 
@@ -6,6 +7,34 @@ from core.errors import AppError, ErrorCode
 from domain.jobs import JobOperation, JobStatus
 from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
+
+
+class BlockingCreateJobStore(JobStore):
+    """Pause job creation to force a submit/shutdown ordering race."""
+
+    def __init__(self) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.create_started = asyncio.Event()
+        self.allow_create = asyncio.Event()
+        self.create_count = 0
+
+    async def create(self, operation: JobOperation, session_id: str):
+        self.create_started.set()
+        await self.allow_create.wait()
+        self.create_count += 1
+        return await super().create(operation, session_id)
+
+
+class FailingFailureStore(JobStore):
+    """Make failure persistence fail after a worker's public error."""
+
+    def __init__(self) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.failure_persist_attempted = asyncio.Event()
+
+    async def mark_failed(self, job_id: str, error):
+        self.failure_persist_attempted.set()
+        raise RuntimeError("job store write failed")
 
 
 @pytest.mark.asyncio
@@ -95,3 +124,75 @@ async def test_shutdown_cancels_active_worker_without_marking_job_failed() -> No
     assert cancelled.is_set()
     assert incomplete.status is JobStatus.RUNNING
     assert incomplete.error is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_racing_and_future_submissions_without_live_tasks() -> (
+    None
+):
+    store = BlockingCreateJobStore()
+    runner = JobRunner(store, max_concurrent_jobs=1)
+    worker_started = asyncio.Event()
+    worker_cancelled = asyncio.Event()
+
+    async def worker(progress):
+        worker_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            worker_cancelled.set()
+            raise
+
+    submission = asyncio.create_task(
+        runner.submit(JobOperation.EXTRACT_INGREDIENTS, "session-1", worker)
+    )
+    await store.create_started.wait()
+    shutdown = asyncio.create_task(runner.shutdown())
+    await asyncio.sleep(0)
+    store.allow_create.set()
+    job = await submission
+    await shutdown
+
+    with pytest.raises(RuntimeError, match="Job runner is shut down"):
+        await runner.submit(JobOperation.EXTRACT_INGREDIENTS, "session-2", worker)
+    await runner.shutdown()
+
+    assert store.create_count == 1
+    assert runner._tasks == {}
+    assert worker_cancelled.is_set() or not worker_started.is_set()
+    assert (await store.require(job.id)).status in {JobStatus.QUEUED, JobStatus.RUNNING}
+
+
+@pytest.mark.asyncio
+async def test_failure_persistence_error_is_observed_without_leaking_a_task() -> None:
+    store = FailingFailureStore()
+    runner = JobRunner(store, max_concurrent_jobs=1)
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    task_errors: list[dict[str, object]] = []
+
+    def capture_task_error(
+        _: asyncio.AbstractEventLoop, context: dict[str, object]
+    ) -> None:
+        task_errors.append(context)
+
+    async def worker(progress):
+        raise AppError(
+            code=ErrorCode.OLLAMA_UNAVAILABLE,
+            message="Ollama is temporarily unavailable.",
+            status_code=503,
+            retryable=True,
+        )
+
+    loop.set_exception_handler(capture_task_error)
+    try:
+        await runner.submit(JobOperation.EXTRACT_INGREDIENTS, "session-1", worker)
+        await store.failure_persist_attempted.wait()
+        await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert runner._tasks == {}
+    assert task_errors == []
