@@ -1,0 +1,31 @@
+[project]
+name = "cook-mantra-api"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.141.0",
+    "langchain-ollama>=1.1.0",
+    "langgraph>=1.2.10",
+    "pydantic-settings>=2.14.2",
+    "python-dotenv>=1.2.2",
+    "uvicorn[standard]>=0.52.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+src = ["src"]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
