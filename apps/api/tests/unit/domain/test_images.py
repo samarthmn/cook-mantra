@@ -45,6 +45,15 @@ def test_preview_is_always_labeled_as_illustration() -> None:
     assert preview.label == "AI-generated illustration"
 
 
+def test_preview_label_cannot_change_after_construction() -> None:
+    preview = DishPreview(artifact_id="artifact-1")
+
+    with pytest.raises(ValidationError):
+        preview.label = "Generated image"
+
+    assert preview.label == "AI-generated illustration"
+
+
 @pytest.mark.parametrize(
     ("prompt", "width", "height", "steps"),
     [

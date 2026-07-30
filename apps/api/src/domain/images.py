@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ILLUSTRATION_LABEL = "AI-generated illustration"
 
@@ -28,6 +28,8 @@ class GeneratedImage:
 
 class DishPreview(BaseModel):
     """A stored reference to a generated dish illustration."""
+
+    model_config = ConfigDict(frozen=True)
 
     artifact_id: str
     label: str = ILLUSTRATION_LABEL
