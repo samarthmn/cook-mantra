@@ -125,7 +125,7 @@ def test_generation_requires_the_stage_for_its_requested_mode(
 def test_first_generation_returns_only_confirmed_ingredient_names() -> None:
     session = confirmed_session()
 
-    generating, previous_stage = begin_option_generation(
+    generating, previous_stage, context = begin_option_generation(
         session,
         RecipePreferences(option_count=2),
         more=False,
@@ -133,6 +133,8 @@ def test_first_generation_returns_only_confirmed_ingredient_names() -> None:
 
     assert confirmed_ingredient_names(generating) == ["Tomato"]
     assert previous_stage is SessionStage.INGREDIENTS_CONFIRMED
+    assert context.previous_stage is previous_stage
+    assert context.more is False
     assert generating.stage is SessionStage.GENERATING_OPTIONS
 
 
@@ -161,7 +163,7 @@ def test_first_generation_stores_validated_preferences_and_starts_fresh() -> Non
         preferences=RecipePreferences(option_count=1),
     )
 
-    generating, _ = begin_option_generation(
+    generating, _, _ = begin_option_generation(
         session,
         {
             "option_count": 2,
@@ -211,13 +213,15 @@ def test_more_preserves_every_shown_name_as_a_canonical_exclusion() -> None:
         option_batch_number=1,
     )
 
-    generating, previous_stage = begin_option_generation(
+    generating, previous_stage, context = begin_option_generation(
         session,
         RecipePreferences(option_count=1),
         more=True,
     )
 
     assert previous_stage is SessionStage.OPTIONS_READY
+    assert context.previous_stage is previous_stage
+    assert context.more is True
     assert generating.excluded_recipe_names == {
         "tomato curry",
         "onion soup",
@@ -229,19 +233,22 @@ def test_more_preserves_every_shown_name_as_a_canonical_exclusion() -> None:
     ]
 
 
-def test_commit_assigns_ids_and_replaces_the_first_batch() -> None:
-    generating, _ = begin_option_generation(
-        confirmed_session(recipe_options=[stored_option("Stale option")]),
+def test_first_commit_replaces_options_despite_a_stale_nonzero_batch_count() -> None:
+    generating, _, context = begin_option_generation(
+        confirmed_session(
+            recipe_options=[stored_option("Stale option")],
+            option_batch_number=7,
+        ),
         RecipePreferences(option_count=2),
         more=False,
     )
     drafts = [option_draft("Tomato Curry"), option_draft("Onion Soup")]
     nutrition = [nutrition_estimate(), nutrition_estimate(180)]
 
-    committed = commit_option_batch(generating, drafts, nutrition)
+    committed = commit_option_batch(generating, drafts, nutrition, context)
 
     assert committed.stage is SessionStage.OPTIONS_READY
-    assert committed.option_batch_number == 1
+    assert committed.option_batch_number == 8
     assert [option.name for option in committed.recipe_options] == [
         "Tomato Curry",
         "Onion Soup",
@@ -253,15 +260,15 @@ def test_commit_assigns_ids_and_replaces_the_first_batch() -> None:
     assert committed.excluded_recipe_names == {"tomato curry", "onion soup"}
 
 
-def test_commit_appends_more_and_canonicalizes_all_stored_exclusions() -> None:
+def test_more_commit_appends_despite_an_inconsistent_zero_batch_count() -> None:
     previous = stored_option("Tomato Curry")
     session = confirmed_session(
         stage=SessionStage.OPTIONS_READY,
         recipe_options=[previous],
         excluded_recipe_names={" TOMATO   CURRY ", "  Historic Dish "},
-        option_batch_number=1,
+        option_batch_number=0,
     )
-    generating, _ = begin_option_generation(
+    generating, _, context = begin_option_generation(
         session,
         RecipePreferences(option_count=1),
         more=True,
@@ -271,9 +278,10 @@ def test_commit_appends_more_and_canonicalizes_all_stored_exclusions() -> None:
         generating,
         [option_draft("Onion Soup")],
         [nutrition_estimate()],
+        context,
     )
 
-    assert committed.option_batch_number == 2
+    assert committed.option_batch_number == 1
     assert [option.id for option in committed.recipe_options] == [
         previous.id,
         committed.recipe_options[1].id,
@@ -295,7 +303,7 @@ def test_commit_rejects_duplicates_before_changing_the_session() -> None:
         recipe_options=[stored_option("Tomato Curry")],
         option_batch_number=1,
     )
-    generating, _ = begin_option_generation(
+    generating, _, context = begin_option_generation(
         session,
         RecipePreferences(option_count=1),
         more=True,
@@ -306,6 +314,7 @@ def test_commit_rejects_duplicates_before_changing_the_session() -> None:
             generating,
             [option_draft(" tomato  CURRY ")],
             [nutrition_estimate()],
+            context,
         )
 
     assert error.value.code is ErrorCode.RECIPE_DUPLICATE
@@ -318,42 +327,59 @@ def test_failed_generation_restores_exact_stage_and_prior_options() -> None:
     previous_option = stored_option("Tomato Curry")
     session = confirmed_session(
         stage=SessionStage.OPTIONS_READY,
+        preferences=RecipePreferences(
+            option_count=3,
+            preferred_cuisines=["Japanese"],
+        ),
         recipe_options=[previous_option],
-        excluded_recipe_names={"tomato curry"},
-        option_batch_number=1,
+        excluded_recipe_names={"tomato curry", "historic dish"},
+        option_batch_number=7,
     )
-    generating, previous_stage = begin_option_generation(
+    generating, previous_stage, context = begin_option_generation(
         session,
         RecipePreferences(option_count=1),
         more=True,
     )
+    session.preferences.preferred_cuisines.append("Mutated later")
+    session.excluded_recipe_names.add("Mutated later")
 
-    restored = restore_option_generation(generating, previous_stage)
+    with pytest.raises(ValidationError):
+        context.more = False
+
+    restored = restore_option_generation(generating, context)
 
     assert restored.stage is SessionStage.OPTIONS_READY
+    assert restored.preferences == RecipePreferences(
+        option_count=3,
+        preferred_cuisines=["Japanese"],
+    )
     assert restored.recipe_options == [previous_option]
-    assert restored.excluded_recipe_names == {"tomato curry"}
-    assert restored.option_batch_number == 1
+    assert restored.excluded_recipe_names == {"tomato curry", "historic dish"}
+    assert restored.option_batch_number == 7
+    assert restored.updated_at == NOW
+    assert restored is not session
     assert generating.stage is SessionStage.GENERATING_OPTIONS
+    assert previous_stage is SessionStage.OPTIONS_READY
 
 
 def test_failed_first_generation_restores_ingredients_confirmed() -> None:
     session = confirmed_session()
-    generating, previous_stage = begin_option_generation(
+    generating, previous_stage, context = begin_option_generation(
         session,
         RecipePreferences(option_count=1),
         more=False,
     )
 
-    restored = restore_option_generation(generating, previous_stage)
+    restored = restore_option_generation(generating, context)
 
     assert restored.stage is SessionStage.INGREDIENTS_CONFIRMED
+    assert previous_stage is SessionStage.INGREDIENTS_CONFIRMED
     assert generating.stage is SessionStage.GENERATING_OPTIONS
 
 
 def test_option_generation_operations_do_not_mutate_input_sessions() -> None:
     session = confirmed_session()
-    generating, _ = begin_option_generation(
+    generating, _, context = begin_option_generation(
         session,
         RecipePreferences(option_count=1),
         more=False,
@@ -362,6 +388,7 @@ def test_option_generation_operations_do_not_mutate_input_sessions() -> None:
         generating,
         [option_draft("Tomato Curry")],
         [nutrition_estimate()],
+        context,
     )
 
     committed.recipe_options[0].warnings.append("Changed after commit.")
