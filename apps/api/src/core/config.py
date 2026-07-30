@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 300.0
     max_concurrent_jobs: int = Field(default=2, gt=0)
     max_concurrent_model_calls: int = Field(default=2, gt=0)
+    max_upload_bytes: int = 10 * 1024 * 1024
     session_ttl_seconds: int = 21_600
     artifact_root: Path = PROJECT_ROOT / "tmp" / "cook-mantra-api"
     langsmith_tracing: bool = False
