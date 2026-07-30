@@ -67,13 +67,32 @@ class RecordingJobRunner:
             raise self._shutdown_error
 
 
+class RecordingCleanupSupervisor:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        shutdown_error: Exception | None = None,
+    ) -> None:
+        self._events = events
+        self._shutdown_error = shutdown_error
+
+    async def startup(self) -> None:
+        self._events.append("cleanup.startup")
+
+    async def shutdown(self) -> None:
+        self._events.append("cleanup.shutdown")
+        if self._shutdown_error is not None:
+            raise self._shutdown_error
+
+
 def settings_for(artifact_root: Path) -> Settings:
     return Settings(_env_file=None, artifact_root=artifact_root)
 
 
-def test_health_is_process_only(tmp_path: Path) -> None:
+def test_health_is_process_only(project_tmp_path: Path) -> None:
     app = create_app(
-        settings=settings_for(tmp_path),
+        settings=settings_for(project_tmp_path),
         ollama_health=ExplodingOllama(),
     )
 
@@ -84,9 +103,9 @@ def test_health_is_process_only(tmp_path: Path) -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_ready_reports_model_inventory(tmp_path: Path) -> None:
+def test_ready_reports_model_inventory(project_tmp_path: Path) -> None:
     app = create_app(
-        settings=settings_for(tmp_path),
+        settings=settings_for(project_tmp_path),
         ollama_health=ReadyOllama(),
     )
 
@@ -104,9 +123,9 @@ def test_ready_reports_model_inventory(tmp_path: Path) -> None:
     }
 
 
-def test_ready_maps_missing_models_to_the_public_error(tmp_path: Path) -> None:
+def test_ready_maps_missing_models_to_the_public_error(project_tmp_path: Path) -> None:
     app = create_app(
-        settings=settings_for(tmp_path),
+        settings=settings_for(project_tmp_path),
         ollama_health=MissingModelOllama(),
     )
 
@@ -130,7 +149,7 @@ def test_ready_maps_missing_models_to_the_public_error(tmp_path: Path) -> None:
     }
 
 
-def test_ready_hides_ollama_connection_details(tmp_path: Path) -> None:
+def test_ready_hides_ollama_connection_details(project_tmp_path: Path) -> None:
     async def fail(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError(
             "connection refused at private-host:11434",
@@ -143,7 +162,7 @@ def test_ready_hides_ollama_connection_details(tmp_path: Path) -> None:
         transport=httpx.MockTransport(fail),
     )
     app = create_app(
-        settings=settings_for(tmp_path),
+        settings=settings_for(project_tmp_path),
         ollama_health=ollama_health,
     )
 
@@ -168,10 +187,12 @@ def test_ready_hides_ollama_connection_details(tmp_path: Path) -> None:
     assert "private-host" not in response.text
 
 
-def test_lifespan_releases_artifacts_when_job_shutdown_fails(tmp_path: Path) -> None:
+def test_lifespan_releases_artifacts_when_job_shutdown_fails(
+    project_tmp_path: Path,
+) -> None:
     events: list[str] = []
     app = create_app(
-        settings=settings_for(tmp_path),
+        settings=settings_for(project_tmp_path),
         ollama_health=ReadyOllama(),
     )
     app.state.artifact_store = RecordingArtifactStore(events)
@@ -179,6 +200,7 @@ def test_lifespan_releases_artifacts_when_job_shutdown_fails(tmp_path: Path) -> 
         events,
         shutdown_error=RuntimeError("runner shutdown failed"),
     )
+    app.state.cleanup_supervisor = RecordingCleanupSupervisor(events)
 
     with (
         pytest.raises(RuntimeError, match="runner shutdown failed"),
@@ -186,4 +208,40 @@ def test_lifespan_releases_artifacts_when_job_shutdown_fails(tmp_path: Path) -> 
     ):
         pass
 
-    assert events == ["artifact.startup", "runner.shutdown", "artifact.shutdown"]
+    assert events == [
+        "artifact.startup",
+        "cleanup.startup",
+        "cleanup.shutdown",
+        "runner.shutdown",
+        "artifact.shutdown",
+    ]
+
+
+def test_lifespan_releases_runtime_resources_when_cleanup_shutdown_fails(
+    project_tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    app = create_app(
+        settings=settings_for(project_tmp_path),
+        ollama_health=ReadyOllama(),
+    )
+    app.state.artifact_store = RecordingArtifactStore(events)
+    app.state.job_runner = RecordingJobRunner(events)
+    app.state.cleanup_supervisor = RecordingCleanupSupervisor(
+        events,
+        shutdown_error=RuntimeError("cleanup shutdown failed"),
+    )
+
+    with (
+        pytest.raises(RuntimeError, match="cleanup shutdown failed"),
+        TestClient(app),
+    ):
+        pass
+
+    assert events == [
+        "artifact.startup",
+        "cleanup.startup",
+        "cleanup.shutdown",
+        "runner.shutdown",
+        "artifact.shutdown",
+    ]

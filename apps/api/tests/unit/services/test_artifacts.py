@@ -1,5 +1,10 @@
+import asyncio
 import errno
 import os
+import stat
+import sys
+import threading
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -421,6 +426,71 @@ async def test_startup_maps_unimplemented_descriptor_operations_to_artifact_fail
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
 
 
+def test_linux_descriptor_path_uses_procfs_without_macos_f_getpath(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    proc_path = f"/proc/self/fd/{root_fd}"
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "platform", "linux")
+            patch.setattr(
+                artifacts_service.os,
+                "readlink",
+                lambda path: str(tmp_path) if path == proc_path else "",
+            )
+            if artifacts_service.fcntl is not None:
+                patch.delattr(artifacts_service.fcntl, "F_GETPATH", raising=False)
+
+            assert store._root_path_from_fd(root_fd) == tmp_path
+    finally:
+        os.close(root_fd)
+
+
+def test_linux_descriptor_path_rejects_a_procfs_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "root"
+    other = tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    store = ArtifactStore(root, ttl_seconds=60)
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "platform", "linux")
+            patch.setattr(artifacts_service.os, "readlink", lambda _: str(other))
+
+            with pytest.raises(
+                artifacts_service._CapabilityError,
+                match="identity",
+            ):
+                store._root_path_from_fd(root_fd)
+    finally:
+        os.close(root_fd)
+
+
+@pytest.mark.asyncio
+async def test_startup_maps_unsupported_platform_to_artifact_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "platform", "win32")
+        with pytest.raises(AppError) as raised:
+            await store.startup()
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+    assert raised.value.message == "Temporary artifact storage is unavailable."
+
+
 @pytest.mark.asyncio
 async def test_shutdown_records_a_close_failure_without_retrying_the_descriptor(
     tmp_path: Path,
@@ -673,3 +743,96 @@ async def test_startup_rejects_a_concurrent_intermediate_symlink_creator(
 
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
     assert not (outside / "artifacts").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_waits_for_thread_and_closes_returned_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    opened = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    returned_descriptor: list[int] = []
+    actual_open_and_clear = store._open_and_clear_root
+
+    def open_then_block() -> tuple[int, Path]:
+        result = actual_open_and_clear()
+        returned_descriptor.append(result[0])
+        opened.set()
+        if not release.wait(timeout=2):
+            raise TimeoutError("test did not release artifact startup")
+        returned.set()
+        return result
+
+    monkeypatch.setattr(store, "_open_and_clear_root", open_then_block)
+    startup = asyncio.create_task(store.startup())
+    assert await asyncio.to_thread(opened.wait, 2)
+
+    startup.cancel()
+    await asyncio.sleep(0)
+    cancellation_waited_for_thread = not startup.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+    assert await asyncio.to_thread(returned.wait, 2)
+
+    root_fd = returned_descriptor[0]
+    try:
+        assert cancellation_waited_for_thread
+        with pytest.raises(OSError):
+            os.fstat(root_fd)
+        assert store._root_fd is None
+    finally:
+        with suppress(OSError):
+            os.close(root_fd)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_write_keeps_descriptor_owned_until_thread_cleanup_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    await store.startup()
+    root_fd = store._root_fd
+    file_created = threading.Event()
+    release = threading.Event()
+    actual_write = store._write_new_file
+
+    assert root_fd is not None
+
+    def write_then_block(descriptor: int, filename: str, data: bytes) -> None:
+        actual_write(descriptor, filename, data)
+        file_created.set()
+        if not release.wait(timeout=2):
+            raise TimeoutError("test did not release artifact write")
+
+    monkeypatch.setattr(store, "_write_new_file", write_then_block)
+    write = asyncio.create_task(
+        store.write(
+            b"image-bytes",
+            "image/png",
+            ".png",
+            owner_session_id="session-1",
+        )
+    )
+    assert await asyncio.to_thread(file_created.wait, 2)
+
+    write.cancel()
+    shutdown = asyncio.create_task(store.shutdown())
+    await asyncio.sleep(0)
+    cancellation_waited_for_thread = not write.done()
+    shutdown_waited_for_thread = not shutdown.done()
+    descriptor_remained_open = os.fstat(root_fd).st_mode
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await write
+    await shutdown
+
+    assert cancellation_waited_for_thread
+    assert shutdown_waited_for_thread
+    assert stat.S_ISDIR(descriptor_remained_open)
+    assert list(tmp_path.iterdir()) == []

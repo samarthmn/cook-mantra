@@ -7,8 +7,9 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from api.middleware import REQUEST_ID_HEADER
+from core.http import REQUEST_ID_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ def install_error_handlers(app: FastAPI) -> None:
     """Install handlers that return the public error response envelope."""
     app.add_exception_handler(AppError, _handle_app_error)
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
+    app.add_exception_handler(StarletteHTTPException, _handle_http_error)
     app.add_exception_handler(Exception, _handle_unexpected_error)
 
 
@@ -83,6 +85,29 @@ async def _handle_validation_error(
     )
 
 
+async def _handle_http_error(
+    request: Request, error: StarletteHTTPException
+) -> JSONResponse:
+    if error.status_code == 404:
+        code = ErrorCode.RESOURCE_NOT_FOUND
+        message = "Resource was not found."
+    elif error.status_code < 500:
+        code = ErrorCode.INVALID_REQUEST
+        message = "The request is invalid."
+    else:
+        code = ErrorCode.INTERNAL_ERROR
+        message = "An unexpected error occurred."
+
+    return _error_response(
+        request,
+        code=code,
+        message=message,
+        status_code=error.status_code,
+        retryable=False,
+        headers=error.headers,
+    )
+
+
 async def _handle_unexpected_error(request: Request, _: Exception) -> JSONResponse:
     logger.exception(
         "Unhandled API exception", extra={"request_id": _request_id(request)}
@@ -106,6 +131,7 @@ def _error_response(
     details: dict[str, object] | None = None,
     session_id: str | None = None,
     job_id: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     from schemas.errors import ErrorDetail, ErrorResponse
 
@@ -124,7 +150,7 @@ def _error_response(
     return JSONResponse(
         status_code=status_code,
         content=payload.model_dump(mode="json"),
-        headers={REQUEST_ID_HEADER: request_id},
+        headers={**(headers or {}), REQUEST_ID_HEADER: request_id},
     )
 
 

@@ -1,7 +1,7 @@
 """Lock-protected in-memory storage for cooking sessions."""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from core.errors import AppError, ErrorCode
@@ -44,9 +44,20 @@ class SessionStore:
         """Atomically replace an existing session with updated state."""
         async with self._lock:
             current = self._require(session.id)
+            if session.updated_at != current.updated_at:
+                raise AppError(
+                    code=ErrorCode.INVALID_SESSION_TRANSITION,
+                    message="The session changed before this update could be applied.",
+                    status_code=409,
+                    retryable=True,
+                    session_id=session.id,
+                )
             payload = session.__dict__.copy()
             payload["created_at"] = current.created_at
-            payload["updated_at"] = datetime.now(UTC)
+            payload["updated_at"] = max(
+                datetime.now(UTC),
+                current.updated_at + timedelta(microseconds=1),
+            )
             replacement = Session.model_validate(payload)
             self._sessions[session.id] = replacement
             return replacement.model_copy(deep=True)

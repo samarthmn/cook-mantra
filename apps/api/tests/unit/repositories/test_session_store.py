@@ -36,6 +36,31 @@ async def test_invalid_unchecked_replacement_preserves_stored_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_replacement_returns_conflict_and_preserves_committed_update() -> (
+    None
+):
+    store = SessionStore(ttl_seconds=21_600)
+    session = await store.create()
+    first_update = session.model_copy(
+        update={"stage": SessionStage.REVIEWING_INGREDIENTS}
+    )
+    stale_update = session.model_copy(update={"stage": SessionStage.RECIPES_READY})
+
+    committed = await store.replace(first_update)
+
+    with pytest.raises(AppError) as raised:
+        await store.replace(stale_update)
+
+    stored = await store.require(session.id)
+    assert raised.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert raised.value.status_code == 409
+    assert raised.value.retryable is True
+    assert raised.value.session_id == session.id
+    assert stored.stage is SessionStage.REVIEWING_INGREDIENTS
+    assert stored.updated_at == committed.updated_at
+
+
+@pytest.mark.asyncio
 async def test_expired_sessions_are_deleted() -> None:
     store = SessionStore(ttl_seconds=10)
     session = await store.create()

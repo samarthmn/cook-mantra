@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import logging
 
 import pytest
 
@@ -99,6 +100,36 @@ async def test_runner_hides_unexpected_worker_error_details() -> None:
     assert completed.error.message == "An unexpected error occurred."
     assert completed.error.details == {}
     assert completed.error.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_runner_logs_unexpected_worker_traceback_with_job_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = JobStore(ttl_seconds=21_600)
+    runner = JobRunner(store, max_concurrent_jobs=1)
+
+    async def worker(progress):
+        raise RuntimeError("private provider failure")
+
+    with caplog.at_level(logging.ERROR, logger="orchestration.job_runner"):
+        job = await runner.submit(
+            JobOperation.EXTRACT_INGREDIENTS,
+            "session-1",
+            worker,
+        )
+        await runner.wait(job.id)
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "Unexpected background job failure"
+    )
+    assert record.job_id == job.id
+    assert record.session_id == "session-1"
+    assert record.operation == "extract_ingredients"
+    assert record.exc_info is not None
+    assert record.exc_info[0] is RuntimeError
 
 
 @pytest.mark.asyncio

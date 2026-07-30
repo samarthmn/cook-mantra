@@ -6,7 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import Response
 
-REQUEST_ID_HEADER = "X-Request-ID"
+from core.http import REQUEST_ID_HEADER
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):

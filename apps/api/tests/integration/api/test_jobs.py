@@ -20,9 +20,9 @@ def settings_for(artifact_root: Path) -> Settings:
     return Settings(_env_file=None, artifact_root=artifact_root)
 
 
-def test_job_can_be_read_through_its_public_schema(tmp_path: Path) -> None:
+def test_job_can_be_read_through_its_public_schema(project_tmp_path: Path) -> None:
     app = create_app(
-        settings=settings_for(tmp_path),
+        settings=settings_for(project_tmp_path),
         ollama_health=ReadyOllama(),
     )
 
@@ -49,9 +49,9 @@ def test_job_can_be_read_through_its_public_schema(tmp_path: Path) -> None:
     }
 
 
-def test_unknown_job_uses_standard_not_found_error(tmp_path: Path) -> None:
+def test_unknown_job_uses_standard_not_found_error(project_tmp_path: Path) -> None:
     app = create_app(
-        settings=settings_for(tmp_path),
+        settings=settings_for(project_tmp_path),
         ollama_health=ReadyOllama(),
     )
 

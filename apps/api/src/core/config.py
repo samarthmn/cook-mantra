@@ -4,7 +4,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AnyHttpUrl, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     api_port: int = 8000
     ollama_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:11434")
     llm_timeout_seconds: float = 300.0
-    max_concurrent_jobs: int = 2
-    max_concurrent_model_calls: int = 2
+    max_concurrent_jobs: int = Field(default=2, gt=0)
+    max_concurrent_model_calls: int = Field(default=2, gt=0)
     session_ttl_seconds: int = 21_600
     artifact_root: Path = PROJECT_ROOT / "tmp" / "cook-mantra-api"
     langsmith_tracing: bool = False
@@ -63,6 +63,20 @@ class Settings(BaseSettings):
     def model_for(self, agent: Agent) -> Model:
         """Return the Ollama model configured for an agent."""
         return AGENT_MODELS[agent]
+
+    @field_validator("artifact_root")
+    @classmethod
+    def validate_artifact_root(cls, artifact_root: Path) -> Path:
+        """Keep destructive artifact cleanup inside the project runtime namespace."""
+        runtime_root = (PROJECT_ROOT / "tmp").resolve(strict=False)
+        configured_root = (
+            artifact_root
+            if artifact_root.is_absolute()
+            else PROJECT_ROOT / artifact_root
+        ).resolve(strict=False)
+        if not configured_root.is_relative_to(runtime_root):
+            raise ValueError("artifact_root must be within PROJECT_ROOT/tmp")
+        return configured_root
 
 
 @lru_cache

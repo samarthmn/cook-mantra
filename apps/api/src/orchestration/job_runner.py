@@ -35,7 +35,14 @@ class JobRunner:
             if self._closed:
                 raise RuntimeError("Job runner is shut down.")
             job = await self._store.create(operation, session_id)
-            self._tasks[job.id] = asyncio.create_task(self._execute(job.id, worker))
+            self._tasks[job.id] = asyncio.create_task(
+                self._execute(
+                    job.id,
+                    operation,
+                    session_id,
+                    worker,
+                )
+            )
             return job
 
     async def wait(self, job_id: str) -> None:
@@ -56,7 +63,13 @@ class JobRunner:
         for job_id, _ in tasks:
             self._tasks.pop(job_id, None)
 
-    async def _execute(self, job_id: str, worker: JobWorker) -> None:
+    async def _execute(
+        self,
+        job_id: str,
+        operation: JobOperation,
+        session_id: str,
+        worker: JobWorker,
+    ) -> None:
         try:
             async with self._semaphore:
                 await self._store.mark_running(job_id)
@@ -79,6 +92,14 @@ class JobRunner:
                 ),
             )
         except Exception:
+            logger.exception(
+                "Unexpected background job failure",
+                extra={
+                    "job_id": job_id,
+                    "session_id": session_id,
+                    "operation": operation.value,
+                },
+            )
             await self._record_failure(
                 job_id,
                 JobError(

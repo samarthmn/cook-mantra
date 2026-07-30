@@ -13,6 +13,7 @@ from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
 from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
+from services.cleanup import CleanupSupervisor
 from services.concurrency import ModelCallLimiter
 from services.ollama_health import OllamaHealthService
 
@@ -22,12 +23,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start and reliably release runtime-owned resources."""
     await app.state.artifact_store.startup()
     try:
+        await app.state.cleanup_supervisor.startup()
+    except BaseException:
+        await app.state.artifact_store.shutdown()
+        raise
+
+    try:
         yield
     finally:
         try:
-            await app.state.job_runner.shutdown()
+            await app.state.cleanup_supervisor.shutdown()
         finally:
-            await app.state.artifact_store.shutdown()
+            try:
+                await app.state.job_runner.shutdown()
+            finally:
+                await app.state.artifact_store.shutdown()
 
 
 def create_app(
@@ -41,6 +51,11 @@ def create_app(
     artifact_store = ArtifactStore(
         resolved_settings.artifact_root,
         ttl_seconds=resolved_settings.session_ttl_seconds,
+    )
+    cleanup_supervisor = CleanupSupervisor(
+        session_store,
+        job_store,
+        artifact_store,
     )
     job_runner = JobRunner(
         job_store,
@@ -57,6 +72,7 @@ def create_app(
     app.state.job_store = job_store
     app.state.session_store = session_store
     app.state.artifact_store = artifact_store
+    app.state.cleanup_supervisor = cleanup_supervisor
     app.state.job_runner = job_runner
     app.state.model_call_limiter = model_call_limiter
     app.state.ollama_health = resolved_ollama_health

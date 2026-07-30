@@ -4,6 +4,8 @@ import asyncio
 import errno
 import os
 import stat
+import sys
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,48 +44,55 @@ class ArtifactStore:
 
     async def startup(self) -> None:
         """Prepare an empty artifact namespace for this API process."""
-        async with self._lock:
-            self._raise_if_close_is_unresolved()
+        await self._run_exclusive(
+            self._startup,
+            cancellation_cleanup=self._discard_cancelled_startup,
+        )
+
+    async def _startup(self) -> None:
+        self._raise_if_close_is_unresolved()
+        try:
+            root_fd, root_path = await asyncio.to_thread(self._open_and_clear_root)
+        except _storage_errors() as error:
+            raise _artifact_failure(
+                "Temporary artifact storage is unavailable."
+            ) from error
+
+        old_root_fd = self._root_fd
+        if old_root_fd is not None:
             try:
-                root_fd, root_path = await asyncio.to_thread(self._open_and_clear_root)
-            except _storage_errors() as error:
+                await asyncio.to_thread(os.close, old_root_fd)
+            except OSError as error:
+                self._root_fd = None
+                self._unresolved_close_fds.add(old_root_fd)
+                await self._close_unpublished_root(root_fd)
                 raise _artifact_failure(
                     "Temporary artifact storage is unavailable."
                 ) from error
 
-            old_root_fd = self._root_fd
-            if old_root_fd is not None:
-                try:
-                    await asyncio.to_thread(os.close, old_root_fd)
-                except OSError as error:
-                    self._root_fd = None
-                    self._unresolved_close_fds.add(old_root_fd)
-                    await self._close_unpublished_root(root_fd)
-                    raise _artifact_failure(
-                        "Temporary artifact storage is unavailable."
-                    ) from error
-
-            self._root_fd = root_fd
-            self._root = root_path
-            self._artifacts.clear()
+        self._root_fd = root_fd
+        self._root = root_path
+        self._artifacts.clear()
 
     async def shutdown(self) -> None:
         """Release the owned directory descriptor when the store stops."""
-        async with self._lock:
-            self._raise_if_close_is_unresolved()
-            root_fd = self._root_fd
-            if root_fd is None:
-                return
-            try:
-                await asyncio.to_thread(os.close, root_fd)
-            except OSError as error:
-                self._root_fd = None
-                self._unresolved_close_fds.add(root_fd)
-                raise _artifact_failure(
-                    "Temporary artifact storage is unavailable."
-                ) from error
+        await self._run_exclusive(self._shutdown)
+
+    async def _shutdown(self) -> None:
+        self._raise_if_close_is_unresolved()
+        root_fd = self._root_fd
+        if root_fd is None:
+            return
+        try:
+            await asyncio.to_thread(os.close, root_fd)
+        except OSError as error:
             self._root_fd = None
-            self._artifacts.clear()
+            self._unresolved_close_fds.add(root_fd)
+            raise _artifact_failure(
+                "Temporary artifact storage is unavailable."
+            ) from error
+        self._root_fd = None
+        self._artifacts.clear()
 
     async def write(
         self,
@@ -96,119 +105,181 @@ class ArtifactStore:
         if suffix not in _ALLOWED_SUFFIXES:
             raise _artifact_failure("The artifact format is not supported.")
 
-        async with self._lock:
-            root_fd = self._require_root_fd()
-            artifact_id = str(uuid4())
-            filename = f"{artifact_id}{suffix}"
-            try:
-                await asyncio.to_thread(self._write_new_file, root_fd, filename, data)
-                root_path = await asyncio.to_thread(self._root_path_from_fd, root_fd)
-            except _storage_errors() as error:
-                await self._remove_after_write_failure(root_fd, filename)
-                raise _artifact_failure("The artifact could not be stored.") from error
+        return await self._run_exclusive(
+            lambda: self._write(data, media_type, suffix, owner_session_id),
+            cancellation_cleanup=self._discard_cancelled_write,
+        )
 
-            now = datetime.now(UTC)
-            try:
-                artifact = Artifact(
-                    id=artifact_id,
-                    path=root_path / filename,
-                    media_type=media_type,
-                    owner_session_id=owner_session_id,
-                    created_at=now,
-                    last_accessed_at=now,
-                )
-            except Exception as error:
-                await self._remove_after_write_failure(root_fd, filename)
-                raise _artifact_failure("The artifact could not be stored.") from error
+    async def _write(
+        self,
+        data: bytes,
+        media_type: str,
+        suffix: str,
+        owner_session_id: str,
+    ) -> Artifact:
+        root_fd = self._require_root_fd()
+        artifact_id = str(uuid4())
+        filename = f"{artifact_id}{suffix}"
+        try:
+            await asyncio.to_thread(self._write_new_file, root_fd, filename, data)
+            root_path = await asyncio.to_thread(self._root_path_from_fd, root_fd)
+        except _storage_errors() as error:
+            await self._remove_after_write_failure(root_fd, filename)
+            raise _artifact_failure("The artifact could not be stored.") from error
 
-            self._artifacts[artifact.id] = artifact
-            return artifact.model_copy(deep=True)
+        now = datetime.now(UTC)
+        try:
+            artifact = Artifact(
+                id=artifact_id,
+                path=root_path / filename,
+                media_type=media_type,
+                owner_session_id=owner_session_id,
+                created_at=now,
+                last_accessed_at=now,
+            )
+        except Exception as error:
+            await self._remove_after_write_failure(root_fd, filename)
+            raise _artifact_failure("The artifact could not be stored.") from error
+
+        self._artifacts[artifact.id] = artifact
+        return artifact.model_copy(deep=True)
 
     async def require(self, artifact_id: str) -> Artifact:
         """Return detached artifact metadata or raise the standard not-found error."""
-        async with self._lock:
-            root_fd = self._require_root_fd()
-            artifact = self._artifacts.get(artifact_id)
-            if artifact is None:
-                raise _artifact_not_found()
+        return await self._run_exclusive(lambda: self._require(artifact_id))
 
+    async def _require(self, artifact_id: str) -> Artifact:
+        root_fd = self._require_root_fd()
+        artifact = self._artifacts.get(artifact_id)
+        if artifact is None:
+            raise _artifact_not_found()
+
+        try:
+            file_state = await asyncio.to_thread(
+                self._inspect_file, root_fd, artifact.path.name
+            )
+        except _storage_errors() as error:
+            raise _artifact_failure("The artifact could not be accessed.") from error
+
+        if file_state == _MISSING:
+            del self._artifacts[artifact_id]
+            raise _artifact_not_found()
+        if file_state == _UNSAFE_DIRECTORY:
+            del self._artifacts[artifact_id]
+            raise _artifact_not_found()
+        if file_state == _UNSAFE:
             try:
-                file_state = await asyncio.to_thread(
-                    self._inspect_file, root_fd, artifact.path.name
-                )
+                await asyncio.to_thread(self._unlink_file, root_fd, artifact.path.name)
             except _storage_errors() as error:
                 raise _artifact_failure(
                     "The artifact could not be accessed."
                 ) from error
+            del self._artifacts[artifact_id]
+            raise _artifact_not_found()
 
-            if file_state == _MISSING:
-                del self._artifacts[artifact_id]
-                raise _artifact_not_found()
-            if file_state == _UNSAFE_DIRECTORY:
-                del self._artifacts[artifact_id]
-                raise _artifact_not_found()
-            if file_state == _UNSAFE:
-                try:
-                    await asyncio.to_thread(
-                        self._unlink_file, root_fd, artifact.path.name
-                    )
-                except _storage_errors() as error:
-                    raise _artifact_failure(
-                        "The artifact could not be accessed."
-                    ) from error
-                del self._artifacts[artifact_id]
-                raise _artifact_not_found()
-
-            try:
-                artifact.path = (
-                    await asyncio.to_thread(self._root_path_from_fd, root_fd)
-                ) / artifact.path.name
-            except _storage_errors() as error:
-                raise _artifact_failure(
-                    "The artifact could not be accessed."
-                ) from error
-            artifact.last_accessed_at = datetime.now(UTC)
-            return artifact.model_copy(deep=True)
+        try:
+            artifact.path = (
+                await asyncio.to_thread(self._root_path_from_fd, root_fd)
+            ) / artifact.path.name
+        except _storage_errors() as error:
+            raise _artifact_failure("The artifact could not be accessed.") from error
+        artifact.last_accessed_at = datetime.now(UTC)
+        return artifact.model_copy(deep=True)
 
     async def delete(self, artifact_id: str) -> None:
         """Delete one artifact when it belongs to this runtime namespace."""
-        async with self._lock:
-            root_fd = self._require_root_fd()
-            artifact = self._artifacts.get(artifact_id)
-            if artifact is None:
-                return
-            await self._delete_artifact(root_fd, artifact)
-            del self._artifacts[artifact_id]
+        await self._run_exclusive(lambda: self._delete(artifact_id))
+
+    async def _delete(self, artifact_id: str) -> None:
+        root_fd = self._require_root_fd()
+        artifact = self._artifacts.get(artifact_id)
+        if artifact is None:
+            return
+        await self._delete_artifact(root_fd, artifact)
+        del self._artifacts[artifact_id]
 
     async def delete_for_session(self, session_id: str) -> list[str]:
         """Delete only artifacts that were created for the given session."""
-        async with self._lock:
-            root_fd = self._require_root_fd()
-            artifacts = [
-                artifact
-                for artifact in self._artifacts.values()
-                if artifact.owner_session_id == session_id
-            ]
-            for artifact in artifacts:
-                await self._delete_artifact(root_fd, artifact)
-                del self._artifacts[artifact.id]
-            return [artifact.id for artifact in artifacts]
+        return await self._run_exclusive(lambda: self._delete_for_session(session_id))
+
+    async def _delete_for_session(self, session_id: str) -> list[str]:
+        root_fd = self._require_root_fd()
+        artifacts = [
+            artifact
+            for artifact in self._artifacts.values()
+            if artifact.owner_session_id == session_id
+        ]
+        for artifact in artifacts:
+            await self._delete_artifact(root_fd, artifact)
+            del self._artifacts[artifact.id]
+        return [artifact.id for artifact in artifacts]
 
     async def delete_expired(self, now: datetime | None = None) -> list[str]:
         """Delete artifacts that have not been accessed within the configured TTL."""
+        return await self._run_exclusive(lambda: self._delete_expired(now))
+
+    async def _delete_expired(self, now: datetime | None = None) -> list[str]:
         expiry_time = now or datetime.now(UTC)
+        root_fd = self._require_root_fd()
+        artifacts = [
+            artifact
+            for artifact in self._artifacts.values()
+            if (expiry_time - artifact.last_accessed_at).total_seconds()
+            > self._ttl_seconds
+        ]
+        for artifact in artifacts:
+            await self._delete_artifact(root_fd, artifact)
+            del self._artifacts[artifact.id]
+        return [artifact.id for artifact in artifacts]
+
+    async def _run_exclusive[T](
+        self,
+        operation: Callable[[], Awaitable[T]],
+        *,
+        cancellation_cleanup: Callable[[T], Awaitable[None]] | None = None,
+    ) -> T:
         async with self._lock:
-            root_fd = self._require_root_fd()
-            artifacts = [
-                artifact
-                for artifact in self._artifacts.values()
-                if (expiry_time - artifact.last_accessed_at).total_seconds()
-                > self._ttl_seconds
-            ]
-            for artifact in artifacts:
-                await self._delete_artifact(root_fd, artifact)
-                del self._artifacts[artifact.id]
-            return [artifact.id for artifact in artifacts]
+            operation_task = asyncio.create_task(operation())
+            try:
+                return await asyncio.shield(operation_task)
+            except asyncio.CancelledError:
+                completed, result = await self._drain_cancelled_task(operation_task)
+                if completed and cancellation_cleanup is not None:
+                    cleanup_task = asyncio.create_task(cancellation_cleanup(result))
+                    await self._drain_cancelled_task(cleanup_task)
+                raise
+
+    @staticmethod
+    async def _drain_cancelled_task[T](
+        task: asyncio.Task[T],
+    ) -> tuple[bool, T | None]:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if task.cancelled():
+            return False, None
+        try:
+            return True, task.result()
+        except BaseException:
+            return False, None
+
+    async def _discard_cancelled_startup(self, _: None) -> None:
+        await self._shutdown()
+
+    async def _discard_cancelled_write(self, artifact: Artifact) -> None:
+        stored = self._artifacts.get(artifact.id)
+        if stored is None:
+            return
+        root_fd = self._require_root_fd()
+        try:
+            await self._delete_artifact(root_fd, stored)
+        except AppError:
+            return
+        del self._artifacts[artifact.id]
 
     def _open_and_clear_root(self) -> tuple[int, Path]:
         parent_fd, root_name = self._open_parent_directory()
@@ -269,10 +340,23 @@ class ArtifactStore:
 
     @staticmethod
     def _root_path_from_fd(root_fd: int) -> Path:
-        if fcntl is None or not hasattr(fcntl, "F_GETPATH"):
+        if sys.platform == "darwin":
+            if fcntl is None or not hasattr(fcntl, "F_GETPATH"):
+                raise _CapabilityError("Descriptor paths are unavailable.")
+            raw_path = fcntl.fcntl(root_fd, fcntl.F_GETPATH, b"\0" * _PATH_MAX)
+            path = Path(os.fsdecode(raw_path).split("\0", maxsplit=1)[0])
+        elif sys.platform.startswith("linux"):
+            path = Path(os.readlink(f"/proc/self/fd/{root_fd}"))
+            descriptor_state = os.fstat(root_fd)
+            path_state = os.stat(path, follow_symlinks=False)
+            if (path_state.st_dev, path_state.st_ino) != (
+                descriptor_state.st_dev,
+                descriptor_state.st_ino,
+            ):
+                raise _CapabilityError("Descriptor path identity is invalid.")
+        else:
             raise _CapabilityError("Descriptor paths are unavailable.")
-        raw_path = fcntl.fcntl(root_fd, fcntl.F_GETPATH, b"\0" * _PATH_MAX)
-        path = Path(os.fsdecode(raw_path).split("\0", maxsplit=1)[0])
+
         if not path.is_absolute():
             raise _CapabilityError("Descriptor path is invalid.")
         return path

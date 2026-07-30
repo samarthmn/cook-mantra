@@ -82,6 +82,55 @@ def test_validation_errors_use_the_invalid_request_contract() -> None:
     }
 
 
+def test_framework_not_found_uses_the_resource_not_found_contract() -> None:
+    response = TestClient(create_app()).get(
+        "/missing-route",
+        headers={"X-Request-ID": "req-framework-not-found"},
+    )
+
+    assert response.status_code == 404
+    assert response.headers["X-Request-ID"] == "req-framework-not-found"
+    assert response.json() == {
+        "error": {
+            "code": "resource_not_found",
+            "message": "Resource was not found.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-framework-not-found",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+
+
+def test_framework_method_not_allowed_uses_the_invalid_request_contract() -> None:
+    app = create_app()
+
+    @app.get("/read-only")
+    def read_only() -> dict[str, bool]:
+        return {"ok": True}
+
+    response = TestClient(app).post(
+        "/read-only",
+        headers={"X-Request-ID": "req-method-not-allowed"},
+    )
+
+    assert response.status_code == 405
+    assert response.headers["X-Request-ID"] == "req-method-not-allowed"
+    assert response.headers["allow"] == "GET"
+    assert response.json() == {
+        "error": {
+            "code": "invalid_request",
+            "message": "The request is invalid.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-method-not-allowed",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+
+
 def test_unexpected_errors_do_not_expose_exception_details() -> None:
     app = create_app()
 
