@@ -11,6 +11,7 @@ def test_settings_have_safe_local_defaults() -> None:
     assert settings.api_port == 8000
     assert settings.max_concurrent_jobs == 2
     assert settings.max_concurrent_model_calls == 2
+    assert settings.max_upload_bytes == 10 * 1024 * 1024
     assert settings.session_ttl_seconds == 21_600
     assert settings.artifact_root == PROJECT_ROOT / "tmp" / "cook-mantra-api"
 

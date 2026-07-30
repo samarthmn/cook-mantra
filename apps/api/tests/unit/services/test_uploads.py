@@ -15,13 +15,27 @@ def image_bytes(image_format: str) -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_validator_detects_type_from_bytes() -> None:
-    upload = UploadFile(filename="../../wrong.jpg", file=BytesIO(image_bytes("PNG")))
+@pytest.mark.parametrize(
+    ("image_format", "media_type", "suffix"),
+    [
+        ("JPEG", "image/jpeg", ".jpg"),
+        ("PNG", "image/png", ".png"),
+        ("WEBP", "image/webp", ".webp"),
+    ],
+)
+async def test_validator_detects_allowed_type_from_bytes(
+    image_format: str,
+    media_type: str,
+    suffix: str,
+) -> None:
+    upload = UploadFile(
+        filename="../../wrong.jpg", file=BytesIO(image_bytes(image_format))
+    )
 
     image = await ImageUploadValidator(max_bytes=1024).read(upload)
 
-    assert image.media_type == "image/png"
-    assert image.suffix == ".png"
+    assert image.media_type == media_type
+    assert image.suffix == suffix
 
 
 @pytest.mark.asyncio
