@@ -454,6 +454,81 @@ async def test_shutdown_records_a_close_failure_without_retrying_the_descriptor(
     actual_close(root_fd)
 
 
+@pytest.mark.parametrize(
+    "next_close_fails",
+    [False, True],
+    ids=["cleanup-succeeds", "cleanup-fails"],
+)
+def test_open_parent_directory_accounts_for_both_descriptors_when_handoff_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    next_close_fails: bool,
+) -> None:
+    store = ArtifactStore(Path("/intermediate/artifacts"), ttl_seconds=60)
+    previous_fd = 101
+    next_fd = 102
+    descriptors = iter((previous_fd, next_fd))
+    close_attempts: list[int] = []
+    closed_descriptors: list[int] = []
+
+    def open_directory(_: str, __: int | None = None) -> int:
+        return next(descriptors)
+
+    def fail_previous_close(descriptor: int) -> None:
+        close_attempts.append(descriptor)
+        if descriptor == previous_fd:
+            raise OSError(errno.EIO, "previous close failed")
+        if next_close_fails:
+            raise OSError(errno.EIO, "next close failed")
+        closed_descriptors.append(descriptor)
+
+    monkeypatch.setattr(store, "_open_directory", open_directory)
+    monkeypatch.setattr(artifacts_service.os, "close", fail_previous_close)
+
+    with pytest.raises(OSError, match="previous close failed"):
+        store._open_parent_directory()
+
+    assert close_attempts == [previous_fd, next_fd]
+    assert closed_descriptors == ([] if next_close_fails else [next_fd])
+    expected_unresolved = {previous_fd, next_fd} if next_close_fails else {previous_fd}
+    assert store._unresolved_close_fds == expected_unresolved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_name", "operation_args"),
+    [
+        ("require", ("missing-artifact",)),
+        ("delete", ("missing-artifact",)),
+        ("delete_for_session", ("missing-session",)),
+        ("delete_expired", ()),
+    ],
+)
+async def test_unresolved_close_state_precedes_public_resource_lookup(
+    tmp_path: Path,
+    operation_name: str,
+    operation_args: tuple[object, ...],
+) -> None:
+    store = ArtifactStore(tmp_path, ttl_seconds=60)
+    await store.startup()
+    root_fd = store._root_fd
+
+    assert root_fd is not None
+    store._unresolved_close_fds.add(root_fd + 10_000)
+
+    try:
+        operation = getattr(store, operation_name)
+        with pytest.raises(AppError) as raised:
+            await operation(*operation_args)
+    finally:
+        store._unresolved_close_fds.clear()
+        await store.shutdown()
+
+    assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+    assert raised.value.message == "Temporary artifact storage is unavailable."
+    assert raised.value.status_code == 500
+    assert raised.value.retryable is False
+
+
 @pytest.mark.asyncio
 async def test_startup_does_not_publish_state_when_closing_previous_descriptor_fails(
     tmp_path: Path,

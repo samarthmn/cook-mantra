@@ -127,11 +127,11 @@ class ArtifactStore:
     async def require(self, artifact_id: str) -> Artifact:
         """Return detached artifact metadata or raise the standard not-found error."""
         async with self._lock:
+            root_fd = self._require_root_fd()
             artifact = self._artifacts.get(artifact_id)
             if artifact is None:
                 raise _artifact_not_found()
 
-            root_fd = self._require_root_fd()
             try:
                 file_state = await asyncio.to_thread(
                     self._inspect_file, root_fd, artifact.path.name
@@ -173,22 +173,24 @@ class ArtifactStore:
     async def delete(self, artifact_id: str) -> None:
         """Delete one artifact when it belongs to this runtime namespace."""
         async with self._lock:
+            root_fd = self._require_root_fd()
             artifact = self._artifacts.get(artifact_id)
             if artifact is None:
                 return
-            await self._delete_artifact(artifact)
+            await self._delete_artifact(root_fd, artifact)
             del self._artifacts[artifact_id]
 
     async def delete_for_session(self, session_id: str) -> list[str]:
         """Delete only artifacts that were created for the given session."""
         async with self._lock:
+            root_fd = self._require_root_fd()
             artifacts = [
                 artifact
                 for artifact in self._artifacts.values()
                 if artifact.owner_session_id == session_id
             ]
             for artifact in artifacts:
-                await self._delete_artifact(artifact)
+                await self._delete_artifact(root_fd, artifact)
                 del self._artifacts[artifact.id]
             return [artifact.id for artifact in artifacts]
 
@@ -196,6 +198,7 @@ class ArtifactStore:
         """Delete artifacts that have not been accessed within the configured TTL."""
         expiry_time = now or datetime.now(UTC)
         async with self._lock:
+            root_fd = self._require_root_fd()
             artifacts = [
                 artifact
                 for artifact in self._artifacts.values()
@@ -203,7 +206,7 @@ class ArtifactStore:
                 > self._ttl_seconds
             ]
             for artifact in artifacts:
-                await self._delete_artifact(artifact)
+                await self._delete_artifact(root_fd, artifact)
                 del self._artifacts[artifact.id]
             return [artifact.id for artifact in artifacts]
 
@@ -243,11 +246,16 @@ class ArtifactStore:
                     with suppress(FileExistsError):
                         os.mkdir(component, mode=0o700, dir_fd=directory_fd)
                     next_fd = self._open_directory(component, directory_fd)
-                os.close(directory_fd)
+                previous_fd = directory_fd
                 directory_fd = next_fd
+                try:
+                    os.close(previous_fd)
+                except OSError:
+                    self._unresolved_close_fds.add(previous_fd)
+                    raise
             return directory_fd, parts[-1]
         except BaseException:
-            os.close(directory_fd)
+            self._close_after_failure(directory_fd)
             raise
 
     @staticmethod
@@ -313,11 +321,9 @@ class ArtifactStore:
         finally:
             os.close(descriptor)
 
-    async def _delete_artifact(self, artifact: Artifact) -> None:
+    async def _delete_artifact(self, root_fd: int, artifact: Artifact) -> None:
         try:
-            await asyncio.to_thread(
-                self._unlink_file, self._require_root_fd(), artifact.path.name
-            )
+            await asyncio.to_thread(self._unlink_file, root_fd, artifact.path.name)
         except _storage_errors() as error:
             raise _artifact_failure("The artifact could not be deleted.") from error
 
