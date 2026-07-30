@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,6 +32,7 @@ class OptionGenerationContext(BaseModel):
     previous_stage: SessionStage
     more: bool
     session_id: str
+    generation_id: str
     rollback_snapshot: str = Field(repr=False)
 
 
@@ -77,10 +79,12 @@ def begin_option_generation(
         )
 
     validated_preferences = RecipePreferences.model_validate(preferences)
+    generation_id = str(uuid4())
     context = OptionGenerationContext(
         previous_stage=session.stage,
         more=more,
         session_id=session.id,
+        generation_id=generation_id,
         rollback_snapshot=session.model_dump_json(),
     )
     exclusions = _canonical_exclusions(session) if more else set()
@@ -90,6 +94,7 @@ def begin_option_generation(
             "stage": SessionStage.GENERATING_OPTIONS,
             "preferences": validated_preferences.model_copy(deep=True),
             "excluded_recipe_names": exclusions,
+            "option_generation_id": generation_id,
             "updated_at": datetime.now(UTC),
         },
     )
@@ -139,6 +144,7 @@ def commit_option_batch(
             "recipe_options": committed_options,
             "excluded_recipe_names": exclusions,
             "option_batch_number": session.option_batch_number + 1,
+            "option_generation_id": None,
             "updated_at": datetime.now(UTC),
         },
     )
@@ -180,6 +186,7 @@ def _require_matching_context(
     )
     if (
         context.session_id != session.id
+        or context.generation_id != session.option_generation_id
         or context.previous_stage is not expected_stage
         or context.previous_stage not in _OPTION_ENTRY_STAGES
     ):

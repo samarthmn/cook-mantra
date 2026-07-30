@@ -22,6 +22,7 @@ from domain.recipe_options import (
 )
 from domain.session_service import confirmed_ingredient_names
 from domain.sessions import Session, SessionStage
+from schemas.sessions import SessionResponse
 
 NOW = datetime(2026, 7, 30, tzinfo=UTC)
 
@@ -233,6 +234,78 @@ def test_more_preserves_every_shown_name_as_a_canonical_exclusion() -> None:
     ]
 
 
+def test_generation_attempt_identity_is_server_owned_unique_and_not_public() -> None:
+    session = confirmed_session()
+
+    first, _, first_context = begin_option_generation(
+        session,
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+    second, _, second_context = begin_option_generation(
+        session,
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+
+    assert first.option_generation_id == first_context.generation_id
+    assert second.option_generation_id == second_context.generation_id
+    assert first.option_generation_id != second.option_generation_id
+    assert str(UUID(first.option_generation_id)) == first.option_generation_id
+    assert (
+        "option_generation_id" not in SessionResponse.model_validate(first).model_dump()
+    )
+
+
+def test_stale_context_cannot_commit_a_newer_same_mode_attempt() -> None:
+    session = confirmed_session()
+    _, _, stale_context = begin_option_generation(
+        session,
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+    generating, _, _ = begin_option_generation(
+        session,
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+    before_commit = generating.model_copy(deep=True)
+
+    with pytest.raises(AppError, match="context does not match") as error:
+        commit_option_batch(
+            generating,
+            [option_draft("Tomato Curry")],
+            [nutrition_estimate()],
+            stale_context,
+        )
+
+    assert error.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert error.value.retryable is False
+    assert generating == before_commit
+
+
+def test_stale_context_cannot_restore_over_a_newer_same_mode_attempt() -> None:
+    session = confirmed_session()
+    _, _, stale_context = begin_option_generation(
+        session,
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+    generating, _, _ = begin_option_generation(
+        session,
+        RecipePreferences(option_count=2),
+        more=False,
+    )
+    before_restore = generating.model_copy(deep=True)
+
+    with pytest.raises(AppError, match="context does not match") as error:
+        restore_option_generation(generating, stale_context)
+
+    assert error.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert error.value.retryable is False
+    assert generating == before_restore
+
+
 def test_first_commit_replaces_options_despite_a_stale_nonzero_batch_count() -> None:
     generating, _, context = begin_option_generation(
         confirmed_session(
@@ -248,6 +321,7 @@ def test_first_commit_replaces_options_despite_a_stale_nonzero_batch_count() -> 
     committed = commit_option_batch(generating, drafts, nutrition, context)
 
     assert committed.stage is SessionStage.OPTIONS_READY
+    assert committed.option_generation_id is None
     assert committed.option_batch_number == 8
     assert [option.name for option in committed.recipe_options] == [
         "Tomato Curry",
@@ -334,6 +408,7 @@ def test_failed_generation_restores_exact_stage_and_prior_options() -> None:
         recipe_options=[previous_option],
         excluded_recipe_names={"tomato curry", "historic dish"},
         option_batch_number=7,
+        option_generation_id="5d0db4da-6f84-4a7a-b32f-1c33b7ab72c9",
     )
     generating, previous_stage, context = begin_option_generation(
         session,
@@ -356,6 +431,7 @@ def test_failed_generation_restores_exact_stage_and_prior_options() -> None:
     assert restored.recipe_options == [previous_option]
     assert restored.excluded_recipe_names == {"tomato curry", "historic dish"}
     assert restored.option_batch_number == 7
+    assert restored.option_generation_id == "5d0db4da-6f84-4a7a-b32f-1c33b7ab72c9"
     assert restored.updated_at == NOW
     assert restored is not session
     assert generating.stage is SessionStage.GENERATING_OPTIONS
