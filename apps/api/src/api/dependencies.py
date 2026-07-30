@@ -4,6 +4,7 @@ from fastapi import Request
 
 from core.config import Settings
 from orchestration.graphs.ingredient_extraction import IngredientExtractionRunner
+from orchestration.graphs.recipe_options import RecipeOptionsRunner
 from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
 from repositories.session_store import SessionStore
@@ -48,6 +49,11 @@ def get_ingredient_extraction_runner(
 ) -> IngredientExtractionRunner:
     """Return the extraction runner bound to this application's stores."""
     return request.app.state.ingredient_extraction_runner
+
+
+def get_recipe_options_runner(request: Request) -> RecipeOptionsRunner:
+    """Return the recipe-option runner bound to this application's stores."""
+    return request.app.state.recipe_options_runner
 
 
 def get_model_call_limiter(request: Request) -> ModelCallLimiter:
