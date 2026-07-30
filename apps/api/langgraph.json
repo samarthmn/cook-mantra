@@ -1,7 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "agent": "./src/orchestration/graphs/smoke.py:graph"
+    "ingredient_extraction": "./src/orchestration/graphs/ingredient_extraction.py:build_development_ingredient_extraction_graph"
   },
   "env": ".env"
 }
