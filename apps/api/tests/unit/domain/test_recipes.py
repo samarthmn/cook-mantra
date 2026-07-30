@@ -132,6 +132,61 @@ def test_recipe_step_rejects_zero_duration() -> None:
         RecipeStep(number=1, instruction="Cook.", duration_minutes=0)
 
 
+@pytest.mark.parametrize("field_name", ["number", "duration_minutes"])
+@pytest.mark.parametrize("invalid_value", [True, 1.0, "1"])
+def test_recipe_step_rejects_coercible_noninteger_scalars(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    values: dict[str, object] = {
+        "number": 1,
+        "instruction": "Cook.",
+        "duration_minutes": 2,
+    }
+    values[field_name] = invalid_value
+
+    with pytest.raises(ValidationError):
+        RecipeStep.model_validate(values)
+
+
+@pytest.mark.parametrize("field_name", ["servings", "total_minutes"])
+@pytest.mark.parametrize("invalid_value", [True, 2.0, "2"])
+def test_complete_recipe_rejects_coercible_noninteger_scalars(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        complete_recipe(**{field_name: invalid_value})
+
+
+@pytest.mark.parametrize("invalid_value", [0, 1, "false", "true"])
+def test_recipe_failure_retryable_rejects_coercible_nonboolean_scalars(
+    invalid_value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        RecipeFailure(
+            option_id="option-1",
+            code=ErrorCode.MODEL_OUTPUT_INVALID,
+            message="The generated recipe was invalid.",
+            retryable=invalid_value,
+        )
+
+
+def test_strict_scalars_keep_json_schema_primitive_types() -> None:
+    step_properties = RecipeStep.model_json_schema()["properties"]
+    recipe_properties = CompleteRecipe.model_json_schema()["properties"]
+    failure_properties = RecipeFailure.model_json_schema()["properties"]
+
+    assert step_properties["number"]["type"] == "integer"
+    assert step_properties["duration_minutes"]["anyOf"] == [
+        {"minimum": 1, "type": "integer"},
+        {"type": "null"},
+    ]
+    assert recipe_properties["servings"]["type"] == "integer"
+    assert recipe_properties["total_minutes"]["type"] == "integer"
+    assert failure_properties["retryable"]["type"] == "boolean"
+
+
 def test_missing_and_optional_ingredients_keep_substitution_semantics() -> None:
     recipe = complete_recipe(
         ingredients=[

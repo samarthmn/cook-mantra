@@ -54,9 +54,9 @@ class RecipeStep(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    number: int = Field(ge=1)
+    number: int = Field(ge=1, strict=True)
     instruction: str
-    duration_minutes: int | None = Field(default=None, ge=1)
+    duration_minutes: int | None = Field(default=None, ge=1, strict=True)
 
     @field_validator("instruction")
     @classmethod
@@ -73,7 +73,7 @@ class RecipeFailure(BaseModel):
     option_id: str
     code: ErrorCode
     message: str
-    retryable: bool
+    retryable: bool = Field(strict=True)
 
     @field_validator("option_id", "message")
     @classmethod
@@ -90,8 +90,8 @@ class CompleteRecipe(BaseModel):
     option_id: str
     name: str
     cuisine: str
-    servings: int = Field(ge=1, le=12)
-    total_minutes: int = Field(ge=1, le=1_440)
+    servings: int = Field(ge=1, le=12, strict=True)
+    total_minutes: int = Field(ge=1, le=1_440, strict=True)
     ingredients: tuple[RecipeIngredient, ...] = Field(min_length=1)
     steps: tuple[RecipeStep, ...] = Field(min_length=1)
     tips: tuple[str, ...] = ()
