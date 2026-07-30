@@ -175,6 +175,10 @@ class FatalAgentSignal(BaseException):
     pass
 
 
+class PrimaryGraphFailure(RuntimeError):
+    pass
+
+
 class CountingLimiter(ModelCallLimiter):
     def __init__(self, max_concurrent_calls: int) -> None:
         super().__init__(max_concurrent_calls)
@@ -717,6 +721,59 @@ async def test_progress_failure_cancels_and_drains_children_then_rolls_back() ->
         fixture,
         await fixture.store.require(fixture.generating.id),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "primary_failure",
+    [
+        PrimaryGraphFailure("recipe progress failed"),
+        FatalAgentSignal(),
+    ],
+    ids=["normal", "fatal"],
+)
+async def test_primary_failure_survives_repeated_cancellation_during_rollback(
+    primary_failure: BaseException,
+) -> None:
+    store = PausingRollbackStore()
+    fixture = await make_generation(store=store)
+    agent = ScriptedAgent(
+        {option.id: complete_recipe(option) for option in fixture.selected}
+    )
+
+    async def fail_load_progress(value: int) -> None:
+        assert value == 10
+        raise primary_failure
+
+    store.pause_rollbacks = True
+    graph_task = asyncio.create_task(
+        graph_for(fixture, agent, progress=fail_load_progress).ainvoke(
+            invocation(fixture)
+        )
+    )
+
+    try:
+        await asyncio.wait_for(store.rollback_started.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        store.allow_rollback.set()
+        with pytest.raises(type(primary_failure)) as raised:
+            await graph_task
+        assert raised.value is primary_failure
+    finally:
+        store.allow_rollback.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    assert agent.calls == []
+    assert_exact_restore(fixture, await store.require(fixture.generating.id))
 
 
 @pytest.mark.asyncio

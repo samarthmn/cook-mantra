@@ -108,6 +108,15 @@ async def generate_complete_recipes(
             )
         )
         raise
+    except BaseException:
+        await _run_cancellation_safe(
+            _restore_unowned_generation(
+                session_store,
+                persisted.id,
+                generation_context,
+            )
+        )
+        raise
 
     return QueuedJobResponse(session_id=persisted.id, job_id=job.id)
 
@@ -134,13 +143,9 @@ async def _restore_unowned_generation(
 async def _run_cancellation_safe(operation: Awaitable[None]) -> None:
     """Drain a pre-ownership rollback despite repeated request cancellation."""
     operation_task = asyncio.create_task(operation)
-    cancellation: asyncio.CancelledError | None = None
     while not operation_task.done():
         try:
             await asyncio.shield(operation_task)
-        except asyncio.CancelledError as error:
-            cancellation = error
+        except asyncio.CancelledError:
             continue
     operation_task.result()
-    if cancellation is not None:
-        raise cancellation

@@ -119,6 +119,18 @@ class FailingJobRunner:
         )
 
 
+class FatalSubmitSignal(BaseException):
+    pass
+
+
+class FatalJobRunner:
+    def __init__(self, signal: FatalSubmitSignal) -> None:
+        self.signal = signal
+
+    async def submit(self, operation, session_id, worker):
+        raise self.signal
+
+
 class BlockingJobRunner:
     def __init__(self) -> None:
         self.submit_started = asyncio.Event()
@@ -551,6 +563,75 @@ def test_submission_failure_restores_exact_previous_session(
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "ollama_unavailable"
+    assert restored.model_dump(exclude={"updated_at"}) == previous.model_dump(
+        exclude={"updated_at"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_submission_failure_survives_repeated_cancellation_during_rollback() -> (
+    None
+):
+    session_store = PausingRollbackSessionStore()
+    previous = await store_options_session(session_store)
+    session_store.pause_rollbacks = True
+    request_task = asyncio.create_task(
+        recipe_routes.generate_complete_recipes(
+            previous.id,
+            recipe_routes.RecipeSelectionRequest(
+                option_ids=["option-curry"],
+            ),
+            session_store,
+            FailingJobRunner(),
+            CapturingCompleteRecipesRunner(),
+        )
+    )
+
+    try:
+        await asyncio.wait_for(session_store.rollback_started.wait(), timeout=1)
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        session_store.allow_rollback.set()
+        with pytest.raises(AppError) as raised:
+            await request_task
+        assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
+    finally:
+        session_store.allow_rollback.set()
+        if not request_task.done():
+            request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
+
+    restored = await session_store.require(previous.id)
+    assert restored.model_dump(exclude={"updated_at"}) == previous.model_dump(
+        exclude={"updated_at"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_fatal_submission_signal_restores_exact_previous_session() -> None:
+    session_store = SessionStore(ttl_seconds=21_600)
+    previous = await store_options_session(session_store)
+    fatal = FatalSubmitSignal()
+
+    with pytest.raises(FatalSubmitSignal) as raised:
+        await recipe_routes.generate_complete_recipes(
+            previous.id,
+            recipe_routes.RecipeSelectionRequest(
+                option_ids=["option-curry"],
+            ),
+            session_store,
+            FatalJobRunner(fatal),
+            CapturingCompleteRecipesRunner(),
+        )
+
+    assert raised.value is fatal
+    restored = await session_store.require(previous.id)
     assert restored.model_dump(exclude={"updated_at"}) == previous.model_dump(
         exclude={"updated_at"}
     )

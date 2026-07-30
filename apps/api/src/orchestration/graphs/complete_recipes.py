@@ -408,18 +408,14 @@ async def _drain_rollback(
     state: CompleteRecipesState,
     dependencies: CompleteRecipeDependencies,
 ) -> None:
-    """Drain exact-attempt rollback before propagating repeated cancellation."""
+    """Drain exact-attempt rollback despite repeated cancellation."""
     rollback_task = asyncio.create_task(_preserving_rollback(state, dependencies))
-    cancellation: asyncio.CancelledError | None = None
     while not rollback_task.done():
         try:
             await asyncio.shield(rollback_task)
-        except asyncio.CancelledError as error:
-            cancellation = error
+        except asyncio.CancelledError:
             continue
     rollback_task.result()
-    if cancellation is not None:
-        raise cancellation
 
 
 async def _preserving_rollback(
