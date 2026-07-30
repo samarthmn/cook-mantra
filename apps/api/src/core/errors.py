@@ -20,6 +20,7 @@ class ErrorCode(StrEnum):
     INVALID_REQUEST = "invalid_request"
     RESOURCE_NOT_FOUND = "resource_not_found"
     INVALID_SESSION_TRANSITION = "invalid_session_transition"
+    INGREDIENTS_NOT_CONFIRMED = "ingredients_not_confirmed"
     OLLAMA_UNAVAILABLE = "ollama_unavailable"
     MODEL_NOT_FOUND = "model_not_found"
     MODEL_OUTPUT_INVALID = "model_output_invalid"
