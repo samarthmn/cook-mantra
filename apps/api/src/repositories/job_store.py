@@ -43,16 +43,25 @@ class JobStore:
 
     async def mark_running(self, job_id: str) -> Job:
         """Mark a queued job as in progress."""
-        return await self._update(job_id, status=JobStatus.RUNNING)
+        return await self._update(
+            job_id,
+            expected_status=JobStatus.QUEUED,
+            status=JobStatus.RUNNING,
+        )
 
     async def update_progress(self, job_id: str, progress: int) -> Job:
         """Store a job's latest progress percentage."""
-        return await self._update(job_id, progress=progress)
+        return await self._update(
+            job_id,
+            expected_status=JobStatus.RUNNING,
+            progress=progress,
+        )
 
     async def mark_succeeded(self, job_id: str, result: dict[str, object]) -> Job:
         """Complete a job with its result."""
         return await self._update(
             job_id,
+            expected_status=JobStatus.RUNNING,
             status=JobStatus.SUCCEEDED,
             progress=100,
             result=result,
@@ -61,7 +70,13 @@ class JobStore:
 
     async def mark_failed(self, job_id: str, error: JobError) -> Job:
         """Complete a job with safe error details."""
-        return await self._update(job_id, status=JobStatus.FAILED, error=error)
+        return await self._update(
+            job_id,
+            expected_status=JobStatus.RUNNING,
+            status=JobStatus.FAILED,
+            result=None,
+            error=error,
+        )
 
     async def delete_expired(self, now: datetime | None = None) -> list[str]:
         """Delete jobs that have been inactive longer than their TTL."""
@@ -76,9 +91,19 @@ class JobStore:
                 del self._jobs[job_id]
             return expired_ids
 
-    async def _update(self, job_id: str, **changes: object) -> Job:
+    async def _update(
+        self,
+        job_id: str,
+        *,
+        expected_status: JobStatus | None = None,
+        **changes: object,
+    ) -> Job:
         async with self._lock:
             job = self._require(job_id)
+            if expected_status is not None and job.status is not expected_status:
+                raise ValueError(
+                    f"Cannot update a {job.status} job; expected {expected_status}."
+                )
             payload = job.model_dump()
             payload.update(changes)
             payload["updated_at"] = datetime.now(UTC)

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
 from domain.sessions import SessionStage
@@ -20,6 +21,18 @@ async def test_session_starts_extracting_and_can_be_replaced() -> None:
     assert session.stage is SessionStage.EXTRACTING
     assert replaced.stage is SessionStage.REVIEWING_INGREDIENTS
     assert (await store.require(session.id)).stage is SessionStage.REVIEWING_INGREDIENTS
+
+
+@pytest.mark.asyncio
+async def test_invalid_unchecked_replacement_preserves_stored_session() -> None:
+    store = SessionStore(ttl_seconds=21_600)
+    session = await store.create()
+    invalid_replacement = session.model_copy(update={"stage": "invalid"})
+
+    with pytest.raises(ValidationError):
+        await store.replace(invalid_replacement)
+
+    assert (await store.require(session.id)).stage is SessionStage.EXTRACTING
 
 
 @pytest.mark.asyncio

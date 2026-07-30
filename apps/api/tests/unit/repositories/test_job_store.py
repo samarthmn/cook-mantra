@@ -22,9 +22,84 @@ async def test_job_moves_through_valid_states() -> None:
 
 
 @pytest.mark.asyncio
+async def test_job_must_run_before_it_can_complete() -> None:
+    store = JobStore(ttl_seconds=21_600)
+    job = await store.create(JobOperation.EXTRACT_INGREDIENTS, "session-1")
+    error = JobError(
+        code=ErrorCode.INTERNAL_ERROR,
+        message="The operation failed.",
+        retryable=False,
+    )
+
+    with pytest.raises(ValueError):
+        await store.mark_succeeded(job.id, {"ingredient_count": 2})
+    with pytest.raises(ValueError):
+        await store.mark_failed(job.id, error)
+
+    assert (await store.require(job.id)).status is JobStatus.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_terminal_job_lifecycle_is_immutable() -> None:
+    store = JobStore(ttl_seconds=21_600)
+    succeeded = await store.create(JobOperation.EXTRACT_INGREDIENTS, "session-1")
+    failed = await store.create(JobOperation.EXTRACT_INGREDIENTS, "session-2")
+    error = JobError(
+        code=ErrorCode.INTERNAL_ERROR,
+        message="The operation failed.",
+        retryable=False,
+    )
+
+    await store.mark_running(succeeded.id)
+    await store.mark_succeeded(succeeded.id, {"ingredient_count": 2})
+    await store.mark_running(failed.id)
+    await store.mark_failed(failed.id, error)
+
+    with pytest.raises(ValueError):
+        await store.mark_running(succeeded.id)
+    with pytest.raises(ValueError):
+        await store.mark_failed(succeeded.id, error)
+    with pytest.raises(ValueError):
+        await store.update_progress(succeeded.id, 50)
+    with pytest.raises(ValueError):
+        await store.mark_running(failed.id)
+    with pytest.raises(ValueError):
+        await store.mark_succeeded(failed.id, {"ingredient_count": 2})
+    with pytest.raises(ValueError):
+        await store.update_progress(failed.id, 50)
+
+    assert (await store.require(succeeded.id)).status is JobStatus.SUCCEEDED
+    assert (await store.require(succeeded.id)).result == {"ingredient_count": 2}
+    assert (await store.require(failed.id)).status is JobStatus.FAILED
+    assert (await store.require(failed.id)).error == error
+
+
+@pytest.mark.asyncio
+async def test_completion_records_only_its_compatible_payload() -> None:
+    store = JobStore(ttl_seconds=21_600)
+    succeeded = await store.create(JobOperation.EXTRACT_INGREDIENTS, "session-1")
+    failed = await store.create(JobOperation.EXTRACT_INGREDIENTS, "session-2")
+    error = JobError(
+        code=ErrorCode.INTERNAL_ERROR,
+        message="The operation failed.",
+        retryable=False,
+    )
+
+    await store.mark_running(succeeded.id)
+    completed = await store.mark_succeeded(succeeded.id, {"ingredient_count": 2})
+    await store.mark_running(failed.id)
+    failed_job = await store.mark_failed(failed.id, error)
+
+    assert completed.error is None
+    assert failed_job.result is None
+    assert failed_job.error == error
+
+
+@pytest.mark.asyncio
 async def test_job_reads_do_not_expose_stored_state() -> None:
     store = JobStore(ttl_seconds=21_600)
     job = await store.create(JobOperation.EXTRACT_INGREDIENTS, "session-1")
+    await store.mark_running(job.id)
     await store.mark_succeeded(job.id, {"ingredient_count": 2})
 
     read = await store.require(job.id)
@@ -41,6 +116,7 @@ async def test_writing_a_result_does_not_retain_the_callers_mapping() -> None:
     job = await store.create(JobOperation.EXTRACT_INGREDIENTS, "session-1")
     result = {"ingredient_count": 2}
 
+    await store.mark_running(job.id)
     await store.mark_succeeded(job.id, result)
     result["ingredient_count"] = 99
 
@@ -58,6 +134,7 @@ async def test_writing_an_error_does_not_retain_the_callers_details() -> None:
         retryable=False,
     )
 
+    await store.mark_running(job.id)
     await store.mark_failed(job.id, error)
     error.details["attempt"] = 2
 

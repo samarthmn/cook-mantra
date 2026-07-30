@@ -44,13 +44,10 @@ class SessionStore:
         """Atomically replace an existing session with updated state."""
         async with self._lock:
             current = self._require(session.id)
-            replacement = session.model_copy(
-                update={
-                    "created_at": current.created_at,
-                    "updated_at": datetime.now(UTC),
-                },
-                deep=True,
-            )
+            payload = session.__dict__.copy()
+            payload["created_at"] = current.created_at
+            payload["updated_at"] = datetime.now(UTC)
+            replacement = Session.model_validate(payload)
             self._sessions[session.id] = replacement
             return replacement.model_copy(deep=True)
 
