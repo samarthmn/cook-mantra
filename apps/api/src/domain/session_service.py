@@ -1,4 +1,4 @@
-"""Session transitions for ingredient review and confirmation."""
+"""Session transitions and confirmed ingredient access."""
 
 from datetime import UTC, datetime
 
@@ -70,3 +70,8 @@ def confirmed_ingredients(session: Session) -> list[Ingredient]:
             session_id=session.id,
         )
     return [ingredient for ingredient in session.ingredients if ingredient.confirmed]
+
+
+def confirmed_ingredient_names(session: Session) -> list[str]:
+    """Return only the ingredient names approved for recipe generation."""
+    return [ingredient.name for ingredient in confirmed_ingredients(session)]

@@ -80,12 +80,21 @@ def test_review_is_rejected_after_confirmation(confirmed_session: Session) -> No
         confirm_ingredients,
     ],
 )
+@pytest.mark.parametrize(
+    "stage",
+    [
+        stage
+        for stage in SessionStage
+        if stage is not SessionStage.REVIEWING_INGREDIENTS
+    ],
+)
 def test_editing_and_confirmation_require_reviewing_stage(
     operation,
+    stage: SessionStage,
 ) -> None:
     session = Session(
         id="session-2",
-        stage=SessionStage.EXTRACTING,
+        stage=stage,
         created_at=datetime(2026, 7, 30, tzinfo=UTC),
         updated_at=datetime(2026, 7, 30, tzinfo=UTC),
     )

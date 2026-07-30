@@ -21,6 +21,7 @@ class ErrorCode(StrEnum):
     RESOURCE_NOT_FOUND = "resource_not_found"
     INVALID_SESSION_TRANSITION = "invalid_session_transition"
     INGREDIENTS_NOT_CONFIRMED = "ingredients_not_confirmed"
+    RECIPE_DUPLICATE = "recipe_duplicate"
     OLLAMA_UNAVAILABLE = "ollama_unavailable"
     MODEL_NOT_FOUND = "model_not_found"
     MODEL_OUTPUT_INVALID = "model_output_invalid"
