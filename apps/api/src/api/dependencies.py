@@ -3,6 +3,7 @@
 from fastapi import Request
 
 from core.config import Settings
+from orchestration.graphs.complete_recipes import CompleteRecipesRunner
 from orchestration.graphs.ingredient_extraction import IngredientExtractionRunner
 from orchestration.graphs.recipe_options import RecipeOptionsRunner
 from orchestration.job_runner import JobRunner
@@ -55,6 +56,11 @@ def get_ingredient_extraction_runner(
 def get_recipe_options_runner(request: Request) -> RecipeOptionsRunner:
     """Return the recipe-option runner bound to this application's stores."""
     return request.app.state.recipe_options_runner
+
+
+def get_complete_recipes_runner(request: Request) -> CompleteRecipesRunner:
+    """Return the complete-recipe runner bound to this application's stores."""
+    return request.app.state.complete_recipes_runner
 
 
 def get_dish_preview_service(request: Request) -> DishPreviewService:

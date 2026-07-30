@@ -10,10 +10,18 @@ from fastapi import FastAPI
 from agents.ingredient_extraction import IngredientExtractor, OllamaIngredientExtractor
 from agents.master_chef import MasterChef, OllamaMasterChef
 from agents.nutrition import NutritionAgent, OllamaNutritionAgent
+from agents.specialized_recipe import (
+    OllamaSpecializedRecipeAgent,
+    SpecializedRecipeAgent,
+)
 from api.middleware import RequestIdMiddleware
-from api.routes import artifacts, health, jobs, recipe_options, sessions
+from api.routes import artifacts, health, jobs, recipe_options, recipes, sessions
 from core.config import Model, Settings, get_settings
 from core.errors import install_error_handlers
+from orchestration.graphs.complete_recipes import (
+    CompleteRecipeDependencies,
+    build_complete_recipes_runner,
+)
 from orchestration.graphs.ingredient_extraction import (
     ExtractionDependencies,
     build_ingredient_extraction_runner,
@@ -90,6 +98,7 @@ def create_app(
     dish_previews: DishPreviewService | None = None,
     image_generator: ImageGenerator | None = None,
     image_client: httpx.AsyncClient | None = None,
+    specialized_recipe_agent: SpecializedRecipeAgent | None = None,
 ) -> FastAPI:
     """Construct an application with replaceable external-service boundaries."""
     resolved_settings = settings or get_settings()
@@ -159,6 +168,19 @@ def create_app(
     recipe_options_runner = build_recipe_options_runner(
         recipe_options_dependencies,
     )
+    resolved_specialized_recipe_agent = (
+        specialized_recipe_agent
+        if specialized_recipe_agent is not None
+        else OllamaSpecializedRecipeAgent(settings=resolved_settings)
+    )
+    complete_recipes_dependencies = CompleteRecipeDependencies(
+        agent=resolved_specialized_recipe_agent,
+        session_store=session_store,
+        model_call_limiter=model_call_limiter,
+    )
+    complete_recipes_runner = build_complete_recipes_runner(
+        complete_recipes_dependencies
+    )
     resolved_ollama_health = ollama_health or OllamaHealthService(
         str(resolved_settings.ollama_base_url),
         timeout_seconds=resolved_settings.llm_timeout_seconds,
@@ -180,6 +202,9 @@ def create_app(
     app.state.dish_preview_service = resolved_dish_previews
     app.state.recipe_options_dependencies = recipe_options_dependencies
     app.state.recipe_options_runner = recipe_options_runner
+    app.state.specialized_recipe_agent = resolved_specialized_recipe_agent
+    app.state.complete_recipes_dependencies = complete_recipes_dependencies
+    app.state.complete_recipes_runner = complete_recipes_runner
     app.state.ollama_health = resolved_ollama_health
 
     install_error_handlers(app)
@@ -188,5 +213,6 @@ def create_app(
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(sessions.router, prefix="/api/v1")
     app.include_router(recipe_options.router, prefix="/api/v1")
+    app.include_router(recipes.router, prefix="/api/v1")
     app.include_router(artifacts.router, prefix="/api/v1")
     return app
