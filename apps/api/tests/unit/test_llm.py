@@ -31,6 +31,17 @@ def test_model_targets_the_configured_ollama_host(settings: Settings) -> None:
     assert model.base_url == "http://192.168.29.16:11434"
 
 
+def test_model_normalizes_a_typed_ollama_url_with_a_trailing_slash() -> None:
+    settings = Settings(
+        ollama_base_url="http://192.168.29.16:11434/",
+        _env_file=None,
+    )
+
+    model = get_model(Agent.MASTER_CHEF, settings=settings)
+
+    assert model.base_url == "http://192.168.29.16:11434"
+
+
 def test_each_agent_uses_its_configured_model(settings: Settings) -> None:
     extraction = get_model(Agent.INGREDIENT_EXTRACTION, settings=settings)
     chef = get_model(Agent.MASTER_CHEF, settings=settings)
