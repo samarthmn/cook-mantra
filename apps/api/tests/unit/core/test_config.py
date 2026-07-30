@@ -13,6 +13,7 @@ def test_settings_have_safe_local_defaults() -> None:
     assert settings.max_queued_jobs == 4
     assert settings.max_concurrent_model_calls == 2
     assert settings.cleanup_interval_seconds == 300
+    assert settings.log_level == "INFO"
     assert settings.max_upload_bytes == 10 * 1024 * 1024
     assert settings.session_ttl_seconds == 21_600
     assert settings.artifact_root == PROJECT_ROOT / "tmp" / "cook-mantra-api"
@@ -24,6 +25,11 @@ def test_langsmith_is_optional() -> None:
     assert settings.langsmith_tracing is False
     assert settings.langsmith_api_key is None
     assert settings.langsmith_project == "cook-mantra"
+
+
+def test_settings_reject_an_unknown_log_level() -> None:
+    with pytest.raises(ValidationError, match="log_level"):
+        Settings(_env_file=None, log_level="VERBOSE")
 
 
 @pytest.mark.parametrize(

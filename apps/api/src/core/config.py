@@ -3,6 +3,7 @@
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
     max_queued_jobs: int = Field(default=4, ge=0)
     max_concurrent_model_calls: int = Field(default=2, gt=0)
     cleanup_interval_seconds: int = Field(default=300, ge=10)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     image_width: int = Field(default=768, ge=256, le=2_048)
     image_height: int = Field(default=768, ge=256, le=2_048)
     image_steps: int | None = Field(default=None, ge=1, le=100)

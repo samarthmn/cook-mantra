@@ -111,9 +111,15 @@ async def _handle_http_error(
     )
 
 
-async def _handle_unexpected_error(request: Request, _: Exception) -> JSONResponse:
-    logger.exception(
-        "Unhandled API exception", extra={"request_id": _request_id(request)}
+async def _handle_unexpected_error(request: Request, error: Exception) -> JSONResponse:
+    logger.error(
+        "request_internal_failure",
+        extra={
+            "event": "request_internal_failure",
+            "request_id": _request_id(request),
+            "error_code": ErrorCode.INTERNAL_ERROR.value,
+            "exception_type": type(error).__name__,
+        },
     )
     return _error_response(
         request,

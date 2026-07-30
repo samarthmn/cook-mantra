@@ -18,6 +18,7 @@ from api.middleware import RequestIdMiddleware
 from api.routes import artifacts, health, jobs, recipe_options, recipes, sessions
 from core.config import Model, Settings, get_settings
 from core.errors import install_error_handlers
+from core.logging import configure_logging
 from orchestration.graphs.complete_recipes import (
     CompleteRecipeDependencies,
     build_complete_recipes_runner,
@@ -103,6 +104,7 @@ def create_app(
 ) -> FastAPI:
     """Construct an application with replaceable external-service boundaries."""
     resolved_settings = settings or get_settings()
+    configure_logging(resolved_settings.log_level)
     job_store = JobStore(ttl_seconds=resolved_settings.session_ttl_seconds)
     session_store = SessionStore(ttl_seconds=resolved_settings.session_ttl_seconds)
     artifact_store = ArtifactStore(

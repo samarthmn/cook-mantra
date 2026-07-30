@@ -113,7 +113,7 @@ async def test_runner_hides_unexpected_worker_error_details() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_logs_unexpected_worker_traceback_with_job_context(
+async def test_runner_logs_unexpected_worker_failure_without_unsafe_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = JobStore(ttl_seconds=21_600)
@@ -133,13 +133,12 @@ async def test_runner_logs_unexpected_worker_traceback_with_job_context(
     record = next(
         record
         for record in caplog.records
-        if record.getMessage() == "Unexpected background job failure"
+        if record.getMessage() == "job_internal_failure"
     )
-    assert record.job_id == job.id
-    assert record.session_id == "session-1"
     assert record.operation == "extract_ingredients"
-    assert record.exc_info is not None
-    assert record.exc_info[0] is RuntimeError
+    assert record.error_code == "internal_error"
+    assert record.exception_type == "RuntimeError"
+    assert record.exc_info is None
 
 
 @pytest.mark.asyncio
