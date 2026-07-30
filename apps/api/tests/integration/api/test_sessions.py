@@ -1,3 +1,4 @@
+import asyncio
 from io import BytesIO
 from pathlib import Path
 
@@ -8,12 +9,14 @@ from PIL import Image
 
 from agents.ingredient_extraction import IngredientExtractor
 from api.app import create_app
-from api.dependencies import get_artifact_store, get_job_runner
+from api.dependencies import get_artifact_store, get_job_runner, get_session_store
+from api.routes.sessions import create_session
 from core.config import Settings
 from core.errors import AppError, ErrorCode
 from domain.artifacts import Artifact
 from domain.ingredients import ExtractionResult
 from domain.jobs import JobOperation
+from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.uploads import ImageUploadValidator, ValidatedImage
 
@@ -145,6 +148,51 @@ class FailingJobRunner:
             status_code=503,
             retryable=True,
         )
+
+
+class BlockingJobRunner:
+    def __init__(self) -> None:
+        self.submit_started = asyncio.Event()
+
+    async def submit(self, operation, session_id, worker):
+        assert operation is JobOperation.EXTRACT_INGREDIENTS
+        self.submit_started.set()
+        await asyncio.Event().wait()
+
+
+class PausingDeleteArtifactStore(CapturingArtifactStore):
+    def __init__(self, delegate: ArtifactStore) -> None:
+        super().__init__(delegate)
+        self.delete_started = asyncio.Event()
+        self.allow_delete = asyncio.Event()
+
+    async def delete(self, artifact_id: str) -> None:
+        self.delete_started.set()
+        await self.allow_delete.wait()
+        await super().delete(artifact_id)
+
+
+class CleanupFailingArtifactStore(CapturingArtifactStore):
+    def __init__(self, delegate: ArtifactStore) -> None:
+        super().__init__(delegate)
+        self.delete_attempts: list[str] = []
+
+    async def delete(self, artifact_id: str) -> None:
+        self.delete_attempts.append(artifact_id)
+        raise RuntimeError("artifact cleanup failed")
+
+
+class CleanupFailingSessionStore:
+    def __init__(self, delegate: SessionStore) -> None:
+        self._delegate = delegate
+        self.delete_attempts: list[str] = []
+
+    async def create(self, stage):
+        return await self._delegate.create(stage)
+
+    async def delete(self, session_id: str) -> None:
+        self.delete_attempts.append(session_id)
+        raise RuntimeError("session cleanup failed")
 
 
 def png_bytes() -> bytes:
@@ -479,6 +527,156 @@ def test_job_submit_failure_rolls_back_only_new_session_and_artifact(
     assert removed_artifact.value.code is ErrorCode.RESOURCE_NOT_FOUND
     assert still_retained_session == retained_session
     assert still_retained_artifact.id == retained_artifact.id
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_rollback_and_preserves_neighbors(
+    project_tmp_path: Path,
+) -> None:
+    session_store = SessionStore(ttl_seconds=21_600)
+    delegate_artifact_store = ArtifactStore(
+        project_tmp_path / "cancelled-session-artifacts",
+        ttl_seconds=21_600,
+    )
+    artifact_store = PausingDeleteArtifactStore(delegate_artifact_store)
+    job_runner = BlockingJobRunner()
+
+    async def unused_extraction_runner(session_id, artifact_id, progress):
+        raise AssertionError("The blocked job was never submitted.")
+
+    await delegate_artifact_store.startup()
+    retained_session = await session_store.create()
+    retained_artifact = await delegate_artifact_store.write(
+        b"retained-image",
+        "image/png",
+        ".png",
+        retained_session.id,
+    )
+    upload = UploadFile(filename="ingredients.png", file=BytesIO(png_bytes()))
+    request_task = asyncio.create_task(
+        create_session(
+            upload,
+            ImageUploadValidator(10 * 1024 * 1024),
+            session_store,
+            artifact_store,
+            job_runner,
+            unused_extraction_runner,
+        )
+    )
+    cleanup_started: asyncio.Task[bool] | None = None
+
+    try:
+        await job_runner.submit_started.wait()
+        assert artifact_store.written is not None
+        created_session_id = artifact_store.written.owner_session_id
+        cleanup_started = asyncio.create_task(artifact_store.delete_started.wait())
+
+        request_task.cancel()
+        completed, _ = await asyncio.wait(
+            {request_task, cleanup_started},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        assert cleanup_started in completed
+        assert not request_task.done()
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        artifact_store.allow_delete.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+        assert await session_store.get(created_session_id) is None
+        with pytest.raises(AppError) as removed_artifact:
+            await delegate_artifact_store.require(artifact_store.written.id)
+        assert removed_artifact.value.code is ErrorCode.RESOURCE_NOT_FOUND
+        assert await session_store.require(retained_session.id) == retained_session
+        assert (
+            await delegate_artifact_store.require(retained_artifact.id)
+        ).id == retained_artifact.id
+    finally:
+        artifact_store.allow_delete.set()
+        if cleanup_started is not None and not cleanup_started.done():
+            cleanup_started.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cleanup_started
+        if not request_task.done():
+            request_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request_task
+        await delegate_artifact_store.shutdown()
+
+
+def test_cleanup_failures_preserve_original_error_and_neighboring_resources(
+    project_tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+    session_store = CleanupFailingSessionStore(app.state.session_store)
+    artifact_store = CleanupFailingArtifactStore(app.state.artifact_store)
+    failing_runner = FailingJobRunner()
+    app.dependency_overrides[get_session_store] = lambda: session_store
+    app.dependency_overrides[get_artifact_store] = lambda: artifact_store
+    app.dependency_overrides[get_job_runner] = lambda: failing_runner
+
+    with (
+        TestClient(app) as client,
+        caplog.at_level("ERROR", logger="api.routes.sessions"),
+    ):
+        retained_session = client.portal.call(app.state.session_store.create)
+        retained_artifact = client.portal.call(
+            app.state.artifact_store.write,
+            b"retained-image",
+            "image/png",
+            ".png",
+            retained_session.id,
+        )
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+            headers={"X-Request-ID": "req-cleanup-failure"},
+        )
+
+        assert failing_runner.session_id is not None
+        assert artifact_store.written is not None
+        still_retained_session = client.portal.call(
+            app.state.session_store.require,
+            retained_session.id,
+        )
+        still_retained_artifact = client.portal.call(
+            app.state.artifact_store.require,
+            retained_artifact.id,
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "ollama_unavailable",
+            "message": "Extraction could not be queued.",
+            "details": {},
+            "retryable": True,
+            "request_id": "req-cleanup-failure",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+    assert artifact_store.delete_attempts == [artifact_store.written.id]
+    assert session_store.delete_attempts == [failing_runner.session_id]
+    assert still_retained_session == retained_session
+    assert still_retained_artifact.id == retained_artifact.id
+    rollback_records = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "Session upload rollback failed"
+    ]
+    assert {record.resource for record in rollback_records} == {
+        "artifact",
+        "session",
+    }
 
 
 def test_background_failure_retains_extracting_session_and_artifact(

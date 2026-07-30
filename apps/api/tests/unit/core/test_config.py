@@ -41,6 +41,17 @@ def test_settings_reject_non_positive_concurrency(
         Settings(_env_file=None, **{field_name: invalid_value})
 
 
+@pytest.mark.parametrize(
+    "invalid_value",
+    [0, -1, 10 * 1024 * 1024 + 1],
+)
+def test_settings_reject_upload_limits_outside_ten_mib(
+    invalid_value: int,
+) -> None:
+    with pytest.raises(ValidationError, match="max_upload_bytes"):
+        Settings(_env_file=None, max_upload_bytes=invalid_value)
+
+
 def test_settings_reject_artifact_roots_outside_project_tmp() -> None:
     outside_runtime_namespace = PROJECT_ROOT / "artifacts"
 

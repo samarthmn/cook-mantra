@@ -1,6 +1,8 @@
 """Cooking-session upload and retrieval routes."""
 
+import asyncio
 import logging
+from collections.abc import Awaitable
 from functools import partial
 from typing import Annotated
 
@@ -62,17 +64,20 @@ async def create_session(
             session.id,
             partial(extraction_runner, session.id, artifact.id),
         )
+    except asyncio.CancelledError:
+        await _cancellation_safe_rollback(
+            session_store,
+            artifact_store,
+            session_id=session.id,
+            artifact_id=artifact.id if artifact is not None else None,
+        )
+        raise
     except Exception:
-        if artifact is not None:
-            await _preserving_cleanup(
-                artifact_store.delete(artifact.id),
-                resource="artifact",
-                resource_id=artifact.id,
-            )
-        await _preserving_cleanup(
-            session_store.delete(session.id),
-            resource="session",
-            resource_id=session.id,
+        await _rollback_created_upload(
+            session_store,
+            artifact_store,
+            session_id=session.id,
+            artifact_id=artifact.id if artifact is not None else None,
         )
         raise
 
@@ -89,7 +94,7 @@ async def get_session(
 
 
 async def _preserving_cleanup(
-    cleanup,
+    cleanup: Awaitable[None],
     *,
     resource: str,
     resource_id: str,
@@ -105,3 +110,46 @@ async def _preserving_cleanup(
                 "resource_id": resource_id,
             },
         )
+
+
+async def _rollback_created_upload(
+    session_store: SessionStore,
+    artifact_store: ArtifactStore,
+    *,
+    session_id: str,
+    artifact_id: str | None,
+) -> None:
+    if artifact_id is not None:
+        await _preserving_cleanup(
+            artifact_store.delete(artifact_id),
+            resource="artifact",
+            resource_id=artifact_id,
+        )
+    await _preserving_cleanup(
+        session_store.delete(session_id),
+        resource="session",
+        resource_id=session_id,
+    )
+
+
+async def _cancellation_safe_rollback(
+    session_store: SessionStore,
+    artifact_store: ArtifactStore,
+    *,
+    session_id: str,
+    artifact_id: str | None,
+) -> None:
+    cleanup_task = asyncio.create_task(
+        _rollback_created_upload(
+            session_store,
+            artifact_store,
+            session_id=session_id,
+            artifact_id=artifact_id,
+        )
+    )
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+    cleanup_task.result()
