@@ -2,6 +2,7 @@
 
 from pydantic import ConfigDict
 
+from domain.images import DishPreview
 from domain.recipe_options import RecipeOption
 
 
@@ -9,3 +10,5 @@ class RecipeOptionResponse(RecipeOption):
     """Public representation of a generated recipe suggestion."""
 
     model_config = ConfigDict(from_attributes=True)
+
+    preview: DishPreview | None = None

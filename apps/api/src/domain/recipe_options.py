@@ -5,6 +5,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
+from domain.images import DishPreview
+
 NUTRITION_DISCLAIMER = "Estimated values; not medical advice."
 
 
@@ -103,5 +105,5 @@ class RecipeOption(RecipeOptionDraft):
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     nutrition: NutritionEstimate | None = None
-    image_artifact_id: str | None = None
+    preview: DishPreview | None = None
     warnings: list[str] = Field(default_factory=list)

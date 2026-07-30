@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 300.0
     max_concurrent_jobs: int = Field(default=2, gt=0)
     max_concurrent_model_calls: int = Field(default=2, gt=0)
+    image_width: int = Field(default=768, ge=256, le=2_048)
+    image_height: int = Field(default=768, ge=256, le=2_048)
+    image_steps: int | None = Field(default=None, ge=1, le=100)
+    image_timeout_seconds: float = Field(default=600.0, gt=0)
     max_upload_bytes: int = Field(
         default=10 * 1024 * 1024,
         gt=0,
