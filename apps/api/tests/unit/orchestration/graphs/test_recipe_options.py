@@ -7,6 +7,7 @@ import pytest
 from agents.master_chef import OllamaMasterChef
 from agents.nutrition import OllamaNutritionAgent
 from core.errors import AppError, ErrorCode
+from domain.images import DishPreview
 from domain.ingredients import Ingredient, IngredientSource
 from domain.recipe_option_service import (
     OptionGenerationContext,
@@ -91,6 +92,33 @@ class FakeNutritionAgent:
     ) -> NutritionEstimate:
         assert preferences.option_count >= 1
         result = self.results.get(option.name, estimate())
+        self.completed_names.append(option.name)
+        if isinstance(result, BaseException):
+            raise result
+        return result.model_copy(deep=True)
+
+
+class FakeDishPreviewService:
+    def __init__(
+        self,
+        results: dict[str, DishPreview | BaseException] | None = None,
+    ) -> None:
+        self.results = results or {}
+        self.completed_names: list[str] = []
+
+    async def generate(
+        self,
+        session_id: str,
+        option: RecipeOptionDraft,
+        progress: Callable[[int], Awaitable[None]],
+    ) -> DishPreview:
+        assert session_id
+        result = self.results.get(
+            option.name,
+            DishPreview(
+                artifact_id=f"preview-{option.name.casefold().replace(' ', '-')}"
+            ),
+        )
         self.completed_names.append(option.name)
         if isinstance(result, BaseException):
             raise result
@@ -244,12 +272,15 @@ def graph_for(
     chef: FakeMasterChef | BlockingMasterChef,
     nutrition: FakeNutritionAgent | ConcurrentNutritionAgent,
     *,
+    previews: FakeDishPreviewService | None = None,
     limiter: ModelCallLimiter | None = None,
     progress: Callable[[int], Awaitable[None]] | None = None,
 ):
+    resolved_previews = previews or FakeDishPreviewService()
     dependencies = RecipeOptionDependencies(
         master_chef=chef,
         nutrition_agent=nutrition,
+        dish_previews=resolved_previews,
         session_store=fixture.store,
         model_call_limiter=limiter or ModelCallLimiter(max_concurrent_calls=2),
     )
@@ -257,6 +288,7 @@ def graph_for(
         dependencies = RecipeOptionDependencies(
             master_chef=chef,
             nutrition_agent=nutrition,
+            dish_previews=resolved_previews,
             session_store=fixture.store,
             model_call_limiter=dependencies.model_call_limiter,
             progress=progress,
@@ -285,6 +317,7 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
             "Tomato Rice": RuntimeError("nutrition unavailable"),
         }
     )
+    previews = FakeDishPreviewService()
     limiter = CountingLimiter(max_concurrent_calls=2)
     progress_updates: list[int] = []
     observed_before_commit: Session | None = None
@@ -299,6 +332,7 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
         fixture,
         chef,
         nutrition,
+        previews=previews,
         limiter=limiter,
         progress=record_progress,
     )
@@ -315,10 +349,13 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
     ]
     assert saved.recipe_options[0].nutrition == estimate(240)
     assert saved.recipe_options[1].nutrition is None
+    assert saved.recipe_options[0].preview is not None
+    assert saved.recipe_options[1].preview is not None
     assert saved.recipe_options[1].warnings == ["Nutrition estimate unavailable."]
     assert saved.excluded_recipe_names == {"tomato curry", "tomato rice"}
     assert nutrition.completed_names == ["Tomato Curry", "Tomato Rice"]
-    assert limiter.call_count == 3
+    assert previews.completed_names == ["Tomato Curry", "Tomato Rice"]
+    assert limiter.call_count == 5
     assert progress_updates == sorted(progress_updates)
     assert progress_updates == [10, 45, 80]
     assert observed_before_commit is not None
@@ -554,6 +591,7 @@ async def test_bound_runner_uses_the_persisted_attempt_and_reports_progress() ->
     dependencies = RecipeOptionDependencies(
         master_chef=FakeMasterChef([[draft("Tomato Curry")]]),
         nutrition_agent=FakeNutritionAgent(),
+        dish_previews=FakeDishPreviewService(),
         session_store=fixture.store,
         model_call_limiter=ModelCallLimiter(max_concurrent_calls=2),
     )
@@ -571,17 +609,20 @@ async def test_bound_runner_uses_the_persisted_attempt_and_reports_progress() ->
     assert progress_updates == [10, 45, 80]
 
 
-def test_development_factory_is_stable_inspectable_and_uses_one_settings_object() -> (
-    None
-):
+@pytest.mark.asyncio
+async def test_development_factory_is_stable_and_uses_one_settings_object() -> None:
     option_graph.get_development_recipe_options_runtime.cache_clear()
 
     runtime = option_graph.get_development_recipe_options_runtime()
 
-    assert option_graph.get_development_recipe_options_runtime() is runtime
-    assert option_graph.build_development_recipe_options_graph() is runtime.graph
-    assert isinstance(runtime.dependencies.master_chef, OllamaMasterChef)
-    assert isinstance(runtime.dependencies.nutrition_agent, OllamaNutritionAgent)
-    assert runtime.dependencies.master_chef._settings is runtime.settings
-    assert runtime.dependencies.nutrition_agent._settings is runtime.settings
-    assert runtime.graph.get_graph().nodes
+    try:
+        assert option_graph.get_development_recipe_options_runtime() is runtime
+        assert option_graph.build_development_recipe_options_graph() is runtime.graph
+        assert isinstance(runtime.dependencies.master_chef, OllamaMasterChef)
+        assert isinstance(runtime.dependencies.nutrition_agent, OllamaNutritionAgent)
+        assert runtime.dependencies.master_chef._settings is runtime.settings
+        assert runtime.dependencies.nutrition_agent._settings is runtime.settings
+        assert runtime.graph.get_graph().nodes
+    finally:
+        await runtime.shutdown()
+        option_graph.get_development_recipe_options_runtime.cache_clear()

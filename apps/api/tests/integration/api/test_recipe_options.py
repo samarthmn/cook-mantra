@@ -17,6 +17,7 @@ from api.dependencies import get_job_runner, get_session_store
 from api.routes import recipe_options as recipe_option_routes
 from core.config import Settings
 from core.errors import AppError, ErrorCode
+from domain.images import DishPreview
 from domain.ingredients import ExtractionResult, Ingredient, IngredientSource
 from domain.jobs import JobOperation
 from domain.recipe_option_service import OptionGenerationContext
@@ -120,6 +121,22 @@ class FakeNutritionAgent:
             protein_g=8,
             carbohydrates_g=32,
             fat_g=9,
+        )
+
+
+class FakeDishPreviewService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def generate(
+        self,
+        session_id: str,
+        option: RecipeOptionDraft,
+        progress: ProgressReporter,
+    ) -> DishPreview:
+        self.calls.append((session_id, option.name))
+        return DishPreview(
+            artifact_id=f"preview-{option.name.casefold().replace(' ', '-')}"
         )
 
 
@@ -573,6 +590,7 @@ def test_first_successful_job_polls_to_committed_session_through_real_boundaries
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=chef,
         nutrition_agent=nutrition,
+        dish_previews=FakeDishPreviewService(),
     )
 
     with TestClient(application) as test_client:
@@ -636,6 +654,7 @@ def test_more_crosses_domain_and_real_graph_with_all_canonical_shown_names(
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=chef,
         nutrition_agent=FakeNutritionAgent(),
+        dish_previews=FakeDishPreviewService(),
     )
 
     with TestClient(application) as test_client:
@@ -700,6 +719,7 @@ def test_overlapping_jobs_report_their_own_committed_batch(
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=chef,
         nutrition_agent=FakeNutritionAgent(),
+        dish_previews=FakeDishPreviewService(),
     )
     delayed_runner = DelayedFirstCommittedResult(
         application.state.recipe_options_runner

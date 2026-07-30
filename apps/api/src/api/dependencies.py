@@ -10,6 +10,7 @@ from repositories.job_store import JobStore
 from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
+from services.dish_previews import DishPreviewService
 from services.ollama_health import OllamaHealthService
 from services.uploads import ImageUploadValidator
 
@@ -54,6 +55,11 @@ def get_ingredient_extraction_runner(
 def get_recipe_options_runner(request: Request) -> RecipeOptionsRunner:
     """Return the recipe-option runner bound to this application's stores."""
     return request.app.state.recipe_options_runner
+
+
+def get_dish_preview_service(request: Request) -> DishPreviewService:
+    """Return the dish-preview service owned by this application."""
+    return request.app.state.dish_preview_service
 
 
 def get_model_call_limiter(request: Request) -> ModelCallLimiter:

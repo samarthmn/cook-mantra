@@ -10,7 +10,7 @@ from agents.master_chef import MasterChef, OllamaMasterChef
 from agents.nutrition import NutritionAgent, OllamaNutritionAgent
 from api.middleware import RequestIdMiddleware
 from api.routes import health, jobs, recipe_options, sessions
-from core.config import Settings, get_settings
+from core.config import Model, Settings, get_settings
 from core.errors import install_error_handlers
 from orchestration.graphs.ingredient_extraction import (
     ExtractionDependencies,
@@ -26,6 +26,8 @@ from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.cleanup import CleanupSupervisor
 from services.concurrency import ModelCallLimiter
+from services.dish_previews import DishPreviewService
+from services.image_generation import OllamaImageGenerator
 from services.ollama_health import OllamaHealthService
 from services.uploads import ImageUploadValidator
 
@@ -58,6 +60,7 @@ def create_app(
     ingredient_extractor: IngredientExtractor | None = None,
     master_chef: MasterChef | None = None,
     nutrition_agent: NutritionAgent | None = None,
+    dish_previews: DishPreviewService | None = None,
 ) -> FastAPI:
     """Construct an application with replaceable external-service boundaries."""
     resolved_settings = settings or get_settings()
@@ -99,9 +102,24 @@ def create_app(
         if nutrition_agent is not None
         else OllamaNutritionAgent(settings=resolved_settings)
     )
+    image_generator: OllamaImageGenerator | None = None
+    if dish_previews is None:
+        image_generator = OllamaImageGenerator(
+            base_url=str(resolved_settings.ollama_base_url),
+            model=Model.Z_IMAGE,
+            timeout_seconds=resolved_settings.image_timeout_seconds,
+        )
+        resolved_dish_previews = DishPreviewService(
+            image_generator,
+            artifact_store,
+            resolved_settings,
+        )
+    else:
+        resolved_dish_previews = dish_previews
     recipe_options_dependencies = RecipeOptionDependencies(
         master_chef=resolved_master_chef,
         nutrition_agent=resolved_nutrition_agent,
+        dish_previews=resolved_dish_previews,
         session_store=session_store,
         model_call_limiter=model_call_limiter,
     )
@@ -124,6 +142,8 @@ def create_app(
     app.state.upload_validator = upload_validator
     app.state.ingredient_extractor = resolved_ingredient_extractor
     app.state.ingredient_extraction_runner = ingredient_extraction_runner
+    app.state.image_generator = image_generator
+    app.state.dish_preview_service = resolved_dish_previews
     app.state.recipe_options_dependencies = recipe_options_dependencies
     app.state.recipe_options_runner = recipe_options_runner
     app.state.ollama_health = resolved_ollama_health

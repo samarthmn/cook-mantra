@@ -12,8 +12,9 @@ from langgraph.graph.state import CompiledStateGraph
 
 from agents.master_chef import MasterChef, OllamaMasterChef
 from agents.nutrition import NutritionAgent, OllamaNutritionAgent
-from core.config import Settings
+from core.config import Model, Settings
 from core.errors import AppError, ErrorCode
+from domain.images import DishPreview
 from domain.recipe_option_service import (
     OptionGenerationContext,
     commit_option_batch,
@@ -30,14 +31,20 @@ from domain.recipe_options import (
 from domain.session_service import confirmed_ingredient_names
 from domain.sessions import Session, SessionStage
 from repositories.session_store import SessionStore
+from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
+from services.dish_previews import DishPreviewService
+from services.image_generation import OllamaImageGenerator
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
 _MAX_GENERATION_ATTEMPTS = 3
+_ENRICHMENT_PROGRESS_START = 45
+_ENRICHMENT_PROGRESS_END = 80
 _NUTRITION_WARNING = "Nutrition estimate unavailable."
+_PREVIEW_WARNING = "Dish preview unavailable."
 
 
 class RecipeOptionState(TypedDict):
@@ -53,6 +60,8 @@ class RecipeOptionState(TypedDict):
     drafts: NotRequired[list[RecipeOptionDraft]]
     nutrition: NotRequired[list[NutritionEstimate | None]]
     nutrition_warnings: NotRequired[list[list[str]]]
+    previews: NotRequired[list[DishPreview | None]]
+    preview_warnings: NotRequired[list[list[str]]]
     attempt_count: NotRequired[int]
     retry_generation: NotRequired[bool]
     recipe_options: NotRequired[list[RecipeOption]]
@@ -91,6 +100,7 @@ class RecipeOptionDependencies:
 
     master_chef: MasterChef
     nutrition_agent: NutritionAgent
+    dish_previews: DishPreviewService
     session_store: SessionStore
     model_call_limiter: ModelCallLimiter
     progress: ProgressReporter = _ignore_progress
@@ -174,6 +184,9 @@ def build_recipe_options_graph(
         state: RecipeOptionState,
     ) -> dict[str, object]:
         preferences = RecipePreferences.model_validate(state["preferences"])
+        progress_by_option = [0] * len(state["drafts"])
+        last_reported_progress = _ENRICHMENT_PROGRESS_START
+        progress_lock = asyncio.Lock()
 
         def nutrition_call(
             option: RecipeOptionDraft,
@@ -186,27 +199,78 @@ def build_recipe_options_graph(
 
             return call
 
-        calls = [nutrition_call(option) for option in state["drafts"]]
+        def preview_call(
+            index: int,
+            option: RecipeOptionDraft,
+        ) -> Callable[[], Awaitable[DishPreview]]:
+            async def report_preview_progress(value: int) -> None:
+                nonlocal last_reported_progress
+                bounded_value = max(0, min(value, 100))
+                async with progress_lock:
+                    progress_by_option[index] = max(
+                        progress_by_option[index],
+                        bounded_value,
+                    )
+                    mapped_progress = _ENRICHMENT_PROGRESS_START + (
+                        sum(progress_by_option)
+                        * (_ENRICHMENT_PROGRESS_END - _ENRICHMENT_PROGRESS_START - 1)
+                        // (len(progress_by_option) * 100)
+                    )
+                    if mapped_progress > last_reported_progress:
+                        await dependencies.progress(mapped_progress)
+                        last_reported_progress = mapped_progress
+
+            async def call() -> DishPreview:
+                return await dependencies.dish_previews.generate(
+                    state["session_id"],
+                    option,
+                    report_preview_progress,
+                )
+
+            return call
+
+        calls: list[Callable[[], Awaitable[NutritionEstimate | DishPreview]]] = []
+        for index, option in enumerate(state["drafts"]):
+            calls.extend(
+                (
+                    nutrition_call(option),
+                    preview_call(index, option),
+                )
+            )
         results = await asyncio.gather(
             *(dependencies.model_call_limiter.run(call) for call in calls),
             return_exceptions=True,
         )
         nutrition: list[NutritionEstimate | None] = []
-        warnings: list[list[str]] = []
-        for result in results:
-            if isinstance(result, asyncio.CancelledError):
-                raise result
-            if isinstance(result, Exception):
+        nutrition_warnings: list[list[str]] = []
+        previews: list[DishPreview | None] = []
+        preview_warnings: list[list[str]] = []
+        for index in range(len(state["drafts"])):
+            nutrition_result = results[index * 2]
+            preview_result = results[index * 2 + 1]
+            if isinstance(nutrition_result, asyncio.CancelledError):
+                raise nutrition_result
+            if isinstance(preview_result, asyncio.CancelledError):
+                raise preview_result
+            if isinstance(nutrition_result, Exception):
                 nutrition.append(None)
-                warnings.append([_NUTRITION_WARNING])
+                nutrition_warnings.append([_NUTRITION_WARNING])
             else:
-                nutrition.append(result)
-                warnings.append([])
+                nutrition.append(cast(NutritionEstimate, nutrition_result))
+                nutrition_warnings.append([])
+            if isinstance(preview_result, Exception):
+                previews.append(None)
+                preview_warnings.append([_PREVIEW_WARNING])
+            else:
+                previews.append(cast(DishPreview, preview_result))
+                preview_warnings.append([])
 
-        await dependencies.progress(80)
+        await dependencies.progress(_ENRICHMENT_PROGRESS_END)
         return {
             "nutrition": nutrition,
-            "nutrition_warnings": warnings,
+            "nutrition_warnings": nutrition_warnings,
+            "previews": previews,
+            "preview_warnings": preview_warnings,
         }
 
     async def commit_batch(
@@ -223,12 +287,20 @@ def build_recipe_options_graph(
         committed_options = [
             option.model_copy(deep=True) for option in committed.recipe_options
         ]
-        for offset, warnings in enumerate(state["nutrition_warnings"]):
-            if warnings:
-                index = batch_start + offset
-                committed_options[index] = committed_options[index].model_copy(
-                    update={"warnings": list(warnings)}
-                )
+        for offset, preview in enumerate(state["previews"]):
+            index = batch_start + offset
+            warnings = [
+                *state["nutrition_warnings"][offset],
+                *state["preview_warnings"][offset],
+            ]
+            committed_options[index] = committed_options[index].model_copy(
+                update={
+                    "preview": preview.model_copy(deep=True)
+                    if preview is not None
+                    else None,
+                    "warnings": warnings,
+                }
+            )
 
         replacement = committed.model_copy(
             update={
@@ -337,11 +409,28 @@ class DevelopmentRecipeOptionsRuntime:
     """Own the settings, real dependencies, and inspectable development graph."""
 
     settings: Settings
+    image_generator: OllamaImageGenerator = field(init=False)
+    artifact_store: ArtifactStore = field(init=False)
     dependencies: RecipeOptionDependencies = field(init=False)
     graph: CompiledStateGraph = field(init=False)
 
     def __post_init__(self) -> None:
-        dependencies = build_real_recipe_option_dependencies(self.settings)
+        image_generator = OllamaImageGenerator(
+            base_url=str(self.settings.ollama_base_url),
+            model=Model.Z_IMAGE,
+            timeout_seconds=self.settings.image_timeout_seconds,
+        )
+        artifact_store = ArtifactStore(
+            self.settings.artifact_root,
+            ttl_seconds=self.settings.session_ttl_seconds,
+        )
+        dependencies = build_real_recipe_option_dependencies(
+            self.settings,
+            image_generator=image_generator,
+            artifact_store=artifact_store,
+        )
+        object.__setattr__(self, "image_generator", image_generator)
+        object.__setattr__(self, "artifact_store", artifact_store)
         object.__setattr__(self, "dependencies", dependencies)
         object.__setattr__(
             self,
@@ -349,15 +438,56 @@ class DevelopmentRecipeOptionsRuntime:
             build_recipe_options_graph(dependencies),
         )
 
+    async def startup(self) -> None:
+        """Prepare the owned artifact namespace before graph invocation."""
+        await self.artifact_store.startup()
+
+    async def shutdown(self) -> None:
+        """Close every owned image resource before propagating cancellation."""
+        shutdown_task = asyncio.create_task(self._shutdown_owned_resources())
+        cancellation: asyncio.CancelledError | None = None
+        while not shutdown_task.done():
+            try:
+                await asyncio.shield(shutdown_task)
+            except asyncio.CancelledError as error:
+                cancellation = error
+                continue
+        shutdown_task.result()
+        if cancellation is not None:
+            raise cancellation
+
+    async def _shutdown_owned_resources(self) -> None:
+        try:
+            await self.image_generator.aclose()
+        finally:
+            await self.artifact_store.shutdown()
+
 
 def build_real_recipe_option_dependencies(
     settings: Settings,
+    *,
+    image_generator: OllamaImageGenerator | None = None,
+    artifact_store: ArtifactStore | None = None,
 ) -> RecipeOptionDependencies:
     """Wire real lazy agents, a store, and one shared model-call limiter."""
     model_call_limiter = ModelCallLimiter(settings.max_concurrent_model_calls)
+    resolved_image_generator = image_generator or OllamaImageGenerator(
+        base_url=str(settings.ollama_base_url),
+        model=Model.Z_IMAGE,
+        timeout_seconds=settings.image_timeout_seconds,
+    )
+    resolved_artifact_store = artifact_store or ArtifactStore(
+        settings.artifact_root,
+        ttl_seconds=settings.session_ttl_seconds,
+    )
     return RecipeOptionDependencies(
         master_chef=OllamaMasterChef(settings=settings),
         nutrition_agent=OllamaNutritionAgent(settings=settings),
+        dish_previews=DishPreviewService(
+            resolved_image_generator,
+            resolved_artifact_store,
+            settings,
+        ),
         session_store=SessionStore(ttl_seconds=settings.session_ttl_seconds),
         model_call_limiter=model_call_limiter,
     )
