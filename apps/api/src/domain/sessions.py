@@ -3,7 +3,9 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from domain.ingredients import Ingredient
 
 
 class SessionStage(StrEnum):
@@ -23,5 +25,8 @@ class Session(BaseModel):
 
     id: str
     stage: SessionStage = SessionStage.EXTRACTING
+    image_artifact_id: str | None = None
+    ingredients: list[Ingredient] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
