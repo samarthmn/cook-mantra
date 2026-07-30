@@ -6,6 +6,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from domain.ingredients import Ingredient
+from domain.recipe_options import RecipeOption, RecipePreferences
 
 
 class SessionStage(StrEnum):
@@ -27,6 +28,10 @@ class Session(BaseModel):
     stage: SessionStage = SessionStage.EXTRACTING
     image_artifact_id: str | None = None
     ingredients: list[Ingredient] = Field(default_factory=list)
+    preferences: RecipePreferences = Field(default_factory=RecipePreferences)
+    recipe_options: list[RecipeOption] = Field(default_factory=list)
+    excluded_recipe_names: set[str] = Field(default_factory=set)
+    option_batch_number: int = Field(default=0, ge=0)
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

@@ -4,8 +4,10 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from domain.recipe_options import RecipePreferences
 from domain.sessions import SessionStage
 from schemas.ingredients import IngredientResponse
+from schemas.recipe_options import RecipeOptionResponse
 
 INGREDIENT_REVIEW_RESPONSE_EXAMPLES = {
     "reviewedIngredients": {
@@ -72,6 +74,10 @@ class SessionResponse(BaseModel):
     stage: SessionStage
     image_artifact_id: str | None
     ingredients: list[IngredientResponse]
+    preferences: RecipePreferences
+    recipe_options: list[RecipeOptionResponse]
+    excluded_recipe_names: set[str]
+    option_batch_number: int
     warnings: list[str]
     created_at: datetime
     updated_at: datetime
