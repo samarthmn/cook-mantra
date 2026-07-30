@@ -1,10 +1,12 @@
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
 from domain.recipe_options import Difficulty, RecipeOption, RecipePreferences
 from domain.recipe_service import (
+    RecipeGenerationContext,
     begin_recipe_generation,
     commit_recipe_results,
     restore_after_recipe_failure,
@@ -17,6 +19,7 @@ from domain.recipes import (
     RecipeStep,
 )
 from domain.sessions import Session, SessionStage
+from schemas.sessions import SessionResponse
 
 NOW = datetime(2026, 7, 30, tzinfo=UTC)
 
@@ -43,13 +46,14 @@ def complete_recipe(
     *,
     name: str = "Tomato Curry",
     cuisine: str = "Indian",
+    servings: int = 2,
     total_minutes: int = 30,
 ) -> CompleteRecipe:
     return CompleteRecipe(
         option_id=option_id,
         name=name,
         cuisine=cuisine,
-        servings=2,
+        servings=servings,
         total_minutes=total_minutes,
         ingredients=(
             RecipeIngredient(
@@ -108,10 +112,18 @@ def assert_invalid_request(error: AppError) -> None:
     assert error.session_id == "session-1"
 
 
+def assert_invalid_transition(error: AppError) -> None:
+    assert error.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert error.status_code == 409
+    assert error.retryable is False
+    assert error.details == {}
+    assert error.session_id == "session-1"
+
+
 def test_selection_resolves_detached_server_owned_options_in_request_order(
     options_session: Session,
 ) -> None:
-    generating, selected, previous_stage = begin_recipe_generation(
+    generating, selected, previous_stage, context = begin_recipe_generation(
         options_session,
         ["option-3", "option-1"],
     )
@@ -122,6 +134,8 @@ def test_selection_resolves_detached_server_owned_options_in_request_order(
         options_session.recipe_options[0],
     ]
     assert previous_stage is SessionStage.OPTIONS_READY
+    assert context.previous_stage is previous_stage
+    assert context.selected_option_ids == ("option-3", "option-1")
     assert selected[0] is not options_session.recipe_options[2]
     assert selected[0] is not generating.recipe_options[2]
 
@@ -145,12 +159,13 @@ def test_begin_retains_prior_results_options_and_preferences(
         }
     )
 
-    generating, _, previous_stage = begin_recipe_generation(
+    generating, _, previous_stage, context = begin_recipe_generation(
         recipes_session,
         ["option-3"],
     )
 
     assert previous_stage is SessionStage.RECIPES_READY
+    assert context.previous_stage is previous_stage
     assert generating.recipe_options == recipes_session.recipe_options
     assert generating.preferences == recipes_session.preferences
     assert generating.complete_recipes == {"option-1": prior_recipe}
@@ -244,17 +259,82 @@ def test_begin_requires_an_option_or_recipe_ready_session(
 def test_begin_advances_timestamp_without_mutating_input(
     options_session: Session,
 ) -> None:
-    generating, _, _ = begin_recipe_generation(options_session, ["option-1"])
+    generating, _, _, _ = begin_recipe_generation(options_session, ["option-1"])
 
     assert generating.updated_at > options_session.updated_at
     assert options_session.updated_at == NOW
     assert options_session.stage is SessionStage.OPTIONS_READY
 
 
+def test_begin_returns_immutable_bound_context_and_private_attempt_token(
+    options_session: Session,
+) -> None:
+    generating, _, previous_stage, context = begin_recipe_generation(
+        options_session,
+        [" option-2 ", "option-1"],
+    )
+
+    assert context.selected_option_ids == ("option-2", "option-1")
+    assert context.previous_stage is previous_stage
+    assert context.session_id == "session-1"
+    assert context.rollback_snapshot == options_session.model_dump_json()
+    assert generating.recipe_generation_id == context.generation_id
+    assert context.rollback_snapshot not in repr(context)
+    assert (
+        "recipe_generation_id"
+        not in SessionResponse.model_validate(generating).model_dump()
+    )
+
+    with pytest.raises(ValidationError):
+        context.previous_stage = SessionStage.RECIPES_READY
+
+
+def test_begin_creates_a_unique_bound_token_for_each_attempt(
+    options_session: Session,
+) -> None:
+    first, _, _, first_context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+    second, _, _, second_context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+
+    assert first_context.generation_id != second_context.generation_id
+    assert first.recipe_generation_id == first_context.generation_id
+    assert second.recipe_generation_id == second_context.generation_id
+
+
+def test_begin_rejects_an_unchecked_string_stage(
+    options_session: Session,
+) -> None:
+    unchecked = options_session.model_copy(update={"stage": "options_ready"})
+
+    with pytest.raises(AppError) as raised:
+        begin_recipe_generation(unchecked, ["option-1"])
+
+    assert_invalid_transition(raised.value)
+
+
+@pytest.mark.parametrize("invalid_timestamp", [datetime(2026, 7, 30), "invalid"])
+def test_begin_rejects_invalid_updated_at_with_a_safe_error(
+    options_session: Session,
+    invalid_timestamp: object,
+) -> None:
+    unchecked = options_session.model_copy(update={"updated_at": invalid_timestamp})
+
+    with pytest.raises(AppError) as raised:
+        begin_recipe_generation(unchecked, ["option-1"])
+
+    assert_invalid_request(raised.value)
+    assert raised.value.message == "Session timestamp is invalid."
+
+
 def test_partial_success_moves_session_to_recipes_ready(
     options_session: Session,
 ) -> None:
-    generating, _, _ = begin_recipe_generation(
+    generating, _, _, context = begin_recipe_generation(
         options_session,
         ["option-1", "option-2"],
     )
@@ -265,6 +345,7 @@ def test_partial_success_moves_session_to_recipes_ready(
         generating,
         successes={"option-1": recipe},
         failures={"option-2": failure},
+        context=context,
     )
 
     assert completed.stage is SessionStage.RECIPES_READY
@@ -272,12 +353,142 @@ def test_partial_success_moves_session_to_recipes_ready(
     assert completed.recipe_failures == {"option-2": failure}
     assert completed.complete_recipes["option-1"] is not recipe
     assert completed.recipe_failures["option-2"] is not failure
+    assert completed.recipe_generation_id is None
+
+
+def test_commit_requires_every_and_only_selected_option_to_settle(
+    options_session: Session,
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1", "option-2"],
+    )
+
+    with pytest.raises(AppError) as omitted:
+        commit_recipe_results(
+            generating,
+            successes={"option-1": complete_recipe("option-1")},
+            failures={},
+            context=context,
+        )
+
+    assert_invalid_request(omitted.value)
+    assert omitted.value.message == "Recipe results must match the selection."
+
+
+def test_commit_rejects_a_stored_but_unselected_result(
+    options_session: Session,
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+
+    with pytest.raises(AppError) as unselected:
+        commit_recipe_results(
+            generating,
+            successes={
+                "option-2": complete_recipe(
+                    "option-2",
+                    name="Onion Soup",
+                    cuisine="French",
+                )
+            },
+            failures={},
+            context=context,
+        )
+
+    assert_invalid_request(unselected.value)
+    assert unselected.value.message == "Recipe results must match the selection."
+
+
+def test_commit_rejects_an_extra_result_beyond_the_selection(
+    options_session: Session,
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+
+    with pytest.raises(AppError) as extra:
+        commit_recipe_results(
+            generating,
+            successes={
+                "option-1": complete_recipe("option-1"),
+                "option-2": complete_recipe(
+                    "option-2",
+                    name="Onion Soup",
+                    cuisine="French",
+                ),
+            },
+            failures={},
+            context=context,
+        )
+
+    assert_invalid_request(extra.value)
+    assert extra.value.message == "Recipe results must match the selection."
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        complete_recipe("option-1", name="Different Dish"),
+        complete_recipe("option-1", cuisine="French"),
+        complete_recipe("option-1", servings=3),
+    ],
+)
+def test_commit_rejects_mismatched_server_owned_recipe_identity(
+    options_session: Session,
+    recipe: CompleteRecipe,
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+
+    with pytest.raises(AppError) as raised:
+        commit_recipe_results(
+            generating,
+            successes={"option-1": recipe},
+            failures={},
+            context=context,
+        )
+
+    assert_invalid_request(raised.value)
+    assert raised.value.message == "Complete recipe identity is invalid."
+
+
+def test_commit_revalidates_an_unchecked_constructed_recipe(
+    options_session: Session,
+) -> None:
+    valid = complete_recipe("option-1")
+    constructed = CompleteRecipe.model_construct(
+        **{
+            **valid.__dict__,
+            "name": "   ",
+        }
+    )
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+
+    with pytest.raises(AppError) as raised:
+        commit_recipe_results(
+            generating,
+            successes={"option-1": constructed},
+            failures={},
+            context=context,
+        )
+
+    assert_invalid_request(raised.value)
+    assert raised.value.message == "Recipe result values are invalid."
 
 
 def test_commit_orders_results_by_stored_option_order(
     options_session: Session,
 ) -> None:
-    generating, _, _ = begin_recipe_generation(
+    generating, _, _, context = begin_recipe_generation(
         options_session,
         ["option-3", "option-1", "option-2"],
     )
@@ -289,6 +500,7 @@ def test_commit_orders_results_by_stored_option_order(
             "option-1": complete_recipe("option-1"),
         },
         failures={"option-2": recipe_failure("option-2")},
+        context=context,
     )
 
     assert list(completed.complete_recipes) == ["option-1", "option-3"]
@@ -298,13 +510,13 @@ def test_commit_orders_results_by_stored_option_order(
 def test_commit_does_not_mutate_or_alias_inputs(
     options_session: Session,
 ) -> None:
-    generating, _, _ = begin_recipe_generation(options_session, ["option-1"])
+    generating, _, _, context = begin_recipe_generation(options_session, ["option-1"])
     recipe = complete_recipe("option-1")
     successes = {"option-1": recipe}
     failures: dict[str, RecipeFailure] = {}
     generating_before = generating.model_copy(deep=True)
 
-    completed = commit_recipe_results(generating, successes, failures)
+    completed = commit_recipe_results(generating, successes, failures, context)
     successes.clear()
     completed.complete_recipes.clear()
     completed.recipe_options[0].warnings.append("Changed completed copy.")
@@ -320,10 +532,15 @@ def test_commit_does_not_mutate_or_alias_inputs(
 def test_commit_requires_at_least_one_result_mapping_entry(
     options_session: Session,
 ) -> None:
-    generating, _, _ = begin_recipe_generation(options_session, ["option-1"])
+    generating, _, _, context = begin_recipe_generation(options_session, ["option-1"])
 
     with pytest.raises(AppError) as raised:
-        commit_recipe_results(generating, successes={}, failures={})
+        commit_recipe_results(
+            generating,
+            successes={},
+            failures={},
+            context=context,
+        )
 
     assert_invalid_request(raised.value)
     assert raised.value.message == "Recipe results must not be empty."
@@ -357,10 +574,10 @@ def test_commit_rejects_malformed_result_mappings(
     failures: dict[str, RecipeFailure],
     expected_message: str,
 ) -> None:
-    generating, _, _ = begin_recipe_generation(options_session, ["option-1"])
+    generating, _, _, context = begin_recipe_generation(options_session, ["option-1"])
 
     with pytest.raises(AppError) as raised:
-        commit_recipe_results(generating, successes, failures)
+        commit_recipe_results(generating, successes, failures, context)
 
     assert_invalid_request(raised.value)
     assert raised.value.message == expected_message
@@ -372,13 +589,14 @@ def test_commit_rejects_unknown_result_option_with_a_safe_not_found_error(
     options_session: Session,
 ) -> None:
     unknown_id = "unknown-private-result"
-    generating, _, _ = begin_recipe_generation(options_session, ["option-1"])
+    generating, _, _, context = begin_recipe_generation(options_session, ["option-1"])
 
     with pytest.raises(AppError) as raised:
         commit_recipe_results(
             generating,
             successes={unknown_id: complete_recipe(unknown_id)},
             failures={},
+            context=context,
         )
 
     error = raised.value
@@ -395,7 +613,7 @@ def test_commit_rejects_unknown_result_option_with_a_safe_not_found_error(
 def test_all_failed_raises_retryable_safe_model_error_without_partial_state(
     options_session: Session,
 ) -> None:
-    generating, _, _ = begin_recipe_generation(
+    generating, _, _, context = begin_recipe_generation(
         options_session,
         ["option-1", "option-2"],
     )
@@ -410,6 +628,7 @@ def test_all_failed_raises_retryable_safe_model_error_without_partial_state(
                 "option-1": recipe_failure("option-1", message=private_failure),
                 "option-2": recipe_failure("option-2"),
             },
+            context=context,
         )
 
     error = raised.value
@@ -421,6 +640,109 @@ def test_all_failed_raises_retryable_safe_model_error_without_partial_state(
     assert error.details == {}
     assert error.session_id == "session-1"
     assert generating == generating_before
+    assert generating.recipe_generation_id == context.generation_id
+
+
+def test_commit_rejects_a_stale_attempt_context(
+    options_session: Session,
+) -> None:
+    _, _, _, stale_context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+    generating, _, _, _ = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+
+    with pytest.raises(AppError) as raised:
+        commit_recipe_results(
+            generating,
+            successes={"option-1": complete_recipe("option-1")},
+            failures={},
+            context=stale_context,
+        )
+
+    assert_invalid_transition(raised.value)
+    assert raised.value.message == "Recipe generation context is invalid."
+
+
+@pytest.mark.parametrize(
+    "context_update",
+    [
+        {"generation_id": "forged-token"},
+        {"session_id": "different-session"},
+        {"previous_stage": SessionStage.RECIPES_READY},
+        {"selected_option_ids": ("option-2",)},
+        {"rollback_snapshot": "{}"},
+    ],
+)
+def test_commit_rejects_forged_or_mismatched_context_fields(
+    options_session: Session,
+    context_update: dict[str, object],
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+    forged = context.model_copy(update=context_update)
+
+    with pytest.raises(AppError) as raised:
+        commit_recipe_results(
+            generating,
+            successes={"option-1": complete_recipe("option-1")},
+            failures={},
+            context=forged,
+        )
+
+    assert_invalid_transition(raised.value)
+    assert raised.value.message == "Recipe generation context is invalid."
+
+
+def test_commit_revalidates_a_constructed_context(
+    options_session: Session,
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+    constructed = RecipeGenerationContext.model_construct(
+        **{
+            **context.__dict__,
+            "selected_option_ids": ("   ",),
+        }
+    )
+
+    with pytest.raises(AppError) as raised:
+        commit_recipe_results(
+            generating,
+            successes={"option-1": complete_recipe("option-1")},
+            failures={},
+            context=constructed,
+        )
+
+    assert_invalid_transition(raised.value)
+
+
+def test_commit_rejects_a_mutated_generating_session_timestamp_safely(
+    options_session: Session,
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+    unchecked = generating.model_copy(update={"updated_at": datetime(2026, 7, 30)})
+
+    with pytest.raises(AppError) as raised:
+        commit_recipe_results(
+            unchecked,
+            successes={"option-1": complete_recipe("option-1")},
+            failures={},
+            context=context,
+        )
+
+    assert_invalid_request(raised.value)
+    assert raised.value.message == "Session timestamp is invalid."
 
 
 def test_new_success_replaces_prior_failure_for_the_same_option(
@@ -435,7 +757,7 @@ def test_new_success_replaces_prior_failure_for_the_same_option(
             "recipe_failures": {"option-2": recipe_failure("option-2")},
         }
     )
-    generating, _, _ = begin_recipe_generation(recipes_session, ["option-2"])
+    generating, _, _, context = begin_recipe_generation(recipes_session, ["option-2"])
     replacement = complete_recipe(
         "option-2",
         name="Onion Soup",
@@ -447,6 +769,7 @@ def test_new_success_replaces_prior_failure_for_the_same_option(
         generating,
         successes={"option-2": replacement},
         failures={},
+        context=context,
     )
 
     assert list(completed.complete_recipes) == ["option-1", "option-2"]
@@ -470,7 +793,7 @@ def test_new_failure_replaces_prior_success_for_the_same_option(
             },
         }
     )
-    generating, _, _ = begin_recipe_generation(
+    generating, _, _, context = begin_recipe_generation(
         recipes_session,
         ["option-2", "option-3"],
     )
@@ -481,6 +804,7 @@ def test_new_failure_replaces_prior_success_for_the_same_option(
             "option-3": complete_recipe("option-3", name="Spinach Rice"),
         },
         failures={"option-2": recipe_failure("option-2")},
+        context=context,
     )
 
     assert list(completed.complete_recipes) == ["option-1", "option-3"]
@@ -498,7 +822,7 @@ def test_selecting_a_different_option_preserves_prior_partial_results(
             "recipe_failures": {"option-2": recipe_failure("option-2")},
         }
     )
-    generating, selected, previous_stage = begin_recipe_generation(
+    generating, selected, previous_stage, context = begin_recipe_generation(
         recipes_session,
         ["option-3"],
     )
@@ -509,6 +833,7 @@ def test_selecting_a_different_option_preserves_prior_partial_results(
             "option-3": complete_recipe("option-3", name="Spinach Rice"),
         },
         failures={},
+        context=context,
     )
 
     assert previous_stage is SessionStage.RECIPES_READY
@@ -518,57 +843,109 @@ def test_selecting_a_different_option_preserves_prior_partial_results(
 
 
 def test_commit_advances_timestamp(options_session: Session) -> None:
-    generating, _, _ = begin_recipe_generation(options_session, ["option-1"])
+    generating, _, _, context = begin_recipe_generation(options_session, ["option-1"])
 
     completed = commit_recipe_results(
         generating,
         successes={"option-1": complete_recipe("option-1")},
         failures={},
+        context=context,
     )
 
     assert completed.updated_at > generating.updated_at
 
 
+def test_commit_preserves_orphaned_prior_result_keys_exactly(
+    options_session: Session,
+) -> None:
+    orphan_recipe = complete_recipe(
+        "orphan-success",
+        name="Historic Dish",
+        cuisine="Historic",
+    )
+    orphan_failure = recipe_failure("orphan-failure")
+    prior = options_session.model_copy(
+        update={
+            "stage": SessionStage.RECIPES_READY,
+            "complete_recipes": {"orphan-success": orphan_recipe},
+            "recipe_failures": {"orphan-failure": orphan_failure},
+        }
+    )
+    generating, _, _, context = begin_recipe_generation(prior, ["option-1"])
+
+    completed = commit_recipe_results(
+        generating,
+        successes={"option-1": complete_recipe("option-1")},
+        failures={},
+        context=context,
+    )
+
+    assert completed.complete_recipes["orphan-success"] == orphan_recipe
+    assert completed.recipe_failures["orphan-failure"] == orphan_failure
+    assert list(completed.complete_recipes) == ["option-1", "orphan-success"]
+    assert list(completed.recipe_failures) == ["orphan-failure"]
+
+
 @pytest.mark.parametrize(
-    ("prior_successes", "prior_failures", "expected_stage"),
+    ("stage", "prior_successes", "prior_failures"),
     [
-        ({}, {}, SessionStage.OPTIONS_READY),
         (
+            SessionStage.OPTIONS_READY,
             {"option-1": complete_recipe("option-1")},
-            {"option-2": recipe_failure("option-2")},
-            SessionStage.RECIPES_READY,
+            {"orphan-failure": recipe_failure("orphan-failure")},
         ),
+        (SessionStage.RECIPES_READY, {}, {}),
     ],
 )
-def test_restore_uses_retained_pre_generation_result_state(
+def test_restore_reconstructs_the_exact_unusual_ready_snapshot(
     options_session: Session,
+    stage: SessionStage,
     prior_successes: dict[str, CompleteRecipe],
     prior_failures: dict[str, RecipeFailure],
-    expected_stage: SessionStage,
 ) -> None:
     prior = options_session.model_copy(
         update={
-            "stage": expected_stage,
+            "stage": stage,
             "complete_recipes": prior_successes,
             "recipe_failures": prior_failures,
         }
     )
-    generating, _, _ = begin_recipe_generation(prior, ["option-3"])
-    generating_before = generating.model_copy(deep=True)
+    generating, _, _, context = begin_recipe_generation(prior, ["option-3"])
+    generating.recipe_options[0].warnings.append("Mutated after begin.")
+    generating.preferences.preferred_cuisines.append("Mutated after begin")
+    generating.complete_recipes.clear()
+    generating.recipe_failures["option-3"] = recipe_failure("option-3")
+    generating.warnings.append("Mutated after begin.")
 
-    restored = restore_after_recipe_failure(generating)
+    restored = restore_after_recipe_failure(generating, context)
 
-    assert restored.stage is expected_stage
-    assert restored.complete_recipes == generating_before.complete_recipes
-    assert restored.recipe_failures == generating_before.recipe_failures
-    assert restored.recipe_options == generating_before.recipe_options
-    assert restored.preferences == generating_before.preferences
+    assert restored == prior
+    assert restored.stage is stage
+    assert restored.updated_at == NOW
+    assert restored.recipe_generation_id is None
     assert restored.complete_recipes is not generating.complete_recipes
     assert restored.recipe_failures is not generating.recipe_failures
     assert restored.recipe_options is not generating.recipe_options
     assert restored.preferences is not generating.preferences
-    assert restored.updated_at > generating.updated_at
-    assert generating == generating_before
+
+
+def test_restore_rejects_a_context_with_a_different_bound_snapshot(
+    options_session: Session,
+) -> None:
+    generating, _, _, context = begin_recipe_generation(
+        options_session,
+        ["option-1"],
+    )
+    different_snapshot = options_session.model_copy(
+        update={"warnings": ["Forged rollback state."]}
+    ).model_dump_json()
+    forged = context.model_copy(update={"rollback_snapshot": different_snapshot})
+
+    with pytest.raises(AppError) as raised:
+        restore_after_recipe_failure(generating, forged)
+
+    assert_invalid_transition(raised.value)
+    assert raised.value.message == "Recipe generation context is invalid."
 
 
 @pytest.mark.parametrize(
@@ -579,6 +956,7 @@ def test_commit_and_restore_require_generating_recipes_stage(
     options_session: Session,
     stage: SessionStage,
 ) -> None:
+    _, _, _, context = begin_recipe_generation(options_session, ["option-1"])
     session = options_session.model_copy(update={"stage": stage})
 
     with pytest.raises(AppError) as commit_error:
@@ -586,9 +964,10 @@ def test_commit_and_restore_require_generating_recipes_stage(
             session,
             successes={"option-1": complete_recipe("option-1")},
             failures={},
+            context=context,
         )
     with pytest.raises(AppError) as restore_error:
-        restore_after_recipe_failure(session)
+        restore_after_recipe_failure(session, context)
 
     for error in (commit_error.value, restore_error.value):
         assert error.code is ErrorCode.INVALID_SESSION_TRANSITION

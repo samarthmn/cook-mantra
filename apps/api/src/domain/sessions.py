@@ -38,6 +38,7 @@ class Session(BaseModel):
     excluded_recipe_names: set[str] = Field(default_factory=set)
     option_batch_number: int = Field(default=0, ge=0)
     option_generation_id: str | None = Field(default=None, repr=False)
+    recipe_generation_id: str | None = Field(default=None, repr=False)
     warnings: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
