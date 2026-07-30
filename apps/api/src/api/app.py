@@ -5,10 +5,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from agents.ingredient_extraction import IngredientExtractor, OllamaIngredientExtractor
 from api.middleware import RequestIdMiddleware
-from api.routes import health, jobs
+from api.routes import health, jobs, sessions
 from core.config import Settings, get_settings
 from core.errors import install_error_handlers
+from orchestration.graphs.ingredient_extraction import (
+    ExtractionDependencies,
+    build_ingredient_extraction_runner,
+)
 from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
 from repositories.session_store import SessionStore
@@ -16,6 +21,7 @@ from services.artifacts import ArtifactStore
 from services.cleanup import CleanupSupervisor
 from services.concurrency import ModelCallLimiter
 from services.ollama_health import OllamaHealthService
+from services.uploads import ImageUploadValidator
 
 
 @asynccontextmanager
@@ -43,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(
     settings: Settings | None = None,
     ollama_health: OllamaHealthService | None = None,
+    ingredient_extractor: IngredientExtractor | None = None,
 ) -> FastAPI:
     """Construct an application with replaceable external-service boundaries."""
     resolved_settings = settings or get_settings()
@@ -62,6 +69,15 @@ def create_app(
         max_concurrent_jobs=resolved_settings.max_concurrent_jobs,
     )
     model_call_limiter = ModelCallLimiter(resolved_settings.max_concurrent_model_calls)
+    upload_validator = ImageUploadValidator(resolved_settings.max_upload_bytes)
+    resolved_ingredient_extractor = ingredient_extractor or OllamaIngredientExtractor()
+    ingredient_extraction_runner = build_ingredient_extraction_runner(
+        ExtractionDependencies(
+            resolved_ingredient_extractor,
+            session_store,
+            artifact_store,
+        )
+    )
     resolved_ollama_health = ollama_health or OllamaHealthService(
         str(resolved_settings.ollama_base_url),
         timeout_seconds=resolved_settings.llm_timeout_seconds,
@@ -75,10 +91,14 @@ def create_app(
     app.state.cleanup_supervisor = cleanup_supervisor
     app.state.job_runner = job_runner
     app.state.model_call_limiter = model_call_limiter
+    app.state.upload_validator = upload_validator
+    app.state.ingredient_extractor = resolved_ingredient_extractor
+    app.state.ingredient_extraction_runner = ingredient_extraction_runner
     app.state.ollama_health = resolved_ollama_health
 
     install_error_handlers(app)
     app.add_middleware(RequestIdMiddleware)
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(jobs.router, prefix="/api/v1")
+    app.include_router(sessions.router, prefix="/api/v1")
     return app

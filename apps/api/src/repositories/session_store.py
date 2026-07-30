@@ -73,6 +73,11 @@ class SessionStore:
             self._sessions[session.id] = replacement
             return detached_replacement
 
+    async def delete(self, session_id: str) -> None:
+        """Delete one session when it exists."""
+        async with self._lock:
+            self._sessions.pop(session_id, None)
+
     async def delete_expired(self, now: datetime | None = None) -> list[str]:
         """Delete sessions that have been inactive longer than their TTL."""
         expiry_time = now or datetime.now(UTC)

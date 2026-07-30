@@ -1,0 +1,514 @@
+from io import BytesIO
+from pathlib import Path
+
+import pytest
+from fastapi import UploadFile
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from agents.ingredient_extraction import IngredientExtractor
+from api.app import create_app
+from api.dependencies import get_artifact_store, get_job_runner
+from core.config import Settings
+from core.errors import AppError, ErrorCode
+from domain.artifacts import Artifact
+from domain.ingredients import ExtractionResult
+from domain.jobs import JobOperation
+from services.artifacts import ArtifactStore
+from services.uploads import ImageUploadValidator, ValidatedImage
+
+
+class ReadyOllama:
+    async def inspect(self) -> dict[str, object]:
+        return {
+            "reachable": True,
+            "available_models": [],
+            "missing": [],
+        }
+
+
+class FakeIngredientExtractor:
+    def __init__(
+        self,
+        result: ExtractionResult | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._result = result
+        self._error = error
+
+    async def extract(self, image: bytes, media_type: str) -> ExtractionResult:
+        if self._error is not None:
+            raise self._error
+        assert image == png_bytes()
+        assert media_type == "image/png"
+        assert self._result is not None
+        return self._result
+
+
+class TrackingUploadValidator:
+    def __init__(self, max_bytes: int) -> None:
+        self._delegate = ImageUploadValidator(max_bytes)
+        self.upload: UploadFile | None = None
+
+    async def read(self, upload: UploadFile) -> ValidatedImage:
+        self.upload = upload
+        return await self._delegate.read(upload)
+
+
+class ClosureObservingArtifactStore:
+    def __init__(
+        self,
+        delegate: ArtifactStore,
+        validator: TrackingUploadValidator,
+    ) -> None:
+        self._delegate = delegate
+        self._validator = validator
+        self.upload_closed_when_written: bool | None = None
+
+    async def write(
+        self,
+        data: bytes,
+        media_type: str,
+        suffix: str,
+        owner_session_id: str,
+    ) -> Artifact:
+        assert self._validator.upload is not None
+        self.upload_closed_when_written = self._validator.upload.file.closed
+        return await self._delegate.write(
+            data,
+            media_type,
+            suffix,
+            owner_session_id,
+        )
+
+    async def delete(self, artifact_id: str) -> None:
+        await self._delegate.delete(artifact_id)
+
+
+class FailingArtifactStore:
+    def __init__(self) -> None:
+        self.owner_session_id: str | None = None
+
+    async def write(
+        self,
+        data: bytes,
+        media_type: str,
+        suffix: str,
+        owner_session_id: str,
+    ) -> Artifact:
+        self.owner_session_id = owner_session_id
+        raise AppError(
+            code=ErrorCode.ARTIFACT_FAILURE,
+            message="Ingredient image storage is unavailable.",
+            status_code=500,
+            retryable=False,
+        )
+
+    async def delete(self, artifact_id: str) -> None:
+        raise AssertionError("No artifact was returned to the route.")
+
+
+class CapturingArtifactStore:
+    def __init__(self, delegate: ArtifactStore) -> None:
+        self._delegate = delegate
+        self.written: Artifact | None = None
+
+    async def write(
+        self,
+        data: bytes,
+        media_type: str,
+        suffix: str,
+        owner_session_id: str,
+    ) -> Artifact:
+        self.written = await self._delegate.write(
+            data,
+            media_type,
+            suffix,
+            owner_session_id,
+        )
+        return self.written
+
+    async def delete(self, artifact_id: str) -> None:
+        await self._delegate.delete(artifact_id)
+
+
+class FailingJobRunner:
+    def __init__(self) -> None:
+        self.session_id: str | None = None
+
+    async def submit(self, operation, session_id, worker):
+        assert operation is JobOperation.EXTRACT_INGREDIENTS
+        self.session_id = session_id
+        raise AppError(
+            code=ErrorCode.OLLAMA_UNAVAILABLE,
+            message="Extraction could not be queued.",
+            status_code=503,
+            retryable=True,
+        )
+
+
+def png_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), "red").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def settings_for(
+    artifact_root: Path,
+    *,
+    max_upload_bytes: int = 10 * 1024 * 1024,
+) -> Settings:
+    return Settings(
+        _env_file=None,
+        artifact_root=artifact_root,
+        max_upload_bytes=max_upload_bytes,
+    )
+
+
+def make_app(
+    artifact_root: Path,
+    extractor: IngredientExtractor,
+    *,
+    max_upload_bytes: int = 10 * 1024 * 1024,
+):
+    return create_app(
+        settings=settings_for(
+            artifact_root,
+            max_upload_bytes=max_upload_bytes,
+        ),
+        ollama_health=ReadyOllama(),
+        ingredient_extractor=extractor,
+    )
+
+
+def successful_extraction() -> ExtractionResult:
+    return ExtractionResult(
+        detected=[
+            {"name": "Tomato", "confidence": 0.94},
+            {"name": "Onion", "confidence": 0.87},
+        ]
+    )
+
+
+def test_upload_creates_session_and_job(project_tmp_path: Path) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+        )
+
+    assert response.status_code == 202
+    assert set(response.json()) == {"session_id", "job_id"}
+
+
+def test_completed_extraction_is_visible_on_session(project_tmp_path: Path) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+        ).json()
+        client.portal.call(app.state.job_runner.wait, created["job_id"])
+
+        job_response = client.get(f"/api/v1/jobs/{created['job_id']}")
+        session_response = client.get(f"/api/v1/sessions/{created['session_id']}")
+
+    assert job_response.status_code == 200
+    assert job_response.json()["status"] == "succeeded"
+    assert session_response.status_code == 200
+    body = session_response.json()
+    assert body["stage"] == "reviewing_ingredients"
+    assert body["image_artifact_id"] is not None
+    assert body["warnings"] == []
+    detected = [item for item in body["ingredients"] if item["source"] == "detected"]
+    assert [(item["name"], item["confidence"]) for item in detected] == [
+        ("Tomato", 0.94),
+        ("Onion", 0.87),
+    ]
+
+
+def test_byte_invalid_image_uses_the_standard_error(project_tmp_path: Path) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", b"not-an-image", "image/png")},
+            headers={"X-Request-ID": "req-invalid-image"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "invalid_request",
+            "message": "Upload must be a valid image.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-invalid-image",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+
+
+def test_oversized_image_uses_the_standard_error(project_tmp_path: Path) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+        max_upload_bytes=4,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+            headers={"X-Request-ID": "req-oversized-image"},
+        )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "invalid_request",
+            "message": "Image uploads must be no larger than 10 MiB.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-oversized-image",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+
+
+def test_missing_session_uses_the_standard_not_found_error(
+    project_tmp_path: Path,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/sessions/missing-session",
+            headers={"X-Request-ID": "req-missing-session"},
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "resource_not_found",
+            "message": "Session was not found.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-missing-session",
+            "session_id": "missing-session",
+            "job_id": None,
+        }
+    }
+
+
+def test_weak_recognition_keeps_pantry_items_separate(
+    project_tmp_path: Path,
+) -> None:
+    warning = "No ingredients were confidently detected. Add them manually."
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(
+            ExtractionResult(
+                detected=[],
+                warnings=[warning],
+            )
+        ),
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+        ).json()
+        client.portal.call(app.state.job_runner.wait, created["job_id"])
+        response = client.get(f"/api/v1/sessions/{created['session_id']}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stage"] == "reviewing_ingredients"
+    assert body["warnings"] == [warning]
+    assert body["ingredients"]
+    assert {item["source"] for item in body["ingredients"]} == {"pantry_suggestion"}
+    assert all(item["confirmed"] is False for item in body["ingredients"])
+
+
+def test_upload_is_closed_before_artifact_storage(project_tmp_path: Path) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+    validator = TrackingUploadValidator(app.state.settings.max_upload_bytes)
+    app.state.upload_validator = validator
+    artifact_store = ClosureObservingArtifactStore(
+        app.state.artifact_store,
+        validator,
+    )
+    app.dependency_overrides[get_artifact_store] = lambda: artifact_store
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+        )
+
+    assert response.status_code == 202
+    assert artifact_store.upload_closed_when_written is True
+
+
+def test_artifact_write_failure_rolls_back_only_the_new_session(
+    project_tmp_path: Path,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+    failing_store = FailingArtifactStore()
+    app.dependency_overrides[get_artifact_store] = lambda: failing_store
+
+    with TestClient(app) as client:
+        retained_session = client.portal.call(app.state.session_store.create)
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+            headers={"X-Request-ID": "req-artifact-failure"},
+        )
+        assert failing_store.owner_session_id is not None
+        removed_session = client.portal.call(
+            app.state.session_store.get,
+            failing_store.owner_session_id,
+        )
+        still_retained = client.portal.call(
+            app.state.session_store.require,
+            retained_session.id,
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "artifact_failure",
+            "message": "Ingredient image storage is unavailable.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-artifact-failure",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+    assert removed_session is None
+    assert still_retained == retained_session
+
+
+def test_job_submit_failure_rolls_back_only_new_session_and_artifact(
+    project_tmp_path: Path,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+    artifact_store = CapturingArtifactStore(app.state.artifact_store)
+    failing_runner = FailingJobRunner()
+    app.dependency_overrides[get_artifact_store] = lambda: artifact_store
+    app.dependency_overrides[get_job_runner] = lambda: failing_runner
+
+    with TestClient(app) as client:
+        retained_session = client.portal.call(app.state.session_store.create)
+        retained_artifact = client.portal.call(
+            app.state.artifact_store.write,
+            b"retained-image",
+            "image/png",
+            ".png",
+            retained_session.id,
+        )
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+            headers={"X-Request-ID": "req-submit-failure"},
+        )
+
+        assert failing_runner.session_id is not None
+        assert artifact_store.written is not None
+        removed_session = client.portal.call(
+            app.state.session_store.get,
+            failing_runner.session_id,
+        )
+        with pytest.raises(AppError) as removed_artifact:
+            client.portal.call(
+                app.state.artifact_store.require,
+                artifact_store.written.id,
+            )
+        still_retained_session = client.portal.call(
+            app.state.session_store.require,
+            retained_session.id,
+        )
+        still_retained_artifact = client.portal.call(
+            app.state.artifact_store.require,
+            retained_artifact.id,
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "ollama_unavailable",
+            "message": "Extraction could not be queued.",
+            "details": {},
+            "retryable": True,
+            "request_id": "req-submit-failure",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+    assert removed_session is None
+    assert removed_artifact.value.code is ErrorCode.RESOURCE_NOT_FOUND
+    assert still_retained_session == retained_session
+    assert still_retained_artifact.id == retained_artifact.id
+
+
+def test_background_failure_retains_extracting_session_and_artifact(
+    project_tmp_path: Path,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(error=RuntimeError("vision failed")),
+    )
+    artifact_store = CapturingArtifactStore(app.state.artifact_store)
+    app.dependency_overrides[get_artifact_store] = lambda: artifact_store
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+        ).json()
+        client.portal.call(app.state.job_runner.wait, created["job_id"])
+        job_response = client.get(f"/api/v1/jobs/{created['job_id']}")
+        session_response = client.get(f"/api/v1/sessions/{created['session_id']}")
+        assert artifact_store.written is not None
+        retained_artifact = client.portal.call(
+            app.state.artifact_store.require,
+            artifact_store.written.id,
+        )
+
+    assert job_response.json()["status"] == "failed"
+    assert job_response.json()["error"]["code"] == "internal_error"
+    assert session_response.status_code == 200
+    assert session_response.json()["stage"] == "extracting"
+    assert session_response.json()["ingredients"] == []
+    assert session_response.json()["warnings"] == []
+    assert retained_artifact.owner_session_id == created["session_id"]

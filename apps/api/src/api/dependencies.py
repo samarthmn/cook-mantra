@@ -3,12 +3,14 @@
 from fastapi import Request
 
 from core.config import Settings
+from orchestration.graphs.ingredient_extraction import IngredientExtractionRunner
 from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
 from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
 from services.ollama_health import OllamaHealthService
+from services.uploads import ImageUploadValidator
 
 
 def get_settings(request: Request) -> Settings:
@@ -34,6 +36,18 @@ def get_artifact_store(request: Request) -> ArtifactStore:
 def get_job_runner(request: Request) -> JobRunner:
     """Return the in-process background job runner."""
     return request.app.state.job_runner
+
+
+def get_upload_validator(request: Request) -> ImageUploadValidator:
+    """Return the configured ingredient-image validator."""
+    return request.app.state.upload_validator
+
+
+def get_ingredient_extraction_runner(
+    request: Request,
+) -> IngredientExtractionRunner:
+    """Return the extraction runner bound to this application's stores."""
+    return request.app.state.ingredient_extraction_runner
 
 
 def get_model_call_limiter(request: Request) -> ModelCallLimiter:

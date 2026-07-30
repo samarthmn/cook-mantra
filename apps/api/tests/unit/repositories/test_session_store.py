@@ -112,6 +112,18 @@ async def test_expired_sessions_are_deleted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_removes_only_the_requested_session() -> None:
+    store = SessionStore(ttl_seconds=21_600)
+    removed_session = await store.create()
+    retained_session = await store.create()
+
+    await store.delete(removed_session.id)
+
+    assert await store.get(removed_session.id) is None
+    assert await store.require(retained_session.id) == retained_session
+
+
+@pytest.mark.asyncio
 async def test_session_reads_do_not_expose_stored_state() -> None:
     store = SessionStore(ttl_seconds=21_600)
     session = await store.create()

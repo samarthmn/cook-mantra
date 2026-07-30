@@ -1,5 +1,5 @@
 """Versioned HTTP route modules."""
 
-from . import health, jobs
+from . import health, jobs, sessions
 
-__all__ = ["health", "jobs"]
+__all__ = ["health", "jobs", "sessions"]

@@ -30,6 +30,9 @@ dev = [
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "live: opt-in checks that call locally running external services",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

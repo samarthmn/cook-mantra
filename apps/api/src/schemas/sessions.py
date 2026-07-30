@@ -8,6 +8,13 @@ from domain.sessions import SessionStage
 from schemas.ingredients import IngredientResponse
 
 
+class SessionCreatedResponse(BaseModel):
+    """Identifiers returned after ingredient extraction is queued."""
+
+    session_id: str
+    job_id: str
+
+
 class SessionResponse(BaseModel):
     """Initial public representation of a cooking session."""
 
