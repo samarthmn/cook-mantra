@@ -429,11 +429,40 @@ def test_commit_rejects_an_extra_result_beyond_the_selection(
     assert extra.value.message == "Recipe results must match the selection."
 
 
+def test_commit_accepts_task_two_normalized_stored_recipe_identity(
+    options_session: Session,
+) -> None:
+    padded_option = stored_option(
+        "option-1",
+        " \tTomato Curry\n ",
+        cuisine="\n Indian \t",
+    )
+    session = options_session.model_copy(update={"recipe_options": [padded_option]})
+    generating, _, _, context = begin_recipe_generation(session, ["option-1"])
+    recipe = complete_recipe(
+        "option-1",
+        name="Tomato Curry",
+        cuisine="Indian",
+    )
+
+    completed = commit_recipe_results(
+        generating,
+        successes={"option-1": recipe},
+        failures={},
+        context=context,
+    )
+
+    assert completed.complete_recipes == {"option-1": recipe}
+
+
 @pytest.mark.parametrize(
     "recipe",
     [
         complete_recipe("option-1", name="Different Dish"),
+        complete_recipe("option-1", name="tomato curry"),
+        complete_recipe("option-1", name="Tomato  Curry"),
         complete_recipe("option-1", cuisine="French"),
+        complete_recipe("option-1", cuisine="indian"),
         complete_recipe("option-1", servings=3),
     ],
 )
@@ -450,6 +479,33 @@ def test_commit_rejects_mismatched_server_owned_recipe_identity(
         commit_recipe_results(
             generating,
             successes={"option-1": recipe},
+            failures={},
+            context=context,
+        )
+
+    assert_invalid_request(raised.value)
+    assert raised.value.message == "Complete recipe identity is invalid."
+
+
+@pytest.mark.parametrize("field_name", ["name", "cuisine"])
+def test_commit_rejects_unchecked_blank_stored_recipe_identity(
+    options_session: Session,
+    field_name: str,
+) -> None:
+    valid_option = options_session.recipe_options[0]
+    constructed = RecipeOption.model_construct(
+        **{
+            **valid_option.__dict__,
+            field_name: " \t\n ",
+        }
+    )
+    session = options_session.model_copy(update={"recipe_options": [constructed]})
+    generating, _, _, context = begin_recipe_generation(session, ["option-1"])
+
+    with pytest.raises(AppError) as raised:
+        commit_recipe_results(
+            generating,
+            successes={"option-1": complete_recipe("option-1")},
             failures={},
             context=context,
         )

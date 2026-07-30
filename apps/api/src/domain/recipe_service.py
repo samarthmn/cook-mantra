@@ -163,9 +163,14 @@ def commit_recipe_results(
     }
     for option_id, recipe in detached_successes.items():
         option = selected_options[option_id]
+        expected_name = _normalize_stored_recipe_identity(session, option.name)
+        expected_cuisine = _normalize_stored_recipe_identity(
+            session,
+            option.cuisine,
+        )
         if (
-            recipe.name != option.name
-            or recipe.cuisine != option.cuisine
+            recipe.name != expected_name
+            or recipe.cuisine != expected_cuisine
             or recipe.servings != rollback.preferences.servings
         ):
             raise _invalid_request_error(
@@ -346,6 +351,15 @@ def _normalize_selection_ids(
             "Recipe option IDs must be unique.",
         )
     return normalized_ids
+
+
+def _normalize_stored_recipe_identity(session: Session, value: object) -> str:
+    if not isinstance(value, str) or not (normalized := value.strip()):
+        raise _invalid_request_error(
+            session,
+            "Complete recipe identity is invalid.",
+        )
+    return normalized
 
 
 def _validate_result_mapping[Result: BaseModel](
