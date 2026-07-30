@@ -307,6 +307,8 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
 
     saved = await fixture.store.require(fixture.generating.id)
     assert result["stage"] is SessionStage.OPTIONS_READY
+    assert result["option_ids"] == [option.id for option in saved.recipe_options]
+    assert result["batch_number"] == 1
     assert [option.name for option in saved.recipe_options] == [
         "Tomato Curry",
         "Tomato Rice",
@@ -414,7 +416,7 @@ async def test_more_appends_using_context_even_when_batch_number_is_zero() -> No
         FakeNutritionAgent(),
     )
 
-    await graph.ainvoke(invocation(fixture))
+    result = await graph.ainvoke(invocation(fixture))
 
     saved = await fixture.store.require(fixture.generating.id)
     assert [option.id for option in saved.recipe_options] == [
@@ -426,6 +428,8 @@ async def test_more_appends_using_context_even_when_batch_number_is_zero() -> No
         "Tomato Rice",
     ]
     assert saved.option_batch_number == 1
+    assert result["option_ids"] == [saved.recipe_options[1].id]
+    assert result["batch_number"] == 1
 
 
 @pytest.mark.asyncio

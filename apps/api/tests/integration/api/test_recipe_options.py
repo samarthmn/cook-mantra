@@ -28,6 +28,7 @@ from domain.recipe_options import (
     RecipePreferences,
 )
 from domain.sessions import Session, SessionStage
+from orchestration.graphs.recipe_options import RecipeOptionOutput, RecipeOptionsRunner
 from repositories.session_store import SessionStore
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
@@ -65,11 +66,17 @@ class CapturingRecipeOptionsRunner:
         more: bool,
         generation_context: OptionGenerationContext,
         progress: ProgressReporter,
-    ) -> dict[str, object]:
+    ) -> RecipeOptionOutput:
         self.calls.append(
             (session_id, preferences, more, generation_context),
         )
-        return {}
+        return {
+            "session_id": session_id,
+            "recipe_options": [],
+            "stage": SessionStage.OPTIONS_READY,
+            "option_ids": [],
+            "batch_number": 0,
+        }
 
 
 class FakeMasterChef:
@@ -151,6 +158,35 @@ class PausingRollbackSessionStore(SessionStore):
             self.rollback_started.set()
             await self.allow_rollback.wait()
         return await super().replace(session, before_commit=before_commit)
+
+
+class DelayedFirstCommittedResult:
+    """Hold the first graph result after commit while a later batch completes."""
+
+    def __init__(self, delegate: RecipeOptionsRunner) -> None:
+        self._delegate = delegate
+        self.first_committed = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def __call__(
+        self,
+        session_id: str,
+        preferences: RecipePreferences | Mapping[str, object],
+        more: bool,
+        generation_context: OptionGenerationContext,
+        progress: ProgressReporter,
+    ) -> RecipeOptionOutput:
+        result = await self._delegate(
+            session_id,
+            preferences,
+            more,
+            generation_context,
+            progress,
+        )
+        if not more:
+            self.first_committed.set()
+            await self.release_first.wait()
+        return result
 
 
 def draft(name: str) -> RecipeOptionDraft:
@@ -617,6 +653,85 @@ def test_more_crosses_domain_and_real_graph_with_all_canonical_shown_names(
     assert job_response.json()["result"] == {
         "option_ids": [session_response.json()["recipe_options"][-1]["id"]],
         "batch_number": 2,
+    }
+
+
+def test_overlapping_jobs_report_their_own_committed_batch(
+    project_tmp_path: Path,
+) -> None:
+    chef = FakeMasterChef(
+        [
+            [draft("Batch A Tomato Curry")],
+            [draft("Batch B Tomato Rice")],
+        ]
+    )
+    application = create_app(
+        settings=Settings(
+            _env_file=None,
+            artifact_root=project_tmp_path,
+            max_concurrent_jobs=2,
+        ),
+        ollama_health=ReadyOllama(),
+        ingredient_extractor=UnusedIngredientExtractor(),
+        master_chef=chef,
+        nutrition_agent=FakeNutritionAgent(),
+    )
+    delayed_runner = DelayedFirstCommittedResult(
+        application.state.recipe_options_runner
+    )
+    application.state.recipe_options_runner = delayed_runner
+
+    with TestClient(application) as test_client:
+        confirmed = test_client.portal.call(
+            partial(
+                store_session,
+                application.state.session_store,
+                stage=SessionStage.INGREDIENTS_CONFIRMED,
+            )
+        )
+        first_job = test_client.post(
+            f"/api/v1/sessions/{confirmed.id}/recipe-options",
+            json={"option_count": 1},
+        )
+        assert first_job.status_code == 202
+
+        try:
+            test_client.portal.call(delayed_runner.first_committed.wait)
+            after_first = test_client.get(
+                f"/api/v1/sessions/{confirmed.id}",
+            ).json()
+            first_option_id = after_first["recipe_options"][0]["id"]
+            assert after_first["option_batch_number"] == 1
+
+            second_job = test_client.post(
+                f"/api/v1/sessions/{confirmed.id}/recipe-options/more",
+                json={"option_count": 1},
+            )
+            assert second_job.status_code == 202
+            second_job_response = poll_job(
+                test_client,
+                second_job.json()["job_id"],
+            )
+            after_second = test_client.get(
+                f"/api/v1/sessions/{confirmed.id}",
+            ).json()
+            second_option_id = after_second["recipe_options"][1]["id"]
+            assert second_job_response.json()["result"] == {
+                "option_ids": [second_option_id],
+                "batch_number": 2,
+            }
+
+            test_client.portal.call(delayed_runner.release_first.set)
+            first_job_response = poll_job(
+                test_client,
+                first_job.json()["job_id"],
+            )
+        finally:
+            test_client.portal.call(delayed_runner.release_first.set)
+
+    assert first_job_response.json()["result"] == {
+        "option_ids": [first_option_id],
+        "batch_number": 1,
     }
 
 

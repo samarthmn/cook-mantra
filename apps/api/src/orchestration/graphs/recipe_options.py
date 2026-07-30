@@ -5,7 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from typing import NotRequired, TypedDict
+from typing import NotRequired, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -33,16 +33,6 @@ from repositories.session_store import SessionStore
 from services.concurrency import ModelCallLimiter
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
-type RecipeOptionsRunner = Callable[
-    [
-        str,
-        RecipePreferences | Mapping[str, object],
-        bool,
-        OptionGenerationContext,
-        ProgressReporter,
-    ],
-    Awaitable[dict[str, object]],
-]
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +65,20 @@ class RecipeOptionOutput(TypedDict):
     session_id: str
     recipe_options: list[RecipeOption]
     stage: SessionStage
+    option_ids: list[str]
+    batch_number: int
+
+
+type RecipeOptionsRunner = Callable[
+    [
+        str,
+        RecipePreferences | Mapping[str, object],
+        bool,
+        OptionGenerationContext,
+        ProgressReporter,
+    ],
+    Awaitable[RecipeOptionOutput],
+]
 
 
 async def _ignore_progress(_: int) -> None:
@@ -233,9 +237,12 @@ def build_recipe_options_graph(
             }
         )
         stored = await dependencies.session_store.replace(replacement)
+        saved_options = stored.recipe_options[batch_start:]
         return {
             "recipe_options": stored.recipe_options,
             "stage": stored.stage,
+            "option_ids": [option.id for option in saved_options],
+            "batch_number": stored.option_batch_number,
         }
 
     guarded_load = _rollback_on_failure(load_generating_session, dependencies)
@@ -375,7 +382,7 @@ async def run_recipe_options(
     progress: ProgressReporter,
     *,
     dependencies: RecipeOptionDependencies,
-) -> dict[str, object]:
+) -> RecipeOptionOutput:
     """Run the exact persisted generation attempt with application dependencies."""
     resolved_dependencies = replace(dependencies, progress=progress)
     graph = build_recipe_options_graph(resolved_dependencies)
@@ -387,7 +394,7 @@ async def run_recipe_options(
             "generation_context": generation_context,
         }
     )
-    return dict(result)
+    return cast(RecipeOptionOutput, dict(result))
 
 
 def build_recipe_options_runner(
@@ -401,7 +408,7 @@ def build_recipe_options_runner(
         more: bool,
         generation_context: OptionGenerationContext,
         progress: ProgressReporter,
-    ) -> dict[str, object]:
+    ) -> RecipeOptionOutput:
         return await run_recipe_options(
             session_id,
             preferences,

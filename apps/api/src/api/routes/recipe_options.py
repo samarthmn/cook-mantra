@@ -114,21 +114,18 @@ async def _queue_recipe_options(
     persisted = await session_store.replace(
         generating.model_copy(update={"updated_at": session.updated_at})
     )
-    batch_start = len(persisted.recipe_options) if more else 0
 
     async def worker(progress: ProgressReporter) -> dict[str, object]:
-        await recipe_options_runner(
+        result = await recipe_options_runner(
             persisted.id,
             persisted.preferences,
             more,
             generation_context,
             progress,
         )
-        saved_session = await session_store.require(persisted.id)
-        saved_options = saved_session.recipe_options[batch_start:]
         return {
-            "option_ids": [option.id for option in saved_options],
-            "batch_number": saved_session.option_batch_number,
+            "option_ids": result["option_ids"],
+            "batch_number": result["batch_number"],
         }
 
     operation = (
