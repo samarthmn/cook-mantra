@@ -1,4 +1,5 @@
-# apps/api/src/orchestration/agent.py
+"""Development-only LangGraph smoke graph."""
+
 from typing import Annotated
 
 from langgraph.graph import END, START, StateGraph
@@ -14,6 +15,7 @@ class State(TypedDict):
 
 
 def chatbot(state: State):
+    """Invoke the configured Master Chef model for one smoke-test turn."""
     model = get_model(Agent.MASTER_CHEF)
     return {"messages": [model.invoke(state["messages"])]}
 

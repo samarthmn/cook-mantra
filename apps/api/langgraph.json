@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "./src/orchestration/graphs/smoke.py:graph"
+  },
+  "env": ".env"
+}
