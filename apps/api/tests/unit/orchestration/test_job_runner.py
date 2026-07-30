@@ -38,6 +38,16 @@ class FailingFailureStore(JobStore):
         raise RuntimeError("job store write failed")
 
 
+class CountingJobStore(JobStore):
+    def __init__(self) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.create_count = 0
+
+    async def create(self, operation: JobOperation, session_id: str):
+        self.create_count += 1
+        return await super().create(operation, session_id)
+
+
 @pytest.mark.asyncio
 async def test_runner_records_progress_and_result() -> None:
     store = JobStore(ttl_seconds=21_600)
@@ -155,6 +165,107 @@ async def test_shutdown_cancels_active_worker_without_marking_job_failed() -> No
     assert cancelled.is_set()
     assert incomplete.status is JobStatus.RUNNING
     assert incomplete.error is None
+    assert runner.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_bounded_admission_rejects_before_creating_job_or_task() -> None:
+    store = CountingJobStore()
+    runner = JobRunner(store, max_concurrent_jobs=1, max_queued_jobs=1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def worker(progress):
+        started.set()
+        await release.wait()
+        return {}
+
+    first = await runner.submit(
+        JobOperation.EXTRACT_INGREDIENTS,
+        "session-1",
+        worker,
+    )
+    await started.wait()
+    second = await runner.submit(
+        JobOperation.EXTRACT_INGREDIENTS,
+        "session-2",
+        worker,
+    )
+
+    with pytest.raises(AppError) as raised:
+        await runner.submit(
+            JobOperation.EXTRACT_INGREDIENTS,
+            "session-3",
+            worker,
+        )
+
+    assert raised.value.code is ErrorCode.SERVICE_BUSY
+    assert raised.value.status_code == 503
+    assert raised.value.retryable is True
+    assert store.create_count == 2
+    assert runner.active_count == 2
+
+    release.set()
+    await asyncio.gather(runner.wait(first.id), runner.wait(second.id))
+    assert runner.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_capacity_is_reusable_after_success_failure_and_cancellation() -> None:
+    store = JobStore(ttl_seconds=21_600)
+    runner = JobRunner(store, max_concurrent_jobs=1, max_queued_jobs=0)
+
+    async def succeed(progress):
+        return {"ok": True}
+
+    first = await runner.submit(
+        JobOperation.EXTRACT_INGREDIENTS,
+        "session-1",
+        succeed,
+    )
+    await runner.wait(first.id)
+    assert runner.active_count == 0
+
+    async def fail(progress):
+        raise AppError(
+            code=ErrorCode.OLLAMA_UNAVAILABLE,
+            message="Ollama is temporarily unavailable.",
+            status_code=503,
+            retryable=True,
+        )
+
+    second = await runner.submit(
+        JobOperation.EXTRACT_INGREDIENTS,
+        "session-2",
+        fail,
+    )
+    await runner.wait(second.id)
+    assert runner.active_count == 0
+
+    started = asyncio.Event()
+
+    async def block(progress):
+        started.set()
+        await asyncio.Event().wait()
+        return {}
+
+    third = await runner.submit(
+        JobOperation.EXTRACT_INGREDIENTS,
+        "session-3",
+        block,
+    )
+    await started.wait()
+    runner._tasks[third.id].cancel()
+    await asyncio.gather(runner.wait(third.id), return_exceptions=True)
+    assert runner.active_count == 0
+
+    fourth = await runner.submit(
+        JobOperation.EXTRACT_INGREDIENTS,
+        "session-4",
+        succeed,
+    )
+    await runner.wait(fourth.id)
+    assert runner.active_count == 0
 
 
 @pytest.mark.asyncio

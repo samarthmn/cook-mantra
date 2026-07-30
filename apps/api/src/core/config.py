@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     ollama_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:11434")
     llm_timeout_seconds: float = 300.0
     max_concurrent_jobs: int = Field(default=2, gt=0)
+    max_queued_jobs: int = Field(default=4, ge=0)
     max_concurrent_model_calls: int = Field(default=2, gt=0)
+    cleanup_interval_seconds: int = Field(default=300, ge=10)
     image_width: int = Field(default=768, ge=256, le=2_048)
     image_height: int = Field(default=768, ge=256, le=2_048)
     image_steps: int | None = Field(default=None, ge=1, le=100)

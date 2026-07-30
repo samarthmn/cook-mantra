@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         await app.state.artifact_store.startup()
         await app.state.cleanup_supervisor.startup()
+        app.state.cleanup_task = getattr(app.state.cleanup_supervisor, "task", None)
     except BaseException:
         await _drain_runtime_shutdown(app)
         raise
@@ -112,10 +113,12 @@ def create_app(
         session_store,
         job_store,
         artifact_store,
+        interval_seconds=resolved_settings.cleanup_interval_seconds,
     )
     job_runner = JobRunner(
         job_store,
         max_concurrent_jobs=resolved_settings.max_concurrent_jobs,
+        max_queued_jobs=resolved_settings.max_queued_jobs,
     )
     model_call_limiter = ModelCallLimiter(resolved_settings.max_concurrent_model_calls)
     upload_validator = ImageUploadValidator(resolved_settings.max_upload_bytes)
@@ -192,6 +195,7 @@ def create_app(
     app.state.session_store = session_store
     app.state.artifact_store = artifact_store
     app.state.cleanup_supervisor = cleanup_supervisor
+    app.state.cleanup_task = None
     app.state.job_runner = job_runner
     app.state.model_call_limiter = model_call_limiter
     app.state.upload_validator = upload_validator

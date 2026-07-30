@@ -26,6 +26,7 @@ class ErrorCode(StrEnum):
     MODEL_NOT_FOUND = "model_not_found"
     MODEL_OUTPUT_INVALID = "model_output_invalid"
     OPERATION_TIMED_OUT = "operation_timed_out"
+    SERVICE_BUSY = "service_busy"
     ARTIFACT_FAILURE = "artifact_failure"
     INTERNAL_ERROR = "internal_error"
 

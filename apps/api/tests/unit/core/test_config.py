@@ -10,7 +10,9 @@ def test_settings_have_safe_local_defaults() -> None:
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 8000
     assert settings.max_concurrent_jobs == 2
+    assert settings.max_queued_jobs == 4
     assert settings.max_concurrent_model_calls == 2
+    assert settings.cleanup_interval_seconds == 300
     assert settings.max_upload_bytes == 10 * 1024 * 1024
     assert settings.session_ttl_seconds == 21_600
     assert settings.artifact_root == PROJECT_ROOT / "tmp" / "cook-mantra-api"
@@ -31,6 +33,8 @@ def test_langsmith_is_optional() -> None:
         ("max_concurrent_jobs", -1),
         ("max_concurrent_model_calls", 0),
         ("max_concurrent_model_calls", -1),
+        ("cleanup_interval_seconds", 9),
+        ("cleanup_interval_seconds", 0),
     ],
 )
 def test_settings_reject_non_positive_concurrency(
@@ -39,6 +43,13 @@ def test_settings_reject_non_positive_concurrency(
 ) -> None:
     with pytest.raises(ValidationError, match=field_name):
         Settings(_env_file=None, **{field_name: invalid_value})
+
+
+def test_settings_accept_zero_queued_jobs_and_reject_negative_queue() -> None:
+    assert Settings(_env_file=None, max_queued_jobs=0).max_queued_jobs == 0
+
+    with pytest.raises(ValidationError, match="max_queued_jobs"):
+        Settings(_env_file=None, max_queued_jobs=-1)
 
 
 @pytest.mark.parametrize(

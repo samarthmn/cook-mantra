@@ -182,6 +182,21 @@ class FailingJobRunner:
         )
 
 
+class BusyJobRunner:
+    def __init__(self) -> None:
+        self.session_id: str | None = None
+
+    async def submit(self, operation, session_id, worker):
+        assert operation is JobOperation.EXTRACT_INGREDIENTS
+        self.session_id = session_id
+        raise AppError(
+            code=ErrorCode.SERVICE_BUSY,
+            message="The service is busy. Try again shortly.",
+            status_code=503,
+            retryable=True,
+        )
+
+
 class BlockingJobRunner:
     def __init__(self) -> None:
         self.submit_started = asyncio.Event()
@@ -560,6 +575,52 @@ def test_job_submit_failure_rolls_back_only_new_session_and_artifact(
     assert removed_artifact.value.code is ErrorCode.RESOURCE_NOT_FOUND
     assert still_retained_session == retained_session
     assert still_retained_artifact.id == retained_artifact.id
+
+
+def test_busy_job_admission_rolls_back_new_session_and_artifact(
+    project_tmp_path: Path,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+    artifact_store = CapturingArtifactStore(app.state.artifact_store)
+    busy_runner = BusyJobRunner()
+    app.dependency_overrides[get_artifact_store] = lambda: artifact_store
+    app.dependency_overrides[get_job_runner] = lambda: busy_runner
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+            headers={"X-Request-ID": "req-service-busy"},
+        )
+        assert busy_runner.session_id is not None
+        assert artifact_store.written is not None
+        removed_session = client.portal.call(
+            app.state.session_store.get,
+            busy_runner.session_id,
+        )
+        with pytest.raises(AppError) as removed_artifact:
+            client.portal.call(
+                app.state.artifact_store.require,
+                artifact_store.written.id,
+            )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "service_busy",
+            "message": "The service is busy. Try again shortly.",
+            "details": {},
+            "retryable": True,
+            "request_id": "req-service-busy",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+    assert removed_session is None
+    assert removed_artifact.value.code is ErrorCode.RESOURCE_NOT_FOUND
 
 
 @pytest.mark.asyncio

@@ -17,12 +17,23 @@ logger = logging.getLogger(__name__)
 class JobRunner:
     """Run stored background jobs with a bounded level of concurrency."""
 
-    def __init__(self, store: JobStore, max_concurrent_jobs: int) -> None:
+    def __init__(
+        self,
+        store: JobStore,
+        max_concurrent_jobs: int,
+        max_queued_jobs: int = 4,
+    ) -> None:
         self._store = store
         self._semaphore = asyncio.Semaphore(max_concurrent_jobs)
+        self._capacity = max_concurrent_jobs + max_queued_jobs
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._closed = False
+
+    @property
+    def active_count(self) -> int:
+        """Return the number of runner-owned executing or queued tasks."""
+        return len(self._tasks)
 
     async def submit(
         self,
@@ -34,6 +45,13 @@ class JobRunner:
         async with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("Job runner is shut down.")
+            if len(self._tasks) >= self._capacity:
+                raise AppError(
+                    code=ErrorCode.SERVICE_BUSY,
+                    message="The service is busy. Try again shortly.",
+                    status_code=503,
+                    retryable=True,
+                )
             job = await self._store.create(operation, session_id)
             self._tasks[job.id] = asyncio.create_task(
                 self._execute(
