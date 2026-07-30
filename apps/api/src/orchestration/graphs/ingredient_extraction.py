@@ -122,8 +122,10 @@ def build_ingredient_extraction_graph(
                 "warnings": state["warnings"],
             }
         )
-        await dependencies.progress(100)
-        stored = await dependencies.session_store.replace(replacement)
+        stored = await dependencies.session_store.replace(
+            replacement,
+            before_commit=lambda: dependencies.progress(100),
+        )
         return {
             "ingredients": stored.ingredients,
             "warnings": stored.warnings,

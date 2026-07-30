@@ -1,11 +1,14 @@
 """Lock-protected in-memory storage for cooking sessions."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from core.errors import AppError, ErrorCode
 from domain.sessions import Session, SessionStage
+
+type PreCommitHook = Callable[[], Awaitable[None]]
 
 
 class SessionStore:
@@ -40,7 +43,12 @@ class SessionStore:
         async with self._lock:
             return self._require(session_id).model_copy(deep=True)
 
-    async def replace(self, session: Session) -> Session:
+    async def replace(
+        self,
+        session: Session,
+        *,
+        before_commit: PreCommitHook | None = None,
+    ) -> Session:
         """Atomically replace an existing session with updated state."""
         async with self._lock:
             current = self._require(session.id)
@@ -59,8 +67,11 @@ class SessionStore:
                 current.updated_at + timedelta(microseconds=1),
             )
             replacement = Session.model_validate(payload)
+            detached_replacement = replacement.model_copy(deep=True)
+            if before_commit is not None:
+                await before_commit()
             self._sessions[session.id] = replacement
-            return replacement.model_copy(deep=True)
+            return detached_replacement
 
     async def delete_expired(self, now: datetime | None = None) -> list[str]:
         """Delete sessions that have been inactive longer than their TTL."""

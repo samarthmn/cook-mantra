@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -119,9 +120,17 @@ async def test_graph_combines_detection_and_pantry_and_persists_final_review(
     extraction_context: ExtractionContext,
 ) -> None:
     progress_updates: list[int] = []
+    completion_observer: asyncio.Task[Session] | None = None
 
     async def record_progress(value: int) -> None:
+        nonlocal completion_observer
         progress_updates.append(value)
+        if value == 100:
+            completion_observer = asyncio.create_task(
+                extraction_context.session_store.require(extraction_context.session.id)
+            )
+            await asyncio.sleep(0)
+            assert not completion_observer.done()
 
     extractor = FakeExtractor(
         ExtractionResult(
@@ -149,6 +158,9 @@ async def test_graph_combines_detection_and_pantry_and_persists_final_review(
         extraction_context.session.id
     )
     assert result["stage"] is SessionStage.REVIEWING_INGREDIENTS
+    assert completion_observer is not None
+    observed_at_completion = await completion_observer
+    assert observed_at_completion.stage is SessionStage.REVIEWING_INGREDIENTS
     assert {item.source for item in result["ingredients"]} == {
         IngredientSource.DETECTED,
         IngredientSource.PANTRY_SUGGESTION,
@@ -301,3 +313,45 @@ async def test_final_progress_failure_preserves_the_unmodified_session(
     )
     assert stored == extraction_context.session
     assert progress_updates == [15, 65, 85, 100]
+
+
+@pytest.mark.asyncio
+async def test_stale_final_save_does_not_report_completion(
+    extraction_context: ExtractionContext,
+) -> None:
+    progress_updates: list[int] = []
+
+    async def make_session_stale(value: int) -> None:
+        progress_updates.append(value)
+        if value == 85:
+            await extraction_context.session_store.replace(
+                extraction_context.session.model_copy(
+                    update={"stage": SessionStage.RECIPES_READY}
+                )
+            )
+
+    graph = build_ingredient_extraction_graph(
+        ExtractionDependencies(
+            FakeExtractor(
+                ExtractionResult(detected=[{"name": "Potato", "confidence": 0.88}])
+            ),
+            extraction_context.session_store,
+            extraction_context.artifact_store,
+            progress=make_session_stale,
+        )
+    )
+
+    with pytest.raises(AppError) as raised:
+        await graph.ainvoke(
+            {
+                "session_id": extraction_context.session.id,
+                "artifact_id": extraction_context.artifact_id,
+            }
+        )
+
+    stored = await extraction_context.session_store.require(
+        extraction_context.session.id
+    )
+    assert raised.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert stored.stage is SessionStage.RECIPES_READY
+    assert progress_updates == [15, 65, 85]

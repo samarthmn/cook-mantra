@@ -36,6 +36,23 @@ async def test_invalid_unchecked_replacement_preserves_stored_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pre_commit_failure_preserves_stored_session() -> None:
+    store = SessionStore(ttl_seconds=21_600)
+    session = await store.create()
+    replacement = session.model_copy(
+        update={"stage": SessionStage.REVIEWING_INGREDIENTS}
+    )
+
+    async def fail_pre_commit() -> None:
+        raise RuntimeError("progress persistence failed")
+
+    with pytest.raises(RuntimeError, match="progress persistence failed"):
+        await store.replace(replacement, before_commit=fail_pre_commit)
+
+    assert await store.require(session.id) == session
+
+
+@pytest.mark.asyncio
 async def test_stale_replacement_returns_conflict_and_preserves_committed_update() -> (
     None
 ):
@@ -58,6 +75,30 @@ async def test_stale_replacement_returns_conflict_and_preserves_committed_update
     assert raised.value.session_id == session.id
     assert stored.stage is SessionStage.REVIEWING_INGREDIENTS
     assert stored.updated_at == committed.updated_at
+
+
+@pytest.mark.asyncio
+async def test_stale_replacement_does_not_run_pre_commit_hook() -> None:
+    store = SessionStore(ttl_seconds=21_600)
+    session = await store.create()
+    committed = await store.replace(
+        session.model_copy(update={"stage": SessionStage.REVIEWING_INGREDIENTS})
+    )
+    hook_runs = 0
+
+    async def record_pre_commit() -> None:
+        nonlocal hook_runs
+        hook_runs += 1
+
+    with pytest.raises(AppError) as raised:
+        await store.replace(
+            session.model_copy(update={"stage": SessionStage.RECIPES_READY}),
+            before_commit=record_pre_commit,
+        )
+
+    assert raised.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert hook_runs == 0
+    assert await store.require(session.id) == committed
 
 
 @pytest.mark.asyncio
