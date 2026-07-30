@@ -1,8 +1,10 @@
 """Safe, temporary filesystem storage for generated image artifacts."""
 
 import asyncio
+import errno
 import os
 import stat
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +13,10 @@ from core.errors import AppError, ErrorCode
 from domain.artifacts import Artifact
 
 _ALLOWED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+_MISSING = "missing"
+_SAFE = "safe"
+_UNSAFE = "unsafe"
+_UNSAFE_DIRECTORY = "unsafe_directory"
 
 
 class ArtifactStore:
@@ -18,6 +24,7 @@ class ArtifactStore:
 
     def __init__(self, artifact_root: Path, ttl_seconds: int) -> None:
         self._root = artifact_root.resolve()
+        self._root_fd: int | None = None
         self._ttl_seconds = ttl_seconds
         self._artifacts: dict[str, Artifact] = {}
         self._lock = asyncio.Lock()
@@ -26,12 +33,17 @@ class ArtifactStore:
         """Prepare an empty artifact namespace for this API process."""
         async with self._lock:
             try:
-                await asyncio.to_thread(self._clear_runtime_files)
+                root_fd = await asyncio.to_thread(self._open_and_clear_root)
             except OSError as error:
                 raise _artifact_failure(
                     "Temporary artifact storage is unavailable."
                 ) from error
+
+            old_root_fd = self._root_fd
+            self._root_fd = root_fd
             self._artifacts.clear()
+            if old_root_fd is not None:
+                await asyncio.to_thread(os.close, old_root_fd)
 
     async def write(
         self,
@@ -45,22 +57,29 @@ class ArtifactStore:
             raise _artifact_failure("The artifact format is not supported.")
 
         async with self._lock:
+            root_fd = self._require_root_fd()
             artifact_id = str(uuid4())
-            path = await asyncio.to_thread(self._path_for, artifact_id, suffix)
+            filename = f"{artifact_id}{suffix}"
             try:
-                await asyncio.to_thread(self._write_new_file, path, data)
+                await asyncio.to_thread(self._write_new_file, root_fd, filename, data)
             except OSError as error:
+                await self._remove_after_write_failure(root_fd, filename)
                 raise _artifact_failure("The artifact could not be stored.") from error
 
             now = datetime.now(UTC)
-            artifact = Artifact(
-                id=artifact_id,
-                path=path,
-                media_type=media_type,
-                owner_session_id=owner_session_id,
-                created_at=now,
-                last_accessed_at=now,
-            )
+            try:
+                artifact = Artifact(
+                    id=artifact_id,
+                    path=self._root / filename,
+                    media_type=media_type,
+                    owner_session_id=owner_session_id,
+                    created_at=now,
+                    last_accessed_at=now,
+                )
+            except Exception as error:
+                await self._remove_after_write_failure(root_fd, filename)
+                raise _artifact_failure("The artifact could not be stored.") from error
+
             self._artifacts[artifact.id] = artifact
             return artifact.model_copy(deep=True)
 
@@ -71,7 +90,31 @@ class ArtifactStore:
             if artifact is None:
                 raise _artifact_not_found()
 
-            if not await asyncio.to_thread(self._is_safe_existing_file, artifact.path):
+            root_fd = self._require_root_fd()
+            try:
+                file_state = await asyncio.to_thread(
+                    self._inspect_file, root_fd, artifact.path.name
+                )
+            except OSError as error:
+                raise _artifact_failure(
+                    "The artifact could not be accessed."
+                ) from error
+
+            if file_state == _MISSING:
+                del self._artifacts[artifact_id]
+                raise _artifact_not_found()
+            if file_state == _UNSAFE_DIRECTORY:
+                del self._artifacts[artifact_id]
+                raise _artifact_not_found()
+            if file_state == _UNSAFE:
+                try:
+                    await asyncio.to_thread(
+                        self._unlink_file, root_fd, artifact.path.name
+                    )
+                except OSError as error:
+                    raise _artifact_failure(
+                        "The artifact could not be accessed."
+                    ) from error
                 del self._artifacts[artifact_id]
                 raise _artifact_not_found()
 
@@ -115,46 +158,91 @@ class ArtifactStore:
                 del self._artifacts[artifact.id]
             return [artifact.id for artifact in artifacts]
 
-    def _clear_runtime_files(self) -> None:
+    def _open_and_clear_root(self) -> int:
         self._root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        for path in self._root.iterdir():
-            mode = path.lstat().st_mode
-            if path.suffix in _ALLOWED_SUFFIXES and (
-                stat.S_ISREG(mode) or stat.S_ISLNK(mode)
-            ):
-                path.unlink()
+        flags = os.O_RDONLY | os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        root_fd = os.open(self._root, flags)
+        try:
+            self._clear_runtime_files(root_fd)
+        except BaseException:
+            os.close(root_fd)
+            raise
+        return root_fd
 
-    def _path_for(self, artifact_id: str, suffix: str) -> Path:
-        path = (self._root / f"{artifact_id}{suffix}").resolve(strict=False)
-        if path.parent != self._root:
-            raise _artifact_failure("The artifact path is invalid.")
-        return path
+    def _clear_runtime_files(self, root_fd: int) -> None:
+        for filename in os.listdir(root_fd):
+            if Path(filename).suffix not in _ALLOWED_SUFFIXES:
+                continue
+            mode = os.stat(filename, dir_fd=root_fd, follow_symlinks=False).st_mode
+            if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+                os.unlink(filename, dir_fd=root_fd)
 
     @staticmethod
-    def _write_new_file(path: Path, data: bytes) -> None:
+    def _write_new_file(root_fd: int, filename: str, data: bytes) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, flags, 0o600)
-        with os.fdopen(descriptor, "wb") as artifact_file:
-            artifact_file.write(data)
+        descriptor = os.open(filename, flags, 0o600, dir_fd=root_fd)
+        try:
+            with os.fdopen(descriptor, "wb") as artifact_file:
+                artifact_file.write(data)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink(filename, dir_fd=root_fd)
+            raise
+
+    @staticmethod
+    def _inspect_file(root_fd: int, filename: str) -> str:
+        try:
+            mode = os.stat(filename, dir_fd=root_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            return _MISSING
+        if stat.S_ISDIR(mode):
+            return _UNSAFE_DIRECTORY
+        if not stat.S_ISREG(mode):
+            return _UNSAFE
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(filename, flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            return _MISSING
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                return _UNSAFE
+            raise
+        try:
+            return _SAFE if stat.S_ISREG(os.fstat(descriptor).st_mode) else _UNSAFE
+        finally:
+            os.close(descriptor)
 
     async def _delete_artifact(self, artifact: Artifact) -> None:
         try:
-            await asyncio.to_thread(self._unlink_owned_path, artifact.path)
+            await asyncio.to_thread(
+                self._unlink_file, self._require_root_fd(), artifact.path.name
+            )
         except OSError as error:
             raise _artifact_failure("The artifact could not be deleted.") from error
 
-    def _unlink_owned_path(self, path: Path) -> None:
-        if path.parent.resolve() != self._root:
-            raise _artifact_failure("The artifact path is invalid.")
-        path.unlink(missing_ok=True)
-
-    def _is_safe_existing_file(self, path: Path) -> bool:
+    async def _remove_after_write_failure(self, root_fd: int, filename: str) -> None:
         try:
-            return path.resolve(strict=True).parent == self._root and path.is_file()
-        except OSError:
-            return False
+            await asyncio.to_thread(self._unlink_file, root_fd, filename)
+        except OSError as error:
+            raise _artifact_failure("The artifact could not be stored.") from error
+
+    @staticmethod
+    def _unlink_file(root_fd: int, filename: str) -> None:
+        with suppress(FileNotFoundError):
+            os.unlink(filename, dir_fd=root_fd)
+
+    def _require_root_fd(self) -> int:
+        if self._root_fd is None:
+            raise _artifact_failure("Temporary artifact storage is unavailable.")
+        return self._root_fd
 
 
 def _artifact_failure(message: str) -> AppError:
