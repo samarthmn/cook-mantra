@@ -2,7 +2,8 @@
   "dependencies": ["."],
   "graphs": {
     "ingredient_extraction": "./src/orchestration/graphs/ingredient_extraction.py:build_development_ingredient_extraction_graph",
-    "recipe_options": "./src/orchestration/graphs/recipe_options.py:build_development_recipe_options_graph"
+    "recipe_options": "./src/orchestration/graphs/recipe_options.py:build_development_recipe_options_graph",
+    "complete_recipes": "./src/orchestration/graphs/complete_recipes.py:build_development_complete_recipes_graph"
   },
   "env": ".env"
 }

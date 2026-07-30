@@ -107,6 +107,18 @@ def begin_recipe_generation(
     return generating, selected, session.stage, context
 
 
+def validate_recipe_generation(
+    session: Session,
+    context: RecipeGenerationContext,
+) -> Session:
+    """Validate one pristine persisted attempt and return its rollback snapshot."""
+    require_stage(session, SessionStage.GENERATING_RECIPES)
+    _require_valid_updated_at(session)
+    validated_context, rollback = _require_matching_context(session, context)
+    _require_pristine_generating_state(session, rollback, validated_context)
+    return rollback.model_copy(deep=True)
+
+
 def commit_recipe_results(
     session: Session,
     successes: Mapping[str, CompleteRecipe],
