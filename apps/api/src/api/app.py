@@ -1,15 +1,17 @@
 """FastAPI application construction and lifecycle wiring."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 
 from agents.ingredient_extraction import IngredientExtractor, OllamaIngredientExtractor
 from agents.master_chef import MasterChef, OllamaMasterChef
 from agents.nutrition import NutritionAgent, OllamaNutritionAgent
 from api.middleware import RequestIdMiddleware
-from api.routes import health, jobs, recipe_options, sessions
+from api.routes import artifacts, health, jobs, recipe_options, sessions
 from core.config import Model, Settings, get_settings
 from core.errors import install_error_handlers
 from orchestration.graphs.ingredient_extraction import (
@@ -27,7 +29,7 @@ from services.artifacts import ArtifactStore
 from services.cleanup import CleanupSupervisor
 from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
-from services.image_generation import OllamaImageGenerator
+from services.image_generation import ImageGenerator, OllamaImageGenerator
 from services.ollama_health import OllamaHealthService
 from services.uploads import ImageUploadValidator
 
@@ -35,21 +37,46 @@ from services.uploads import ImageUploadValidator
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Start and reliably release runtime-owned resources."""
-    await app.state.artifact_store.startup()
     try:
+        await app.state.artifact_store.startup()
         await app.state.cleanup_supervisor.startup()
     except BaseException:
-        await app.state.artifact_store.shutdown()
+        await _drain_runtime_shutdown(app)
         raise
 
     try:
         yield
     finally:
+        await _drain_runtime_shutdown(app)
+
+
+async def _drain_runtime_shutdown(app: FastAPI) -> None:
+    """Finish every owned shutdown step before propagating cancellation."""
+    shutdown_task = asyncio.create_task(_shutdown_runtime_resources(app))
+    cancellation: asyncio.CancelledError | None = None
+    while not shutdown_task.done():
         try:
-            await app.state.cleanup_supervisor.shutdown()
+            await asyncio.shield(shutdown_task)
+        except asyncio.CancelledError as error:
+            cancellation = error
+            continue
+    shutdown_task.result()
+    if cancellation is not None:
+        raise cancellation
+
+
+async def _shutdown_runtime_resources(app: FastAPI) -> None:
+    """Release runtime resources in dependency order."""
+    try:
+        await app.state.cleanup_supervisor.shutdown()
+    finally:
+        try:
+            await app.state.job_runner.shutdown()
         finally:
             try:
-                await app.state.job_runner.shutdown()
+                owned_image_generator = app.state.owned_image_generator
+                if owned_image_generator is not None:
+                    await owned_image_generator.aclose()
             finally:
                 await app.state.artifact_store.shutdown()
 
@@ -61,6 +88,8 @@ def create_app(
     master_chef: MasterChef | None = None,
     nutrition_agent: NutritionAgent | None = None,
     dish_previews: DishPreviewService | None = None,
+    image_generator: ImageGenerator | None = None,
+    image_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Construct an application with replaceable external-service boundaries."""
     resolved_settings = settings or get_settings()
@@ -102,15 +131,19 @@ def create_app(
         if nutrition_agent is not None
         else OllamaNutritionAgent(settings=resolved_settings)
     )
-    image_generator: OllamaImageGenerator | None = None
+    resolved_image_generator = image_generator
+    owned_image_generator: OllamaImageGenerator | None = None
     if dish_previews is None:
-        image_generator = OllamaImageGenerator(
-            base_url=str(resolved_settings.ollama_base_url),
-            model=Model.Z_IMAGE,
-            timeout_seconds=resolved_settings.image_timeout_seconds,
-        )
+        if resolved_image_generator is None:
+            owned_image_generator = OllamaImageGenerator(
+                base_url=str(resolved_settings.ollama_base_url),
+                model=Model.Z_IMAGE,
+                client=image_client,
+                timeout_seconds=resolved_settings.image_timeout_seconds,
+            )
+            resolved_image_generator = owned_image_generator
         resolved_dish_previews = DishPreviewService(
-            image_generator,
+            resolved_image_generator,
             artifact_store,
             resolved_settings,
         )
@@ -142,7 +175,8 @@ def create_app(
     app.state.upload_validator = upload_validator
     app.state.ingredient_extractor = resolved_ingredient_extractor
     app.state.ingredient_extraction_runner = ingredient_extraction_runner
-    app.state.image_generator = image_generator
+    app.state.image_generator = resolved_image_generator
+    app.state.owned_image_generator = owned_image_generator
     app.state.dish_preview_service = resolved_dish_previews
     app.state.recipe_options_dependencies = recipe_options_dependencies
     app.state.recipe_options_runner = recipe_options_runner
@@ -154,4 +188,5 @@ def create_app(
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(sessions.router, prefix="/api/v1")
     app.include_router(recipe_options.router, prefix="/api/v1")
+    app.include_router(artifacts.router, prefix="/api/v1")
     return app
