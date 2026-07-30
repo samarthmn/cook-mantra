@@ -1,17 +1,11 @@
 """Public API schemas for ingredients."""
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 
-from domain.ingredients import IngredientSource
+from domain.ingredients import Ingredient
 
 
-class IngredientResponse(BaseModel):
+class IngredientResponse(Ingredient):
     """Public representation of an ingredient under review."""
 
     model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    name: str
-    source: IngredientSource
-    confidence: float | None
-    confirmed: bool
