@@ -31,6 +31,7 @@ from orchestration.graphs.recipe_options import (
     RecipeOptionDependencies,
     build_recipe_options_graph,
 )
+from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
@@ -194,6 +195,26 @@ class PausingReadyCommitStore(PausingRollbackStore):
         return await super().replace(session, before_commit=before_commit)
 
 
+class CommitThenSuspendStore(SessionStore):
+    def __init__(self) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.suspend_ready_return = False
+        self.ready_committed = asyncio.Event()
+        self.allow_ready_return = asyncio.Event()
+
+    async def replace(
+        self,
+        session: Session,
+        *,
+        before_commit: Callable[[], Awaitable[None]] | None = None,
+    ) -> Session:
+        stored = await super().replace(session, before_commit=before_commit)
+        if self.suspend_ready_return and stored.stage is SessionStage.OPTIONS_READY:
+            self.ready_committed.set()
+            await self.allow_ready_return.wait()
+        return stored
+
+
 class PausingCloseClient:
     def __init__(self, delegate: object) -> None:
         self._delegate = delegate
@@ -217,6 +238,49 @@ def configured_recipe_options_factory() -> Callable[[], object]:
     path_text, callable_name = source.rsplit(":", maxsplit=1)
     assert (api_root / path_text).resolve() == Path(option_graph.__file__).resolve()
     return getattr(option_graph, callable_name)
+
+
+async def run_overlapping_configured_contexts(
+    factory: Callable[[], object],
+) -> option_graph.DevelopmentRecipeOptionsRuntime:
+    first_context = as_asynccontextmanager(factory())
+    second_context = as_asynccontextmanager(factory())
+    first_enter = asyncio.create_task(first_context.__aenter__())
+    await asyncio.sleep(0)
+    second_enter = asyncio.create_task(second_context.__aenter__())
+    enter_results = await asyncio.gather(
+        first_enter,
+        second_enter,
+        return_exceptions=True,
+    )
+    entered_contexts = [
+        context
+        for context, result in zip(
+            (first_context, second_context),
+            enter_results,
+            strict=True,
+        )
+        if not isinstance(result, BaseException)
+    ]
+    runtime = option_graph.get_development_recipe_options_runtime()
+
+    try:
+        for result in enter_results:
+            if isinstance(result, BaseException):
+                raise result
+        assert enter_results == [runtime.graph, runtime.graph]
+        assert runtime.artifact_store._root_fd is not None
+    finally:
+        await asyncio.gather(
+            *(
+                context.__aexit__(None, None, None)
+                for context in reversed(entered_contexts)
+            )
+        )
+
+    assert runtime.artifact_store._root_fd is None
+    assert runtime.image_generator._client.is_closed
+    return runtime
 
 
 async def assert_artifact_missing(
@@ -671,6 +735,50 @@ async def test_successful_commit_retains_attempt_preview_artifact(
 
 
 @pytest.mark.asyncio
+async def test_cancellation_after_exact_commit_retains_committed_preview(
+    project_tmp_path: Path,
+) -> None:
+    artifact_store = ArtifactStore(
+        project_tmp_path / "post-commit-cancellation-artifacts",
+        ttl_seconds=60,
+    )
+    await artifact_store.startup()
+    store = CommitThenSuspendStore()
+    fixture = await make_generation(store=store, option_count=1)
+    previews = ArtifactWritingDishPreviewService(artifact_store)
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+    )
+    store.suspend_ready_return = True
+    graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
+
+    try:
+        await asyncio.wait_for(store.ready_committed.wait(), timeout=1)
+        assert len(previews.generated_ids) == 1
+        artifact_id = previews.generated_ids[0]
+
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        store.allow_ready_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+
+        saved = await store.require(fixture.generating.id)
+        assert saved.stage is SessionStage.OPTIONS_READY
+        assert saved.recipe_options[0].preview == DishPreview(artifact_id=artifact_id)
+        assert (await artifact_store.require(artifact_id)).id == artifact_id
+    finally:
+        store.allow_ready_return.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+        await artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_preview_cancellation_propagates_after_exact_attempt_rollback() -> None:
     store = PausingRollbackStore()
     fixture = await make_generation(
@@ -802,6 +910,40 @@ async def test_configured_langgraph_factory_reference_counts_overlapping_context
         if not runtime.image_generator._client.is_closed:
             await runtime.shutdown()
         option_graph.get_development_recipe_options_runtime.cache_clear()
+
+
+def test_configured_factory_replaces_lifecycle_lock_between_event_loops(
+    project_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path / "cross-loop-development-runtime",
+    )
+    option_graph.get_development_recipe_options_runtime.cache_clear()
+    monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
+    original_startup = option_graph.DevelopmentRecipeOptionsRuntime.startup
+
+    async def yielding_startup(
+        runtime: option_graph.DevelopmentRecipeOptionsRuntime,
+    ) -> None:
+        await asyncio.sleep(0)
+        await original_startup(runtime)
+
+    monkeypatch.setattr(
+        option_graph.DevelopmentRecipeOptionsRuntime,
+        "startup",
+        yielding_startup,
+    )
+    factory = configured_recipe_options_factory()
+
+    try:
+        first_runtime = asyncio.run(run_overlapping_configured_contexts(factory))
+        second_runtime = asyncio.run(run_overlapping_configured_contexts(factory))
+    finally:
+        option_graph.get_development_recipe_options_runtime.cache_clear()
+
+    assert first_runtime is not second_runtime
 
 
 @pytest.mark.asyncio

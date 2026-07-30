@@ -116,6 +116,14 @@ class _ProgressReportingFailure(Exception):
         self.error = error
 
 
+class _CommitSucceededDuringCancellation(Exception):
+    """Carry cancellation past cleanup after the exact replacement committed."""
+
+    def __init__(self, cancellation: asyncio.CancelledError) -> None:
+        super().__init__("Recipe option commit completed during cancellation.")
+        self.cancellation = cancellation
+
+
 def build_recipe_options_graph(
     dependencies: RecipeOptionDependencies,
 ) -> CompiledStateGraph:
@@ -344,7 +352,10 @@ def build_recipe_options_graph(
                 "updated_at": state["session"].updated_at,
             }
         )
-        stored = await dependencies.session_store.replace(replacement)
+        stored = await _replace_settling_cancellation(
+            replacement,
+            dependencies,
+        )
         saved_options = stored.recipe_options[batch_start:]
         return {
             "recipe_options": stored.recipe_options,
@@ -393,6 +404,8 @@ def _rollback_on_failure(
     ) -> dict[str, object]:
         try:
             return await operation(state)
+        except _CommitSucceededDuringCancellation as committed:
+            raise committed.cancellation from None
         except asyncio.CancelledError as cancellation:
             await _drain_preview_cleanup(
                 state.get("attempt_preview_ids", []),
@@ -409,6 +422,32 @@ def _rollback_on_failure(
             raise
 
     return guarded
+
+
+async def _replace_settling_cancellation(
+    replacement: Session,
+    dependencies: RecipeOptionDependencies,
+) -> Session:
+    """Settle the exact replacement before deciding cancellation cleanup."""
+    replace_task = asyncio.create_task(dependencies.session_store.replace(replacement))
+    cancellation: asyncio.CancelledError | None = None
+    while not replace_task.done():
+        try:
+            await asyncio.shield(replace_task)
+        except asyncio.CancelledError as error:
+            cancellation = error
+            continue
+
+    try:
+        stored = replace_task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+
+    if cancellation is not None:
+        raise _CommitSucceededDuringCancellation(cancellation)
+    return stored
 
 
 async def _drain_rollback(
@@ -519,6 +558,12 @@ class DevelopmentRecipeOptionsRuntime:
     dependencies: RecipeOptionDependencies = field(init=False)
     graph: CompiledStateGraph = field(init=False)
     _active_contexts: int = field(init=False, default=0)
+    _lifecycle_lock: asyncio.Lock = field(
+        init=False,
+        default_factory=asyncio.Lock,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         image_generator = OllamaImageGenerator(
@@ -613,9 +658,6 @@ def get_development_recipe_options_runtime() -> DevelopmentRecipeOptionsRuntime:
     return DevelopmentRecipeOptionsRuntime(Settings(_env_file=None))
 
 
-_development_runtime_lock = asyncio.Lock()
-
-
 @asynccontextmanager
 async def build_development_recipe_options_graph() -> AsyncIterator[CompiledStateGraph]:
     """Yield the configured graph with its real resource lifecycle active."""
@@ -629,15 +671,18 @@ async def build_development_recipe_options_graph() -> AsyncIterator[CompiledStat
 async def _acquire_development_recipe_options_runtime() -> (
     DevelopmentRecipeOptionsRuntime
 ):
-    async with _development_runtime_lock:
+    while True:
         runtime = get_development_recipe_options_runtime()
-        try:
-            await runtime.startup()
-        except BaseException:
-            get_development_recipe_options_runtime.cache_clear()
-            await runtime.shutdown()
-            raise
-        return runtime
+        async with runtime._lifecycle_lock:
+            if runtime is not get_development_recipe_options_runtime():
+                continue
+            try:
+                await runtime.startup()
+            except BaseException:
+                get_development_recipe_options_runtime.cache_clear()
+                await runtime.shutdown()
+                raise
+            return runtime
 
 
 async def _drain_development_runtime_release(
@@ -659,7 +704,7 @@ async def _drain_development_runtime_release(
 async def _release_development_runtime(
     runtime: DevelopmentRecipeOptionsRuntime,
 ) -> None:
-    async with _development_runtime_lock:
+    async with runtime._lifecycle_lock:
         if await runtime.shutdown():
             get_development_recipe_options_runtime.cache_clear()
 
