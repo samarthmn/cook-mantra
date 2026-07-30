@@ -2,8 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, Response, status
 
 from api.dependencies import get_artifact_store
 from core.errors import AppError, ErrorCode
@@ -21,7 +20,7 @@ _BINARY_RESPONSES = {
 
 @router.get(
     "/{artifact_id}",
-    response_class=FileResponse,
+    response_class=Response,
     responses={
         status.HTTP_200_OK: {
             "description": "Generated dish image.",
@@ -40,7 +39,7 @@ _BINARY_RESPONSES = {
 async def get_artifact(
     artifact_id: str,
     artifact_store: Annotated[ArtifactStore, Depends(get_artifact_store)],
-) -> FileResponse:
+) -> Response:
     """Return one current runtime artifact without making it cacheable."""
     artifact = await artifact_store.require(artifact_id)
     if artifact.media_type not in _SUPPORTED_MEDIA_TYPES:
@@ -50,9 +49,12 @@ async def get_artifact(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             retryable=False,
         )
-    return FileResponse(
-        artifact.path,
-        media_type=artifact.media_type,
-        filename=None,
+    content, media_type = await artifact_store.read(
+        artifact.id,
+        artifact.owner_session_id,
+    )
+    return Response(
+        content=content,
+        media_type=media_type,
         headers={"Cache-Control": "no-store"},
     )

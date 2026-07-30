@@ -94,7 +94,7 @@ def client(project_tmp_path: Path) -> Iterator[TestClient]:
         ollama_health=ReadyOllama(),
         dish_previews=UnusedDishPreviewService(),
     )
-    with TestClient(app) as test_client:
+    with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 
 
@@ -197,6 +197,94 @@ def test_unsafe_replaced_artifact_is_not_served(
     assert response.json()["error"]["message"] == "Artifact was not found."
     assert response.content != b"outside"
     assert outside_path.read_bytes() == b"outside"
+
+
+def test_artifact_replaced_after_validation_never_serves_outside_bytes(
+    client: TestClient,
+    png_artifact: Artifact,
+    project_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside_path = project_tmp_path / "post-validation-outside.png"
+    outside_path.write_bytes(b"outside-after-validation")
+    artifact_store = client.app.state.artifact_store
+    require_artifact = artifact_store.require
+
+    async def replace_after_validation(artifact_id: str) -> Artifact:
+        artifact = await require_artifact(artifact_id)
+        artifact.path.unlink()
+        artifact.path.symlink_to(outside_path)
+        return artifact
+
+    monkeypatch.setattr(artifact_store, "require", replace_after_validation)
+
+    response = client.get(f"/api/v1/artifacts/{png_artifact.id}")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()["error"]["message"] == "Artifact was not found."
+    assert response.content != b"outside-after-validation"
+    assert outside_path.read_bytes() == b"outside-after-validation"
+
+
+def test_artifact_deleted_after_validation_uses_standard_404(
+    client: TestClient,
+    png_artifact: Artifact,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_store = client.app.state.artifact_store
+    require_artifact = artifact_store.require
+
+    async def delete_after_validation(artifact_id: str) -> Artifact:
+        artifact = await require_artifact(artifact_id)
+        artifact.path.unlink()
+        return artifact
+
+    monkeypatch.setattr(artifact_store, "require", delete_after_validation)
+
+    response = client.get(
+        f"/api/v1/artifacts/{png_artifact.id}",
+        headers={"X-Request-ID": "req-deleted-artifact"},
+    )
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == {
+        "error": {
+            "code": "resource_not_found",
+            "message": "Artifact was not found.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-deleted-artifact",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    [
+        pytest.param("bytes=0-3", id="valid"),
+        pytest.param("bytes=abc", id="malformed"),
+        pytest.param("bytes=999-1000", id="unsatisfiable"),
+    ],
+)
+def test_artifact_range_header_is_ignored_for_full_documented_response(
+    client: TestClient,
+    png_artifact: Artifact,
+    range_header: str,
+) -> None:
+    full_content = png_artifact.path.read_bytes()
+
+    response = client.get(
+        f"/api/v1/artifacts/{png_artifact.id}",
+        headers={"Range": range_header},
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.content == full_content
+    assert response.headers["content-length"] == str(len(full_content))
+    assert "accept-ranges" not in response.headers
+    assert "content-range" not in response.headers
 
 
 def test_unsupported_artifact_media_type_uses_artifact_failure(
