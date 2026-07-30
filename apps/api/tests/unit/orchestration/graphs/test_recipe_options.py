@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import pytest
+from langgraph_api.asyncio import as_asynccontextmanager
 
 from agents.master_chef import OllamaMasterChef
 from agents.nutrition import OllamaNutritionAgent
@@ -105,6 +106,7 @@ class FakeDishPreviewService:
     ) -> None:
         self.results = results or {}
         self.completed_names: list[str] = []
+        self.deleted_artifact_ids: list[str] = []
 
     async def generate(
         self,
@@ -123,6 +125,9 @@ class FakeDishPreviewService:
         if isinstance(result, BaseException):
             raise result
         return result.model_copy(deep=True)
+
+    async def delete(self, artifact_id: str) -> None:
+        self.deleted_artifact_ids.append(artifact_id)
 
 
 class CountingLimiter(ModelCallLimiter):
@@ -617,12 +622,16 @@ async def test_development_factory_is_stable_and_uses_one_settings_object() -> N
 
     try:
         assert option_graph.get_development_recipe_options_runtime() is runtime
-        assert option_graph.build_development_recipe_options_graph() is runtime.graph
+        async with as_asynccontextmanager(
+            option_graph.build_development_recipe_options_graph()
+        ) as configured_graph:
+            assert configured_graph is runtime.graph
         assert isinstance(runtime.dependencies.master_chef, OllamaMasterChef)
         assert isinstance(runtime.dependencies.nutrition_agent, OllamaNutritionAgent)
         assert runtime.dependencies.master_chef._settings is runtime.settings
         assert runtime.dependencies.nutrition_agent._settings is runtime.settings
         assert runtime.graph.get_graph().nodes
     finally:
-        await runtime.shutdown()
+        if not runtime.image_generator._client.is_closed:
+            await runtime.shutdown()
         option_graph.get_development_recipe_options_runtime.cache_clear()

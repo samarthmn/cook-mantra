@@ -92,6 +92,17 @@ def png_with_invalid_base64_character() -> str:
     return f"{encoded[:40]}${encoded[40:]}"
 
 
+def verify_only_truncated_jpeg_base64() -> str:
+    image_bytes = base64.b64decode(image_base64("JPEG"))
+    return base64.b64encode(image_bytes[:-1]).decode("ascii")
+
+
+def verify_only_corrupt_webp_base64() -> str:
+    image_bytes = bytearray(base64.b64decode(image_base64("WEBP")))
+    image_bytes[30] ^= 0xFF
+    return base64.b64encode(image_bytes).decode("ascii")
+
+
 def final_line(
     *,
     image: str | None = None,
@@ -318,6 +329,106 @@ async def test_generate_checks_http_status_without_leaking_response() -> None:
         "details": {},
     }
     assert secret_response not in str(raised.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chunks", "expected_progress"),
+    [
+        (
+            [b'{"error":"private early provider detail","done":false}\n'],
+            [],
+        ),
+        (
+            [
+                (
+                    b'{"completed":2,"total":10,"done":false}\n'
+                    b'{"error":"private midstream provider detail",'
+                    b'"completed":8,"total":10,"done":false}\n'
+                ),
+                final_line(image=image_base64()),
+            ],
+            [20],
+        ),
+        (
+            [
+                (
+                    b'{"error":"private terminal provider detail","done":true,'
+                    b'"image":"' + image_base64().encode() + b'"}\n'
+                )
+            ],
+            [],
+        ),
+    ],
+    ids=["early", "midstream", "terminal"],
+)
+async def test_provider_error_frame_is_safe_retryable_ollama_unavailable(
+    chunks: list[bytes],
+    expected_progress: list[int],
+) -> None:
+    transport = StreamingJsonTransport(chunks)
+    progress = ProgressRecorder()
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        generator = OllamaImageGenerator(
+            base_url="http://ollama.test",
+            model="configured-image-model",
+            client=client,
+        )
+
+        with pytest.raises(AppError) as raised:
+            await generator.generate(
+                ImageGenerationRequest(prompt="Tomato curry"),
+                progress,
+            )
+
+    assert app_error_snapshot(raised.value) == {
+        "code": ErrorCode.OLLAMA_UNAVAILABLE,
+        "message": "Ollama is unavailable.",
+        "status_code": 503,
+        "retryable": True,
+        "details": {},
+    }
+    assert progress.values == expected_progress
+    assert "private" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "encoded_image",
+    [
+        pytest.param(verify_only_truncated_jpeg_base64(), id="truncated-jpeg"),
+        pytest.param(verify_only_corrupt_webp_base64(), id="corrupt-webp"),
+    ],
+)
+async def test_verify_only_image_that_fails_full_decode_is_rejected(
+    encoded_image: str,
+) -> None:
+    image_bytes = base64.b64decode(encoded_image)
+    with Image.open(BytesIO(image_bytes)) as image:
+        image.verify()
+
+    transport = StreamingJsonTransport([final_line(image=encoded_image)])
+    async with httpx.AsyncClient(transport=transport) as client:
+        generator = OllamaImageGenerator(
+            base_url="http://ollama.test",
+            model="configured-image-model",
+            client=client,
+        )
+
+        with pytest.raises(AppError) as raised:
+            await generator.generate(
+                ImageGenerationRequest(prompt="Tomato curry"),
+                no_progress,
+            )
+
+    assert app_error_snapshot(raised.value) == {
+        "code": ErrorCode.ARTIFACT_FAILURE,
+        "message": "The generated image artifact is invalid.",
+        "status_code": 502,
+        "retryable": False,
+        "details": {},
+    }
 
 
 @pytest.mark.asyncio

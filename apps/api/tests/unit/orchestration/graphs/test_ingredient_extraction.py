@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from core.errors import AppError, ErrorCode
+from domain.artifacts import ArtifactKind
 from domain.ingredients import ExtractionResult, IngredientSource
 from domain.sessions import Session, SessionStage
 from orchestration.graphs import ingredient_extraction as extraction_graph
@@ -100,6 +101,7 @@ async def test_development_runtime_lifecycle_allows_seeding_and_invocation(
             "image/png",
             ".png",
             owner_session_id=session.id,
+            kind=ArtifactKind.INGREDIENT_UPLOAD,
         )
 
         result = await runtime.graph.ainvoke(
@@ -125,6 +127,7 @@ async def extraction_context(project_tmp_path) -> AsyncIterator[ExtractionContex
         "image/png",
         ".png",
         owner_session_id=session.id,
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     try:
         yield ExtractionContext(
@@ -205,6 +208,7 @@ async def test_shared_model_limiter_caps_concurrent_graph_extractions(
         "image/png",
         ".png",
         owner_session_id=second_session.id,
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     extractor = ConcurrencyProbeExtractor()
     loaded_artifacts = 0

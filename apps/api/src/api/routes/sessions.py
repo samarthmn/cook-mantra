@@ -15,6 +15,7 @@ from api.dependencies import (
     get_session_store,
     get_upload_validator,
 )
+from domain.artifacts import ArtifactKind
 from domain.jobs import JobOperation
 from domain.session_service import confirm_ingredients, review_ingredients
 from domain.sessions import SessionStage
@@ -66,6 +67,7 @@ async def create_session(
             validated.media_type,
             validated.suffix,
             owner_session_id=session.id,
+            kind=ArtifactKind.INGREDIENT_UPLOAD,
         )
         job = await job_runner.submit(
             JobOperation.EXTRACT_INGREDIENTS,

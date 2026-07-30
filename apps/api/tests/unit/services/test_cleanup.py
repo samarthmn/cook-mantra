@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from core.errors import AppError, ErrorCode
+from domain.artifacts import ArtifactKind
 from domain.jobs import JobOperation
 from repositories.job_store import JobStore
 from repositories.session_store import SessionStore
@@ -27,6 +28,7 @@ async def test_run_once_removes_expired_state_and_expired_session_artifacts(
         "image/png",
         ".png",
         owner_session_id=session.id,
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     cleanup = CleanupSupervisor(
         session_store,

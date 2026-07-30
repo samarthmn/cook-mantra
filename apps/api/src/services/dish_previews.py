@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 
 from core.config import Settings
 from core.errors import AppError, ErrorCode
+from domain.artifacts import ArtifactKind
 from domain.image_prompts import build_dish_prompt
 from domain.images import DishPreview, ImageGenerationRequest
 from domain.recipe_options import RecipeOptionDraft
@@ -54,8 +55,13 @@ class DishPreviewService:
             media_type,
             suffix,
             owner_session_id=session_id,
+            kind=ArtifactKind.DISH_PREVIEW,
         )
         return DishPreview(artifact_id=artifact.id)
+
+    async def delete(self, artifact_id: str) -> None:
+        """Delete one preview created by an uncommitted workflow attempt."""
+        await self._artifact_store.delete(artifact_id)
 
 
 def _normalized_media_type_and_suffix(media_type: object) -> tuple[str, str]:

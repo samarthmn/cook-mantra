@@ -13,7 +13,7 @@ from api.dependencies import get_artifact_store, get_job_runner, get_session_sto
 from api.routes.sessions import create_session
 from core.config import Settings
 from core.errors import AppError, ErrorCode
-from domain.artifacts import Artifact
+from domain.artifacts import Artifact, ArtifactKind
 from domain.ingredients import ExtractionResult
 from domain.jobs import JobOperation
 from repositories.session_store import SessionStore
@@ -95,14 +95,18 @@ class ClosureObservingArtifactStore:
         media_type: str,
         suffix: str,
         owner_session_id: str,
+        *,
+        kind: ArtifactKind,
     ) -> Artifact:
         assert self._validator.upload is not None
+        assert kind is ArtifactKind.INGREDIENT_UPLOAD
         self.upload_closed_when_written = self._validator.upload.file.closed
         return await self._delegate.write(
             data,
             media_type,
             suffix,
             owner_session_id,
+            kind=kind,
         )
 
     async def delete(self, artifact_id: str) -> None:
@@ -119,7 +123,10 @@ class FailingArtifactStore:
         media_type: str,
         suffix: str,
         owner_session_id: str,
+        *,
+        kind: ArtifactKind,
     ) -> Artifact:
+        assert kind is ArtifactKind.INGREDIENT_UPLOAD
         self.owner_session_id = owner_session_id
         raise AppError(
             code=ErrorCode.ARTIFACT_FAILURE,
@@ -143,12 +150,16 @@ class CapturingArtifactStore:
         media_type: str,
         suffix: str,
         owner_session_id: str,
+        *,
+        kind: ArtifactKind,
     ) -> Artifact:
+        assert kind is ArtifactKind.INGREDIENT_UPLOAD
         self.written = await self._delegate.write(
             data,
             media_type,
             suffix,
             owner_session_id,
+            kind=kind,
         )
         return self.written
 
@@ -505,6 +516,7 @@ def test_job_submit_failure_rolls_back_only_new_session_and_artifact(
             "image/png",
             ".png",
             retained_session.id,
+            ArtifactKind.INGREDIENT_UPLOAD,
         )
         response = client.post(
             "/api/v1/sessions",
@@ -616,6 +628,7 @@ async def test_cancellation_waits_for_rollback_and_preserves_neighbors(
         "image/png",
         ".png",
         retained_session.id,
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     upload = UploadFile(filename="ingredients.png", file=BytesIO(png_bytes()))
     request_task = asyncio.create_task(
@@ -695,6 +708,7 @@ async def test_cancellation_during_ordinary_error_rollback_finishes_cleanup(
         "image/png",
         ".png",
         retained_session.id,
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     upload = UploadFile(filename="ingredients.png", file=BytesIO(png_bytes()))
     request_task = asyncio.create_task(
@@ -771,6 +785,7 @@ def test_cleanup_failures_preserve_original_error_and_neighboring_resources(
             "image/png",
             ".png",
             retained_session.id,
+            ArtifactKind.INGREDIENT_UPLOAD,
         )
         response = client.post(
             "/api/v1/sessions",

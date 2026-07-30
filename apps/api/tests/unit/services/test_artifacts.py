@@ -9,10 +9,37 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
+from domain import artifacts as artifact_domain
+from domain.artifacts import ArtifactKind
 from services import artifacts as artifacts_service
 from services.artifacts import ArtifactStore
+
+
+@pytest.mark.asyncio
+async def test_artifact_write_records_a_typed_immutable_kind(
+    project_tmp_path: Path,
+) -> None:
+    artifact_kind = artifact_domain.ArtifactKind
+    store = ArtifactStore(project_tmp_path / "typed-artifact-kind", ttl_seconds=60)
+    await store.startup()
+
+    try:
+        artifact = await store.write(
+            b"image-bytes",
+            "image/png",
+            ".png",
+            owner_session_id="session-1",
+            kind=artifact_kind.DISH_PREVIEW,
+        )
+    finally:
+        await store.shutdown()
+
+    assert artifact.kind is artifact_kind.DISH_PREVIEW
+    with pytest.raises(ValidationError):
+        artifact.kind = artifact_kind.INGREDIENT_UPLOAD
 
 
 @pytest.mark.asyncio
@@ -25,6 +52,7 @@ async def test_artifact_names_ignore_client_filenames(tmp_path: Path) -> None:
         "image/png",
         ".png",
         owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     assert artifact.path.parent == tmp_path
@@ -56,6 +84,7 @@ async def test_write_rejects_a_suffix_outside_the_image_allowlist(
             "image/svg+xml",
             ".svg",
             owner_session_id="session-1",
+            kind=ArtifactKind.INGREDIENT_UPLOAD,
         )
 
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
@@ -69,7 +98,11 @@ async def test_require_returns_isolated_metadata_and_missing_artifacts_are_not_f
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     required = await store.require(artifact.id)
@@ -96,6 +129,7 @@ async def test_read_returns_bytes_and_media_type_for_the_owner(
         "image/png",
         ".png",
         owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     try:
@@ -117,6 +151,7 @@ async def test_read_hides_an_artifact_from_a_different_session(
         "image/png",
         ".png",
         owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     try:
@@ -147,6 +182,7 @@ async def test_read_never_follows_a_leaf_replaced_after_lookup(
         "image/png",
         ".png",
         owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     actual_to_thread = asyncio.to_thread
     replaced = False
@@ -184,10 +220,18 @@ async def test_delete_for_session_only_removes_owned_artifacts(tmp_path: Path) -
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()
     first = await store.write(
-        b"first", "image/png", ".png", owner_session_id="session-1"
+        b"first",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     second = await store.write(
-        b"second", "image/jpeg", ".jpg", owner_session_id="session-2"
+        b"second",
+        "image/jpeg",
+        ".jpg",
+        owner_session_id="session-2",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     foreign_path = tmp_path / "foreign.png"
     foreign_path.write_bytes(b"foreign")
@@ -205,10 +249,18 @@ async def test_delete_removes_only_the_requested_owned_artifact(tmp_path: Path) 
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()
     first = await store.write(
-        b"first", "image/png", ".png", owner_session_id="session-1"
+        b"first",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     second = await store.write(
-        b"second", "image/png", ".png", owner_session_id="session-1"
+        b"second",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     await store.delete(first.id)
@@ -224,7 +276,11 @@ async def test_expired_artifacts_are_removed_from_metadata_and_disk(
     store = ArtifactStore(tmp_path, ttl_seconds=10)
     await store.startup()
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     removed = await store.delete_expired(now=datetime.now(UTC) + timedelta(seconds=11))
@@ -242,7 +298,11 @@ async def test_require_rejects_an_artifact_path_replaced_with_an_escape_symlink(
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     outside_path = tmp_path.parent / "outside-image.png"
     outside_path.write_bytes(b"outside")
@@ -263,7 +323,11 @@ async def test_require_treats_a_replaced_directory_as_an_unsafe_missing_artifact
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     artifact.path.unlink()
     artifact.path.mkdir()
@@ -292,7 +356,11 @@ async def test_root_relative_operations_resist_root_and_leaf_symlink_replacement
     root.symlink_to(outside, target_is_directory=True)
 
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     retained_path = retained_root / artifact.path.name
     retained_path.unlink()
@@ -318,7 +386,11 @@ async def test_require_preserves_owned_metadata_on_operational_inspection_errors
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     def raise_inspection_error(*_: object, **__: object) -> int:
@@ -357,7 +429,11 @@ async def test_write_cleans_up_a_partially_created_file_after_a_write_error(
 
     with pytest.raises(AppError) as raised:
         await store.write(
-            b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+            b"image-bytes",
+            "image/png",
+            ".png",
+            owner_session_id="session-1",
+            kind=ArtifactKind.INGREDIENT_UPLOAD,
         )
 
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
@@ -379,7 +455,11 @@ async def test_write_cleans_up_file_when_metadata_construction_fails(
 
     with pytest.raises(AppError) as raised:
         await store.write(
-            b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+            b"image-bytes",
+            "image/png",
+            ".png",
+            owner_session_id="session-1",
+            kind=ArtifactKind.INGREDIENT_UPLOAD,
         )
 
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
@@ -421,7 +501,11 @@ async def test_require_returns_the_anchored_path_after_root_and_leaf_replacement
     store = ArtifactStore(root, ttl_seconds=60)
     await store.startup()
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
 
     retained_root = tmp_path / "retained-artifacts"
@@ -460,7 +544,11 @@ async def test_shutdown_closes_descriptor_is_idempotent_and_disables_operations(
         os.fstat(root_fd)
     with pytest.raises(AppError) as raised:
         await store.write(
-            b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+            b"image-bytes",
+            "image/png",
+            ".png",
+            owner_session_id="session-1",
+            kind=ArtifactKind.INGREDIENT_UPLOAD,
         )
 
     assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
@@ -701,7 +789,11 @@ async def test_startup_does_not_publish_state_when_closing_previous_descriptor_f
     store = ArtifactStore(tmp_path, ttl_seconds=60)
     await store.startup()
     artifact = await store.write(
-        b"image-bytes", "image/png", ".png", owner_session_id="session-1"
+        b"image-bytes",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.INGREDIENT_UPLOAD,
     )
     old_fd = store._root_fd
     new_fd: int | None = None
@@ -910,6 +1002,7 @@ async def test_cancelled_write_keeps_descriptor_owned_until_thread_cleanup_finis
             "image/png",
             ".png",
             owner_session_id="session-1",
+            kind=ArtifactKind.INGREDIENT_UPLOAD,
         )
     )
     assert await asyncio.to_thread(file_created.wait, 2)

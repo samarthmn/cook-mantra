@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - unavailable on non-POSIX platforms.
     fcntl = None
 
 from core.errors import AppError, ErrorCode
-from domain.artifacts import Artifact
+from domain.artifacts import Artifact, ArtifactKind
 
 _ALLOWED_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 _MISSING = "missing"
@@ -104,13 +104,20 @@ class ArtifactStore:
         media_type: str,
         suffix: str,
         owner_session_id: str,
+        kind: ArtifactKind,
     ) -> Artifact:
         """Write a generated image using a server-created name."""
         if suffix not in _ALLOWED_SUFFIXES:
             raise _artifact_failure("The artifact format is not supported.")
 
         return await self._run_exclusive(
-            lambda: self._write(data, media_type, suffix, owner_session_id),
+            lambda: self._write(
+                data,
+                media_type,
+                suffix,
+                owner_session_id,
+                kind,
+            ),
             cancellation_cleanup=self._discard_cancelled_write,
         )
 
@@ -120,6 +127,7 @@ class ArtifactStore:
         media_type: str,
         suffix: str,
         owner_session_id: str,
+        kind: ArtifactKind,
     ) -> Artifact:
         root_fd = self._require_root_fd()
         artifact_id = str(uuid4())
@@ -138,6 +146,7 @@ class ArtifactStore:
                 path=root_path / filename,
                 media_type=media_type,
                 owner_session_id=owner_session_id,
+                kind=kind,
                 created_at=now,
                 last_accessed_at=now,
             )
@@ -197,19 +206,40 @@ class ArtifactStore:
     ) -> tuple[bytes, str]:
         """Return artifact bytes and media type for the owning session."""
         return await self._run_exclusive(
-            lambda: self._read(artifact_id, owner_session_id)
+            lambda: self._read(
+                artifact_id,
+                owner_session_id=owner_session_id,
+                required_kind=None,
+            )
+        )
+
+    async def read_public_preview(self, artifact_id: str) -> tuple[bytes, str]:
+        """Read one generated dish preview through the public lookup."""
+        return await self._run_exclusive(
+            lambda: self._read(
+                artifact_id,
+                owner_session_id=None,
+                required_kind=ArtifactKind.DISH_PREVIEW,
+            )
         )
 
     async def _read(
         self,
         artifact_id: str,
-        owner_session_id: str,
+        *,
+        owner_session_id: str | None,
+        required_kind: ArtifactKind | None,
     ) -> tuple[bytes, str]:
         root_fd = self._require_root_fd()
         artifact = self._artifacts.get(artifact_id)
         if artifact is None:
             raise _artifact_not_found()
-        if artifact.owner_session_id != owner_session_id:
+        if (
+            owner_session_id is not None
+            and artifact.owner_session_id != owner_session_id
+        ):
+            raise _artifact_not_found()
+        if required_kind is not None and artifact.kind is not required_kind:
             raise _artifact_not_found()
         try:
             data = await asyncio.to_thread(

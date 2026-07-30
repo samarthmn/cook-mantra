@@ -12,7 +12,7 @@ from PIL import Image
 
 from api.app import create_app
 from core.config import Model, Settings
-from domain.artifacts import Artifact
+from domain.artifacts import Artifact, ArtifactKind
 from domain.images import DishPreview, GeneratedImage, ImageGenerationRequest
 
 
@@ -106,6 +106,7 @@ def png_artifact(client: TestClient) -> Artifact:
         "image/png",
         ".png",
         "session-1",
+        ArtifactKind.DISH_PREVIEW,
     )
 
 
@@ -130,6 +131,58 @@ def test_serving_an_artifact_refreshes_its_last_access_time(
     assert response.status_code == status.HTTP_200_OK
     stored = client.app.state.artifact_store._artifacts[png_artifact.id]
     assert stored.last_accessed_at > png_artifact.last_accessed_at
+
+
+def test_original_ingredient_upload_is_not_served_as_a_public_preview(
+    client: TestClient,
+) -> None:
+    upload = client.portal.call(
+        client.app.state.artifact_store.write,
+        png_bytes(),
+        "image/png",
+        ".png",
+        "session-upload",
+        ArtifactKind.INGREDIENT_UPLOAD,
+    )
+
+    response = client.get(f"/api/v1/artifacts/{upload.id}")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()["error"]["code"] == "resource_not_found"
+    assert response.content != png_bytes()
+
+
+def test_detached_metadata_copy_cannot_authorize_an_ingredient_upload(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_store = client.app.state.artifact_store
+    upload = client.portal.call(
+        artifact_store.write,
+        png_bytes(),
+        "image/png",
+        ".png",
+        "session-upload-copy",
+        ArtifactKind.INGREDIENT_UPLOAD,
+    )
+    require_artifact = artifact_store.require
+
+    async def forge_detached_preview_metadata(artifact_id: str) -> Artifact:
+        artifact = await require_artifact(artifact_id)
+        object.__setattr__(artifact, "kind", "dish_preview")
+        return artifact
+
+    monkeypatch.setattr(
+        artifact_store,
+        "require",
+        forge_detached_preview_metadata,
+    )
+
+    response = client.get(f"/api/v1/artifacts/{upload.id}")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()["error"]["code"] == "resource_not_found"
+    assert response.content != png_bytes()
 
 
 def test_missing_artifact_uses_standard_404(client: TestClient) -> None:
@@ -208,15 +261,18 @@ def test_artifact_replaced_after_validation_never_serves_outside_bytes(
     outside_path = project_tmp_path / "post-validation-outside.png"
     outside_path.write_bytes(b"outside-after-validation")
     artifact_store = client.app.state.artifact_store
-    require_artifact = artifact_store.require
+    read_regular_file = artifact_store._read_regular_file
 
-    async def replace_after_validation(artifact_id: str) -> Artifact:
-        artifact = await require_artifact(artifact_id)
-        artifact.path.unlink()
-        artifact.path.symlink_to(outside_path)
-        return artifact
+    def replace_before_descriptor_open(root_fd: int, filename: str) -> bytes:
+        png_artifact.path.unlink()
+        png_artifact.path.symlink_to(outside_path)
+        return read_regular_file(root_fd, filename)
 
-    monkeypatch.setattr(artifact_store, "require", replace_after_validation)
+    monkeypatch.setattr(
+        artifact_store,
+        "_read_regular_file",
+        replace_before_descriptor_open,
+    )
 
     response = client.get(f"/api/v1/artifacts/{png_artifact.id}")
 
@@ -232,14 +288,17 @@ def test_artifact_deleted_after_validation_uses_standard_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact_store = client.app.state.artifact_store
-    require_artifact = artifact_store.require
+    read_regular_file = artifact_store._read_regular_file
 
-    async def delete_after_validation(artifact_id: str) -> Artifact:
-        artifact = await require_artifact(artifact_id)
-        artifact.path.unlink()
-        return artifact
+    def delete_before_descriptor_open(root_fd: int, filename: str) -> bytes:
+        png_artifact.path.unlink()
+        return read_regular_file(root_fd, filename)
 
-    monkeypatch.setattr(artifact_store, "require", delete_after_validation)
+    monkeypatch.setattr(
+        artifact_store,
+        "_read_regular_file",
+        delete_before_descriptor_open,
+    )
 
     response = client.get(
         f"/api/v1/artifacts/{png_artifact.id}",
@@ -296,6 +355,7 @@ def test_unsupported_artifact_media_type_uses_artifact_failure(
         "image/svg+xml",
         ".png",
         "session-1",
+        ArtifactKind.DISH_PREVIEW,
     )
 
     response = client.get(f"/api/v1/artifacts/{artifact.id}")

@@ -94,6 +94,8 @@ class OllamaImageGenerator:
                     event = _parse_event(line)
                     if event is None:
                         raise _artifact_failure()
+                    if _has_provider_error(event):
+                        raise _ollama_unavailable()
 
                     next_progress = _event_progress(event)
                     if next_progress is not None and next_progress > last_progress:
@@ -114,12 +116,7 @@ class OllamaImageGenerator:
                 retryable=True,
             ) from error
         except (httpx.HTTPStatusError, httpx.RequestError) as error:
-            raise AppError(
-                code=ErrorCode.OLLAMA_UNAVAILABLE,
-                message="Ollama is unavailable.",
-                status_code=503,
-                retryable=True,
-            ) from error
+            raise _ollama_unavailable() from error
 
         if final_image is None:
             raise _artifact_failure()
@@ -157,6 +154,10 @@ def _parse_event(line: str) -> dict[str, object] | None:
     return event if isinstance(event, dict) else None
 
 
+def _has_provider_error(event: dict[str, object]) -> bool:
+    return bool(event.get("error"))
+
+
 def _event_progress(event: dict[str, object]) -> int | None:
     completed = event.get("completed")
     total = event.get("total")
@@ -186,6 +187,8 @@ def _decode_and_verify(encoded_image: str) -> GeneratedImage | None:
             image_format = image.format
             width, height = image.size
             image.verify()
+        with Image.open(BytesIO(image_bytes)) as image:
+            image.load()
     except Exception:
         return None
 
@@ -206,4 +209,13 @@ def _artifact_failure() -> AppError:
         message="The generated image artifact is invalid.",
         status_code=502,
         retryable=False,
+    )
+
+
+def _ollama_unavailable() -> AppError:
+    return AppError(
+        code=ErrorCode.OLLAMA_UNAVAILABLE,
+        message="Ollama is unavailable.",
+        status_code=503,
+        retryable=True,
     )

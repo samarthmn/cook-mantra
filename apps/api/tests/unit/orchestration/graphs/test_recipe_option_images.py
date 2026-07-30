@@ -1,8 +1,11 @@
 import asyncio
+import json
+import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
+from langgraph_api.asyncio import as_asynccontextmanager
 from tests.unit.orchestration.graphs.test_recipe_options import (
     CountingLimiter,
     FakeDishPreviewService,
@@ -18,8 +21,11 @@ from tests.unit.orchestration.graphs.test_recipe_options import (
 )
 
 from core.config import Model, Settings
-from domain.images import DishPreview
+from core.errors import AppError, ErrorCode
+from domain.artifacts import ArtifactKind
+from domain.images import DishPreview, GeneratedImage, ImageGenerationRequest
 from domain.recipe_options import NutritionEstimate, RecipeOptionDraft
+from domain.sessions import Session, SessionStage
 from orchestration.graphs import recipe_options as option_graph
 from orchestration.graphs.recipe_options import (
     RecipeOptionDependencies,
@@ -123,6 +129,71 @@ class BlockingDishPreviewService:
         return DishPreview(artifact_id="unreachable-preview")
 
 
+class ArtifactWritingDishPreviewService:
+    def __init__(
+        self,
+        artifact_store: ArtifactStore,
+        *,
+        block_before_write: set[str] | None = None,
+        delete_error: Exception | None = None,
+    ) -> None:
+        self._artifact_store = artifact_store
+        self._block_before_write = block_before_write or set()
+        self._delete_error = delete_error
+        self.generated_ids: list[str] = []
+        self.written = asyncio.Event()
+        self.blocked = asyncio.Event()
+        self.release = asyncio.Event()
+        self.blocked_cancelled = asyncio.Event()
+
+    async def generate(
+        self,
+        session_id: str,
+        option: RecipeOptionDraft,
+        progress: Callable[[int], Awaitable[None]],
+    ) -> DishPreview:
+        if option.name in self._block_before_write:
+            self.blocked.set()
+            try:
+                await self.release.wait()
+            finally:
+                self.blocked_cancelled.set()
+        artifact = await self._artifact_store.write(
+            b"generated-preview",
+            "image/png",
+            ".png",
+            owner_session_id=session_id,
+            kind=ArtifactKind.DISH_PREVIEW,
+        )
+        self.generated_ids.append(artifact.id)
+        self.written.set()
+        return DishPreview(artifact_id=artifact.id)
+
+    async def delete(self, artifact_id: str) -> None:
+        if self._delete_error is not None:
+            raise self._delete_error
+        await self._artifact_store.delete(artifact_id)
+
+
+class PausingReadyCommitStore(PausingRollbackStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pause_ready_commit = False
+        self.ready_commit_started = asyncio.Event()
+        self.allow_ready_commit = asyncio.Event()
+
+    async def replace(
+        self,
+        session: Session,
+        *,
+        before_commit: Callable[[], Awaitable[None]] | None = None,
+    ) -> Session:
+        if self.pause_ready_commit and session.stage is SessionStage.OPTIONS_READY:
+            self.ready_commit_started.set()
+            await self.allow_ready_commit.wait()
+        return await super().replace(session, before_commit=before_commit)
+
+
 class PausingCloseClient:
     def __init__(self, delegate: object) -> None:
         self._delegate = delegate
@@ -137,6 +208,24 @@ class PausingCloseClient:
         self.close_started.set()
         await self.allow_close.wait()
         await self._delegate.aclose()
+
+
+def configured_recipe_options_factory() -> Callable[[], object]:
+    api_root = Path(__file__).parents[4]
+    configuration = json.loads((api_root / "langgraph.json").read_text())
+    source = configuration["graphs"]["recipe_options"]
+    path_text, callable_name = source.rsplit(":", maxsplit=1)
+    assert (api_root / path_text).resolve() == Path(option_graph.__file__).resolve()
+    return getattr(option_graph, callable_name)
+
+
+async def assert_artifact_missing(
+    artifact_store: ArtifactStore,
+    artifact_id: str,
+) -> None:
+    with pytest.raises(AppError) as raised:
+        await artifact_store.require(artifact_id)
+    assert raised.value.code is ErrorCode.RESOURCE_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -274,6 +363,33 @@ async def test_preview_progress_is_monotonic_bounded_and_never_completes_job() -
 
 
 @pytest.mark.asyncio
+async def test_preview_callback_progress_failure_fails_job_and_rolls_back() -> None:
+    fixture = await make_generation(option_count=1)
+    previews = RecordingDishPreviewService(progress_values={"Tomato Curry": [100]})
+
+    async def fail_mapped_preview_progress(value: int) -> None:
+        if value == 79:
+            raise RuntimeError("progress infrastructure failed")
+
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+        progress=fail_mapped_preview_progress,
+    )
+
+    with pytest.raises(RuntimeError, match="progress infrastructure failed"):
+        await graph.ainvoke(invocation(fixture))
+
+    saved = await fixture.store.require(fixture.generating.id)
+    assert saved.model_copy(update={"updated_at": fixture.previous.updated_at}) == (
+        fixture.previous
+    )
+    assert previews.deleted_artifact_ids == []
+
+
+@pytest.mark.asyncio
 async def test_more_preserves_prior_enrichments_and_enriches_only_new_drafts() -> None:
     prior = stored_option("Tomato Curry").model_copy(
         update={
@@ -311,6 +427,247 @@ async def test_more_preserves_prior_enrichments_and_enriches_only_new_drafts() -
     assert previews.calls == [(fixture.generating.id, "Tomato Rice")]
     assert result["option_ids"] == [saved.recipe_options[1].id]
     assert result["batch_number"] == 8
+
+
+@pytest.mark.asyncio
+async def test_partial_fanout_cancellation_drains_children_and_deletes_written_preview(
+    project_tmp_path: Path,
+) -> None:
+    artifact_store = ArtifactStore(
+        project_tmp_path / "cancelled-preview-artifacts",
+        ttl_seconds=60,
+    )
+    await artifact_store.startup()
+    previews = ArtifactWritingDishPreviewService(
+        artifact_store,
+        block_before_write={"Tomato Rice"},
+    )
+    fixture = await make_generation(option_count=2)
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Rice")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+        limiter=ModelCallLimiter(max_concurrent_calls=4),
+    )
+    graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
+
+    try:
+        await asyncio.wait_for(previews.written.wait(), timeout=1)
+        await asyncio.wait_for(previews.blocked.wait(), timeout=1)
+        graph_task.cancel()
+        graph_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+
+        assert previews.blocked_cancelled.is_set()
+        assert len(previews.generated_ids) == 1
+        await assert_artifact_missing(artifact_store, previews.generated_ids[0])
+        saved = await fixture.store.require(fixture.generating.id)
+        assert saved.model_copy(update={"updated_at": fixture.previous.updated_at}) == (
+            fixture.previous
+        )
+    finally:
+        previews.release.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+        await artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_progress_80_failure_deletes_every_uncommitted_preview(
+    project_tmp_path: Path,
+) -> None:
+    artifact_store = ArtifactStore(
+        project_tmp_path / "progress-failed-preview-artifacts",
+        ttl_seconds=60,
+    )
+    await artifact_store.startup()
+    previews = ArtifactWritingDishPreviewService(artifact_store)
+    fixture = await make_generation(option_count=2)
+
+    async def fail_terminal_enrichment_progress(value: int) -> None:
+        if value == 80:
+            raise RuntimeError("job progress write failed")
+
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Rice")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+        limiter=ModelCallLimiter(max_concurrent_calls=4),
+        progress=fail_terminal_enrichment_progress,
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="job progress write failed"):
+            await graph.ainvoke(invocation(fixture))
+
+        assert len(previews.generated_ids) == 2
+        for artifact_id in previews.generated_ids:
+            await assert_artifact_missing(artifact_store, artifact_id)
+    finally:
+        await artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stale_commit_deletes_only_its_attempt_previews(
+    project_tmp_path: Path,
+) -> None:
+    artifact_store = ArtifactStore(
+        project_tmp_path / "stale-preview-artifacts",
+        ttl_seconds=60,
+    )
+    await artifact_store.startup()
+    prior_artifact = await artifact_store.write(
+        b"prior-preview",
+        "image/png",
+        ".png",
+        owner_session_id="shared-session",
+        kind=ArtifactKind.DISH_PREVIEW,
+    )
+    prior_option = stored_option("Prior Dish").model_copy(
+        update={"preview": DishPreview(artifact_id=prior_artifact.id)}
+    )
+    store = PausingReadyCommitStore()
+    fixture = await make_generation(
+        store=store,
+        more=True,
+        option_count=1,
+        previous_options=[prior_option],
+        previous_exclusions={"prior dish"},
+        previous_batch_number=1,
+    )
+    previews = ArtifactWritingDishPreviewService(artifact_store)
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Stale Dish")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+    )
+    store.pause_ready_commit = True
+    graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
+
+    try:
+        await asyncio.wait_for(store.ready_commit_started.wait(), timeout=1)
+        assert len(previews.generated_ids) == 1
+        stale_artifact_id = previews.generated_ids[0]
+        newer_artifact = await artifact_store.write(
+            b"newer-preview",
+            "image/png",
+            ".png",
+            owner_session_id=fixture.generating.id,
+            kind=ArtifactKind.DISH_PREVIEW,
+        )
+        current = await store.require(fixture.generating.id)
+        newer_option = stored_option("Newer Dish").model_copy(
+            update={"preview": DishPreview(artifact_id=newer_artifact.id)}
+        )
+        store.pause_ready_commit = False
+        newer_saved = await store.replace(
+            current.model_copy(
+                deep=True,
+                update={
+                    "stage": SessionStage.OPTIONS_READY,
+                    "recipe_options": [prior_option, newer_option],
+                    "option_generation_id": None,
+                    "updated_at": current.updated_at,
+                },
+            )
+        )
+        store.allow_ready_commit.set()
+
+        with pytest.raises(AppError) as raised:
+            await graph_task
+
+        assert raised.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+        assert await store.require(fixture.generating.id) == newer_saved
+        await assert_artifact_missing(artifact_store, stale_artifact_id)
+        assert (await artifact_store.require(prior_artifact.id)).id == prior_artifact.id
+        assert (await artifact_store.require(newer_artifact.id)).id == newer_artifact.id
+    finally:
+        store.allow_ready_commit.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+        await artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_preview_delete_failure_logs_without_replacing_job_failure(
+    project_tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    artifact_store = ArtifactStore(
+        project_tmp_path / "delete-failed-preview-artifacts",
+        ttl_seconds=60,
+    )
+    await artifact_store.startup()
+    delete_error = AppError(
+        code=ErrorCode.ARTIFACT_FAILURE,
+        message="Preview cleanup failed.",
+        status_code=500,
+        retryable=False,
+    )
+    previews = ArtifactWritingDishPreviewService(
+        artifact_store,
+        delete_error=delete_error,
+    )
+    fixture = await make_generation(option_count=1)
+
+    async def fail_terminal_enrichment_progress(value: int) -> None:
+        if value == 80:
+            raise RuntimeError("primary progress failure")
+
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+        progress=fail_terminal_enrichment_progress,
+    )
+    caplog.set_level(logging.ERROR, logger=option_graph.__name__)
+
+    try:
+        with pytest.raises(RuntimeError, match="primary progress failure"):
+            await graph.ainvoke(invocation(fixture))
+
+        assert "Preview artifact cleanup failed" in caplog.text
+        assert len(previews.generated_ids) == 1
+        assert (
+            await artifact_store.require(previews.generated_ids[0])
+        ).id == previews.generated_ids[0]
+    finally:
+        await artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_successful_commit_retains_attempt_preview_artifact(
+    project_tmp_path: Path,
+) -> None:
+    artifact_store = ArtifactStore(
+        project_tmp_path / "committed-preview-artifacts",
+        ttl_seconds=60,
+    )
+    await artifact_store.startup()
+    previews = ArtifactWritingDishPreviewService(artifact_store)
+    fixture = await make_generation(option_count=1)
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+    )
+
+    try:
+        result = await graph.ainvoke(invocation(fixture))
+
+        artifact_id = result["recipe_options"][0].preview.artifact_id
+        assert artifact_id == previews.generated_ids[0]
+        assert (await artifact_store.require(artifact_id)).id == artifact_id
+    finally:
+        await artifact_store.shutdown()
 
 
 @pytest.mark.asyncio
@@ -359,6 +716,137 @@ async def test_preview_cancellation_propagates_after_exact_attempt_rollback() ->
     assert saved.model_copy(update={"updated_at": fixture.previous.updated_at}) == (
         fixture.previous
     )
+
+
+@pytest.mark.asyncio
+async def test_configured_factory_starts_store_before_real_preview_persistence(
+    project_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path / "configured-development-runtime",
+    )
+    option_graph.get_development_recipe_options_runtime.cache_clear()
+    monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
+    runtime = option_graph.get_development_recipe_options_runtime()
+    requests: list[ImageGenerationRequest] = []
+
+    async def generate_without_network(
+        request: ImageGenerationRequest,
+        progress: Callable[[int], Awaitable[None]],
+    ) -> GeneratedImage:
+        requests.append(request)
+        await progress(100)
+        return GeneratedImage(
+            data=b"configured-preview",
+            media_type="image/png",
+            width=request.width,
+            height=request.height,
+        )
+
+    monkeypatch.setattr(runtime.image_generator, "generate", generate_without_network)
+    factory = configured_recipe_options_factory()
+
+    try:
+        async with as_asynccontextmanager(factory()) as configured_graph:
+            assert configured_graph.get_graph().nodes
+            assert runtime.artifact_store._root_fd is not None
+            preview = await runtime.dependencies.dish_previews.generate(
+                "configured-session",
+                draft("Configured Curry"),
+                lambda _: asyncio.sleep(0),
+            )
+            stored = await runtime.artifact_store.require(preview.artifact_id)
+            assert stored.path.read_bytes() == b"configured-preview"
+
+        assert requests
+        assert runtime.image_generator._client.is_closed
+        assert runtime.artifact_store._root_fd is None
+    finally:
+        if not runtime.image_generator._client.is_closed:
+            await runtime.shutdown()
+        option_graph.get_development_recipe_options_runtime.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_configured_langgraph_factory_reference_counts_overlapping_contexts(
+    project_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path / "overlapping-development-runtime",
+    )
+    option_graph.get_development_recipe_options_runtime.cache_clear()
+    monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
+    runtime = option_graph.get_development_recipe_options_runtime()
+    factory = configured_recipe_options_factory()
+    first_context = as_asynccontextmanager(factory())
+    second_context = as_asynccontextmanager(factory())
+
+    try:
+        first_graph = await first_context.__aenter__()
+        second_graph = await second_context.__aenter__()
+        assert first_graph is second_graph
+        assert runtime.artifact_store._root_fd is not None
+
+        await first_context.__aexit__(None, None, None)
+        assert runtime.artifact_store._root_fd is not None
+        assert not runtime.image_generator._client.is_closed
+
+        await second_context.__aexit__(None, None, None)
+        assert runtime.artifact_store._root_fd is None
+        assert runtime.image_generator._client.is_closed
+    finally:
+        if not runtime.image_generator._client.is_closed:
+            await runtime.shutdown()
+        option_graph.get_development_recipe_options_runtime.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_configured_langgraph_factory_exit_drains_repeated_cancellation(
+    project_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path / "cancelled-configured-runtime",
+    )
+    option_graph.get_development_recipe_options_runtime.cache_clear()
+    monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
+    runtime = option_graph.get_development_recipe_options_runtime()
+    delegate_client = runtime.image_generator._client
+    client = PausingCloseClient(delegate_client)
+    runtime.image_generator._client = client
+    context = as_asynccontextmanager(configured_recipe_options_factory()())
+
+    try:
+        await context.__aenter__()
+        exit_task = asyncio.create_task(context.__aexit__(None, None, None))
+        await asyncio.wait_for(client.close_started.wait(), timeout=1)
+        exit_task.cancel()
+        await asyncio.sleep(0)
+        assert not exit_task.done()
+
+        exit_task.cancel()
+        await asyncio.sleep(0)
+        assert not exit_task.done()
+
+        client.allow_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await exit_task
+    finally:
+        client.allow_close.set()
+        if "exit_task" in locals() and not exit_task.done():
+            exit_task.cancel()
+            await asyncio.gather(exit_task, return_exceptions=True)
+        if not delegate_client.is_closed:
+            await delegate_client.aclose()
+        option_graph.get_development_recipe_options_runtime.cache_clear()
+
+    assert client.is_closed
+    assert runtime.artifact_store._root_fd is None
 
 
 @pytest.mark.asyncio

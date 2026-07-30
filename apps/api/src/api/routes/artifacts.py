@@ -41,18 +41,14 @@ async def get_artifact(
     artifact_store: Annotated[ArtifactStore, Depends(get_artifact_store)],
 ) -> Response:
     """Return one current runtime artifact without making it cacheable."""
-    artifact = await artifact_store.require(artifact_id)
-    if artifact.media_type not in _SUPPORTED_MEDIA_TYPES:
+    content, media_type = await artifact_store.read_public_preview(artifact_id)
+    if media_type not in _SUPPORTED_MEDIA_TYPES:
         raise AppError(
             code=ErrorCode.ARTIFACT_FAILURE,
             message="The artifact format is not supported.",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             retryable=False,
         )
-    content, media_type = await artifact_store.read(
-        artifact.id,
-        artifact.owner_session_id,
-    )
     return Response(
         content=content,
         media_type=media_type,
