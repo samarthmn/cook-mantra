@@ -47,6 +47,19 @@ The default CORS allowlist accepts only the local browser origins in `.env`.
 Keep `API_HOST=127.0.0.1` unless you intentionally want a wider network
 exposure.
 
+## Postman collection
+
+Import
+[`postman/Cook-Mantra.postman_collection.json`](postman/Cook-Mantra.postman_collection.json)
+into Postman as a collection. Start the API, open request **03 Create Session**,
+select an ingredient image, and then send the numbered requests in order.
+
+The collection stores session, job, recipe-option, and preview-artifact IDs
+automatically. Model operations run as background jobs, so repeat each numbered
+**Poll** request until its response status is `succeeded` before continuing.
+Collection variables let you change how many extracted ingredients are
+confirmed and how many recipe options are selected.
+
 ## Verification and development
 
 The default suite is deterministic and makes no Ollama or internet calls:
