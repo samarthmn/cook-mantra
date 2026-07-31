@@ -7,6 +7,7 @@ from domain.recipe_options import (
     Difficulty,
     NutritionEstimate,
     RecipeOption,
+    RecipeOptionBatch,
     RecipeOptionDraft,
     RecipePreferences,
 )
@@ -72,6 +73,33 @@ def test_recipe_draft_requires_a_used_ingredient() -> None:
             difficulty=Difficulty.EASY,
             used_ingredients=[],
         )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("name", "   "),
+        ("summary", "\t"),
+        ("cuisine", ""),
+        ("used_ingredients", ["Tomato", "  "]),
+    ],
+)
+def test_generated_recipe_batch_rejects_blank_text(
+    field_name: str,
+    field_value: str | list[str],
+) -> None:
+    values: dict[str, object] = {
+        "name": "Tomato soup",
+        "summary": "A quick soup.",
+        "cuisine": "Italian",
+        "total_minutes": 20,
+        "difficulty": Difficulty.EASY,
+        "used_ingredients": ["Tomato"],
+    }
+    values[field_name] = field_value
+
+    with pytest.raises(ValidationError):
+        RecipeOptionBatch(options=[RecipeOptionDraft(**values)])
 
 
 def test_nutrition_disclaimer_is_fixed_estimate_notice() -> None:

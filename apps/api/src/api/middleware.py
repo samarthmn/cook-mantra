@@ -14,13 +14,26 @@ from core.logging import log_context
 logger = logging.getLogger(__name__)
 
 
+def _safe_request_id(candidate: str | None) -> str:
+    if (
+        candidate
+        and len(candidate) <= 128
+        and all(
+            character.isascii() and (character.isalnum() or character in "-._:/")
+            for character in candidate
+        )
+    ):
+        return candidate
+    return str(uuid4())
+
+
 class RequestIdMiddleware(BaseHTTPMiddleware):
     """Attach a caller-provided or generated request ID to each request."""
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
-        request_id = request.headers.get(REQUEST_ID_HEADER) or str(uuid4())
+        request_id = _safe_request_id(request.headers.get(REQUEST_ID_HEADER))
         request.state.request_id = request_id
         started_at = perf_counter()
         status_code = 500

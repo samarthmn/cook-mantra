@@ -111,3 +111,22 @@ async def test_connection_details_are_hidden_behind_the_public_error() -> None:
     assert raised.value.retryable is True
     assert raised.value.details == {}
     assert "private-host" not in raised.value.message
+
+
+@pytest.mark.asyncio
+async def test_malformed_tags_response_is_reported_as_unavailable() -> None:
+    async def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>not ollama</html>")
+
+    service = OllamaHealthService(
+        "http://ollama.local:11434",
+        timeout_seconds=1,
+        transport=httpx.MockTransport(respond),
+    )
+
+    with pytest.raises(AppError) as raised:
+        await service.inspect()
+
+    assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
+    assert raised.value.status_code == 503
+    assert raised.value.retryable is True

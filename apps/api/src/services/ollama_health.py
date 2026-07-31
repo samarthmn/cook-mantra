@@ -31,7 +31,8 @@ class OllamaHealthService:
             ) as client:
                 response = await client.get(f"{self._base_url}/api/tags")
                 response.raise_for_status()
-        except httpx.HTTPError as error:
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as error:
             raise AppError(
                 code=ErrorCode.OLLAMA_UNAVAILABLE,
                 message="Ollama is unavailable.",
@@ -39,7 +40,7 @@ class OllamaHealthService:
                 retryable=True,
             ) from error
 
-        available_models = _available_model_names(response.json())
+        available_models = _available_model_names(payload)
         available_set = set(available_models)
         missing = [model.value for model in Model if model.value not in available_set]
         return {

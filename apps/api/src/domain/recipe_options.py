@@ -114,6 +114,23 @@ class RecipeOptionBatch(BaseModel):
 
     options: list[RecipeOptionDraft] = Field(min_length=1, max_length=6)
 
+    @field_validator("options")
+    @classmethod
+    def reject_blank_generated_text(
+        cls,
+        options: list[RecipeOptionDraft],
+    ) -> list[RecipeOptionDraft]:
+        """Reject unusable text at the model-output boundary."""
+        for option in options:
+            if any(
+                not value.strip()
+                for value in (option.name, option.summary, option.cuisine)
+            ):
+                raise ValueError("Generated recipe text must not be blank.")
+            if any(not value.strip() for value in option.used_ingredients):
+                raise ValueError("Used ingredients must not contain blank values.")
+        return options
+
 
 class RecipeOption(RecipeOptionDraft):
     """A stored recipe suggestion with optional enrichments."""

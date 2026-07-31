@@ -92,6 +92,22 @@ def test_request_id_is_generated_and_matches_the_response(
     assert record["request_id"] == response.headers["X-Request-ID"]
 
 
+@pytest.mark.parametrize("unsafe_request_id", ["request\tinjected", "a" * 129])
+def test_unsafe_caller_request_id_is_replaced(
+    capsys: pytest.CaptureFixture[str],
+    unsafe_request_id: str,
+) -> None:
+    response = TestClient(_app()).get(
+        "/ok",
+        headers={"X-Request-ID": unsafe_request_id},
+    )
+
+    record = _completion_records(capsys)[0]
+    assert UUID(response.headers["X-Request-ID"]).version == 4
+    assert record["request_id"] == response.headers["X-Request-ID"]
+    assert unsafe_request_id not in response.text
+
+
 def test_request_body_and_binary_canaries_never_enter_logs(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
