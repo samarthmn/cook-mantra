@@ -3,3 +3,5 @@ tmp/
 .env
 
 .DS_Store
+
+docs/superpowers/*
