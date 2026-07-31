@@ -71,6 +71,7 @@ def test_development_factory_uses_the_stable_exposed_runtime() -> None:
     assert extraction_graph.build_development_ingredient_extraction_graph() is (
         runtime.graph
     )
+    assert runtime.dependencies.extractor._tracing.enabled is False
 
 
 @pytest.mark.asyncio

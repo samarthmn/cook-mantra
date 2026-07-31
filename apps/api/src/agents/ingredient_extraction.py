@@ -9,6 +9,7 @@ from core import Agent, Settings
 from domain.ingredients import ExtractionResult
 from services.llm import get_model
 from services.structured_output import StructuredModel, invoke_structured
+from services.tracing import TracingService
 
 EMPTY_DETECTION_WARNING = "No ingredients were confidently detected. Add them manually."
 EXTRACTION_PROMPT = (
@@ -33,9 +34,11 @@ class OllamaIngredientExtractor:
         self,
         model: StructuredModel[ExtractionResult] | None = None,
         settings: Settings | None = None,
+        tracing: TracingService | None = None,
     ) -> None:
         self._model = model
         self._settings = settings
+        self._tracing = tracing
 
     async def extract(self, image: bytes, media_type: str) -> ExtractionResult:
         """Return visible ingredients and warn when recognition is empty."""
@@ -47,22 +50,31 @@ class OllamaIngredientExtractor:
                 settings=self._settings,
             ).with_structured_output(ExtractionResult)
 
-        encoded_image = b64encode(image).decode("ascii")
-        message = HumanMessage(
-            content=[
-                {"type": "text", "text": EXTRACTION_PROMPT},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{media_type};base64,{encoded_image}",
+        async def invoke_local_model() -> ExtractionResult:
+            encoded_image = b64encode(image).decode("ascii")
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": EXTRACTION_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{media_type};base64,{encoded_image}",
+                        },
                     },
-                },
-            ]
-        )
-        result = await invoke_structured(model, [message])
-        if result.detected or EMPTY_DETECTION_WARNING in result.warnings:
-            return result
+                ]
+            )
+            result = await invoke_structured(model, [message])
+            if result.detected or EMPTY_DETECTION_WARNING in result.warnings:
+                return result
 
-        return result.model_copy(
-            update={"warnings": [*result.warnings, EMPTY_DETECTION_WARNING]}
+            return result.model_copy(
+                update={"warnings": [*result.warnings, EMPTY_DETECTION_WARNING]}
+            )
+
+        if self._tracing is None:
+            return await invoke_local_model()
+        return await self._tracing.invoke_vision(
+            image,
+            media_type,
+            invoke_local_model,
         )

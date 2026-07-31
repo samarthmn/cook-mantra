@@ -15,6 +15,7 @@ from domain.recipe_options import (
 )
 from services.llm import get_model
 from services.structured_output import StructuredModel, invoke_structured
+from services.tracing import RunnableConfig, TracingService
 
 
 class NutritionAgent(Protocol):
@@ -48,9 +49,11 @@ class OllamaNutritionAgent:
         self,
         model: StructuredModel[NutritionModelOutput] | None = None,
         settings: Settings | None = None,
+        tracing: TracingService | None = None,
     ) -> None:
         self._model = model
         self._settings = settings
+        self._tracing = tracing
 
     async def estimate(
         self,
@@ -66,10 +69,15 @@ class OllamaNutritionAgent:
                 settings=self._settings,
             ).with_structured_output(NutritionModelOutput)
 
-        estimate = await invoke_structured(
-            model,
-            [HumanMessage(content=_build_prompt(option, preferences))],
-        )
+        messages = [HumanMessage(content=_build_prompt(option, preferences))]
+
+        async def invoke(config: RunnableConfig) -> NutritionModelOutput:
+            return await invoke_structured(model, messages, config=config)
+
+        if self._tracing is None:
+            estimate = await invoke_structured(model, messages)
+        else:
+            estimate = await self._tracing.invoke_text(Agent.NUTRITION, invoke)
         return NutritionEstimate(
             **estimate.model_dump(exclude={"disclaimer"}),
             disclaimer=NUTRITION_DISCLAIMER,

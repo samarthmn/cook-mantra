@@ -76,6 +76,11 @@ def log_context(
         _CONTEXT.reset(token)
 
 
+def current_log_context() -> dict[str, str]:
+    """Return a detached snapshot of the current correlation identifiers."""
+    return dict(_CONTEXT.get() or {})
+
+
 def configure_logging(level: str) -> None:
     """Install one current, idempotent JSON-lines handler on owned loggers."""
     resolved_level = logging._nameToLevel.get(level.upper())

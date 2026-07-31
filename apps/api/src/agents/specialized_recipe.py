@@ -12,6 +12,7 @@ from domain.recipe_options import RecipeOption, RecipePreferences
 from domain.recipes import CompleteRecipe, IngredientAvailability
 from services.llm import get_model
 from services.structured_output import StructuredModel, invoke_structured
+from services.tracing import RunnableConfig, TracingService
 
 
 class SpecializedRecipeAgent(Protocol):
@@ -33,9 +34,11 @@ class OllamaSpecializedRecipeAgent:
         self,
         model: StructuredModel[CompleteRecipe] | None = None,
         settings: Settings | None = None,
+        tracing: TracingService | None = None,
     ) -> None:
         self._model = model
         self._settings = settings
+        self._tracing = tracing
 
     async def generate(
         self,
@@ -52,14 +55,22 @@ class OllamaSpecializedRecipeAgent:
             ).with_structured_output(CompleteRecipe)
 
         normalized_confirmed = _normalize_confirmed_names(confirmed_ingredients)
-        model_result = await invoke_structured(
-            model,
-            [
-                HumanMessage(
-                    content=_build_prompt(option, normalized_confirmed, preferences)
-                )
-            ],
-        )
+        messages = [
+            HumanMessage(
+                content=_build_prompt(option, normalized_confirmed, preferences)
+            )
+        ]
+
+        async def invoke(config: RunnableConfig) -> CompleteRecipe:
+            return await invoke_structured(model, messages, config=config)
+
+        if self._tracing is None:
+            model_result = await invoke_structured(model, messages)
+        else:
+            model_result = await self._tracing.invoke_text(
+                Agent.SPECIALIZED_RECIPE,
+                invoke,
+            )
         recipe = _revalidate_model_recipe(model_result)
         recipe = _merge_server_owned_fields(recipe, option, preferences)
         _validate_ingredient_availability(recipe, option, normalized_confirmed)

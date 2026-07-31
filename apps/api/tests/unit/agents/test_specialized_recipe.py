@@ -3,11 +3,13 @@ import json
 from copy import deepcopy
 
 import pytest
+from tests.tracing_support import enabled_tracing
 
 from agents import specialized_recipe as specialized_recipe_module
 from agents.specialized_recipe import OllamaSpecializedRecipeAgent
 from core.config import PROJECT_ROOT, Agent, Settings
 from core.errors import AppError, ErrorCode
+from core.logging import log_context
 from domain.recipe_options import (
     IngredientRequirement,
     RecipeOption,
@@ -121,9 +123,16 @@ class ValidatingStructuredModel:
         self.outcomes = outcomes
         self.attempts = 0
         self.messages: list[object] = []
+        self.configs: list[dict[str, object] | None] = []
 
-    async def ainvoke(self, messages: object) -> CompleteRecipe:
+    async def ainvoke(
+        self,
+        messages: object,
+        *,
+        config: dict[str, object] | None = None,
+    ) -> CompleteRecipe:
         self.messages.append(messages)
+        self.configs.append(config)
         outcome = self.outcomes[self.attempts]
         self.attempts += 1
         if isinstance(outcome, BaseException):
@@ -212,6 +221,33 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
     assert result.name == recipe_option().name
     assert calls == [(Agent.SPECIALIZED_RECIPE, settings)]
     assert factory.schema is CompleteRecipe
+
+
+@pytest.mark.asyncio
+async def test_specialized_recipe_passes_only_current_job_trace_metadata() -> None:
+    model = ValidatingStructuredModel([recipe_output()])
+    tracing, _ = enabled_tracing()
+    recipe_agent = OllamaSpecializedRecipeAgent(model=model, tracing=tracing)
+
+    with log_context(session_id="session-1", job_id="job-1"):
+        result = await recipe_agent.generate(
+            recipe_option(),
+            ["Tomato, ripe"],
+            preferences(),
+        )
+
+    assert result.name == recipe_option().name
+    assert model.configs == [
+        {
+            "tags": ["cook-mantra", "specialized_recipe"],
+            "metadata": {
+                "agent": "specialized_recipe",
+                "model": "gemma4:26b",
+                "session_id": "session-1",
+                "job_id": "job-1",
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

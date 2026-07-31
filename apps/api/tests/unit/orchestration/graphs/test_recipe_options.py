@@ -4,10 +4,13 @@ from dataclasses import dataclass
 
 import pytest
 from langgraph_api.asyncio import as_asynccontextmanager
+from tests.tracing_support import enabled_tracing
 
 from agents.master_chef import OllamaMasterChef
 from agents.nutrition import OllamaNutritionAgent
+from core.config import Agent
 from core.errors import AppError, ErrorCode
+from core.logging import log_context
 from domain.images import DishPreview
 from domain.ingredients import Ingredient, IngredientSource
 from domain.recipe_option_service import (
@@ -128,6 +131,43 @@ class FakeDishPreviewService:
 
     async def delete(self, artifact_id: str) -> None:
         self.deleted_artifact_ids.append(artifact_id)
+
+
+class TraceCapturingMasterChef(FakeMasterChef):
+    def __init__(self) -> None:
+        super().__init__([[draft("Tomato Curry")]])
+        self.tracing, _ = enabled_tracing()
+        self.configs: list[dict[str, object]] = []
+
+    async def generate(
+        self,
+        ingredients: list[str],
+        preferences: RecipePreferences,
+        excluded_names: set[str],
+    ) -> list[RecipeOptionDraft]:
+        async def capture(config: dict[str, object]) -> None:
+            self.configs.append(config)
+
+        await self.tracing.invoke_text(Agent.MASTER_CHEF, capture)
+        return await super().generate(ingredients, preferences, excluded_names)
+
+
+class TraceCapturingNutrition(FakeNutritionAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tracing, _ = enabled_tracing()
+        self.configs: list[dict[str, object]] = []
+
+    async def estimate(
+        self,
+        option: RecipeOptionDraft,
+        preferences: RecipePreferences,
+    ) -> NutritionEstimate:
+        async def capture(config: dict[str, object]) -> None:
+            self.configs.append(config)
+
+        await self.tracing.invoke_text(Agent.NUTRITION, capture)
+        return await super().estimate(option, preferences)
 
 
 class CountingLimiter(ModelCallLimiter):
@@ -615,6 +655,45 @@ async def test_bound_runner_uses_the_persisted_attempt_and_reports_progress() ->
 
 
 @pytest.mark.asyncio
+async def test_graph_attaches_the_target_batch_to_each_text_model_call() -> None:
+    fixture = await make_generation(option_count=1)
+    master_chef = TraceCapturingMasterChef()
+    nutrition = TraceCapturingNutrition()
+    limiter = CountingLimiter(max_concurrent_calls=2)
+    progress_updates: list[int] = []
+
+    async def record_progress(value: int) -> None:
+        progress_updates.append(value)
+
+    graph = build_recipe_options_graph(
+        RecipeOptionDependencies(
+            master_chef=master_chef,
+            nutrition_agent=nutrition,
+            dish_previews=FakeDishPreviewService(),
+            session_store=fixture.store,
+            model_call_limiter=limiter,
+            progress=record_progress,
+        )
+    )
+
+    with log_context(session_id=fixture.generating.id, job_id="job-1"):
+        result = await graph.ainvoke(
+            {
+                "session_id": fixture.generating.id,
+                "preferences": fixture.generating.preferences,
+                "more": False,
+                "generation_context": fixture.context,
+            }
+        )
+
+    assert master_chef.configs[0]["metadata"]["batch_number"] == 1
+    assert nutrition.configs[0]["metadata"]["batch_number"] == 1
+    assert result["stage"] is SessionStage.OPTIONS_READY
+    assert progress_updates == [10, 45, 80]
+    assert limiter.call_count == 3
+
+
+@pytest.mark.asyncio
 async def test_development_factory_is_stable_and_uses_one_settings_object() -> None:
     option_graph.get_development_recipe_options_runtime.cache_clear()
 
@@ -630,6 +709,11 @@ async def test_development_factory_is_stable_and_uses_one_settings_object() -> N
         assert isinstance(runtime.dependencies.nutrition_agent, OllamaNutritionAgent)
         assert runtime.dependencies.master_chef._settings is runtime.settings
         assert runtime.dependencies.nutrition_agent._settings is runtime.settings
+        assert (
+            runtime.dependencies.master_chef._tracing
+            is runtime.dependencies.nutrition_agent._tracing
+        )
+        assert runtime.dependencies.master_chef._tracing.enabled is False
         assert runtime.graph.get_graph().nodes
     finally:
         if not runtime.image_generator._client.is_closed:

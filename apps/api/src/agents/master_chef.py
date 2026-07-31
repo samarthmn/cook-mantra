@@ -13,6 +13,7 @@ from domain.recipe_options import (
 )
 from services.llm import get_model
 from services.structured_output import StructuredModel, invoke_structured
+from services.tracing import RunnableConfig, TracingService
 
 
 class MasterChef(Protocol):
@@ -34,9 +35,11 @@ class OllamaMasterChef:
         self,
         model: StructuredModel[RecipeOptionBatch] | None = None,
         settings: Settings | None = None,
+        tracing: TracingService | None = None,
     ) -> None:
         self._model = model
         self._settings = settings
+        self._tracing = tracing
 
     async def generate(
         self,
@@ -52,14 +55,19 @@ class OllamaMasterChef:
                 settings=self._settings,
             ).with_structured_output(RecipeOptionBatch)
 
-        batch = await invoke_structured(
-            model,
-            [
-                HumanMessage(
-                    content=_build_prompt(ingredients, preferences, excluded_names)
-                )
-            ],
-        )
+        messages = [
+            HumanMessage(
+                content=_build_prompt(ingredients, preferences, excluded_names)
+            )
+        ]
+
+        async def invoke(config: RunnableConfig) -> RecipeOptionBatch:
+            return await invoke_structured(model, messages, config=config)
+
+        if self._tracing is None:
+            batch = await invoke_structured(model, messages)
+        else:
+            batch = await self._tracing.invoke_text(Agent.MASTER_CHEF, invoke)
         if len(batch.options) != preferences.option_count:
             raise AppError(
                 code=ErrorCode.MODEL_OUTPUT_INVALID,

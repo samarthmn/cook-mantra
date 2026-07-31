@@ -1019,6 +1019,7 @@ def test_real_factory_uses_one_settings_lazy_agent_store_and_limiter() -> None:
     assert isinstance(dependencies.agent, OllamaSpecializedRecipeAgent)
     assert dependencies.agent._settings is settings
     assert dependencies.agent._model is None
+    assert dependencies.agent._tracing.enabled is False
     assert isinstance(dependencies.session_store, SessionStore)
     assert isinstance(dependencies.model_call_limiter, ModelCallLimiter)
     assert dependencies.model_call_limiter._semaphore._value == 3
@@ -1048,6 +1049,7 @@ def test_development_factory_is_stable_lazy_and_uses_one_settings_object(
         assert runtime.settings is settings
         assert runtime.dependencies.agent._settings is settings
         assert runtime.dependencies.agent._model is None
+        assert runtime.dependencies.agent._tracing.enabled is False
         assert runtime.graph.get_graph().nodes
     finally:
         recipe_graph.get_development_complete_recipes_runtime.cache_clear()

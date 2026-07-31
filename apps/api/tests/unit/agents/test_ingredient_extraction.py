@@ -1,9 +1,11 @@
 import pytest
 from langchain_core.messages import HumanMessage
+from tests.tracing_support import enabled_tracing
 
 from agents import ingredient_extraction as ingredient_extraction_module
 from agents.ingredient_extraction import OllamaIngredientExtractor
 from core.config import PROJECT_ROOT, Agent, Settings
+from core.logging import log_context
 from domain.ingredients import ExtractionResult
 
 
@@ -104,3 +106,27 @@ async def test_extractor_forwards_its_exact_settings_to_model_factory(
 
     assert result.detected[0].name == "Tomato"
     assert captured_settings is settings
+
+
+@pytest.mark.asyncio
+async def test_extractor_traces_only_safe_summaries_around_full_local_image() -> None:
+    canary = b"extractor-vision-canary"
+    model = StructuredModel(
+        ExtractionResult(detected=[{"name": "Tomato", "confidence": 0.94}])
+    )
+    tracing, client = enabled_tracing()
+    extractor = OllamaIngredientExtractor(model=model, tracing=tracing)
+
+    with log_context(session_id="session-1", job_id="job-1"):
+        result = await extractor.extract(canary, "image/png")
+
+    assert result.detected[0].name == "Tomato"
+    assert model.messages[0].content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,ZXh0cmFjdG9yLXZpc2lvbi1jYW5hcnk="},
+    }
+    captured = repr(client.calls)
+    assert canary.decode() not in captured
+    assert "ZXh0cmFjdG9yLXZpc2lvbi1jYW5hcnk=" not in captured
+    assert "Tomato" not in captured
+    assert "'detected_count': 1" in captured

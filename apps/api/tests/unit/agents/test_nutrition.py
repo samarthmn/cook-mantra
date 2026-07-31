@@ -1,10 +1,12 @@
 import pytest
 from pydantic import BaseModel
+from tests.tracing_support import enabled_tracing
 
 from agents import nutrition as nutrition_module
 from agents.nutrition import OllamaNutritionAgent
 from core.config import PROJECT_ROOT, Agent, Settings
 from core.errors import AppError, ErrorCode
+from core.logging import log_context
 from domain.recipe_options import (
     NUTRITION_DISCLAIMER,
     NutritionEstimate,
@@ -55,9 +57,16 @@ class CapturingStructuredModel:
     def __init__(self, output: NutritionEstimate) -> None:
         self.output = output
         self.messages: object | None = None
+        self.configs: list[dict[str, object] | None] = []
 
-    async def ainvoke(self, messages: object) -> NutritionEstimate:
+    async def ainvoke(
+        self,
+        messages: object,
+        *,
+        config: dict[str, object] | None = None,
+    ) -> NutritionEstimate:
         self.messages = messages
+        self.configs.append(config)
         return self.output
 
 
@@ -178,3 +187,27 @@ async def test_nutrition_defers_model_construction_and_forwards_injected_setting
 
     assert estimate.calories_kcal == 420
     assert calls == [(Agent.NUTRITION, False, settings)]
+
+
+@pytest.mark.asyncio
+async def test_nutrition_passes_only_current_job_trace_metadata(
+    recipe_option_draft,
+) -> None:
+    model = CapturingStructuredModel(nutrition_estimate())
+    tracing, _ = enabled_tracing()
+    agent = OllamaNutritionAgent(model=model, tracing=tracing)
+
+    with log_context(session_id="session-1", job_id="job-1"):
+        await agent.estimate(recipe_option_draft, RecipePreferences())
+
+    assert model.configs == [
+        {
+            "tags": ["cook-mantra", "nutrition"],
+            "metadata": {
+                "agent": "nutrition",
+                "model": "gpt-oss:20b",
+                "session_id": "session-1",
+                "job_id": "job-1",
+            },
+        }
+    ]

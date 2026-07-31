@@ -23,6 +23,40 @@ class SequencedStructuredModel:
         return outcome
 
 
+class ConfigCapturingStructuredModel:
+    def __init__(self, result: ExtractionResult) -> None:
+        self.result = result
+        self.configs: list[dict[str, object]] = []
+
+    async def ainvoke(
+        self,
+        messages: list[object],
+        *,
+        config: dict[str, object],
+    ) -> ExtractionResult:
+        self.configs.append(config)
+        return self.result
+
+
+class RetryingConfigCapturingModel:
+    def __init__(self, result: ExtractionResult) -> None:
+        self.result = result
+        self.attempts = 0
+        self.configs: list[dict[str, object]] = []
+
+    async def ainvoke(
+        self,
+        messages: list[object],
+        *,
+        config: dict[str, object],
+    ) -> ExtractionResult:
+        self.attempts += 1
+        self.configs.append(config)
+        if self.attempts == 1:
+            raise OutputParserException("invalid JSON")
+        return self.result
+
+
 def invalid_extraction_result() -> ValidationError:
     with pytest.raises(ValidationError) as raised:
         ExtractionResult.model_validate(
@@ -118,3 +152,48 @@ async def test_cancellation_propagates_without_retry() -> None:
         await invoke_structured(model, ["extract ingredients"])
 
     assert model.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_safe_runnable_config_reaches_the_structured_model() -> None:
+    expected = ExtractionResult(detected=[])
+    model = ConfigCapturingStructuredModel(expected)
+    config = {
+        "tags": ["cook-mantra", "master_chef"],
+        "metadata": {
+            "agent": "master_chef",
+            "model": "qwen3.5:27b",
+            "session_id": "session-1",
+            "job_id": "job-1",
+        },
+    }
+
+    result = await invoke_structured(
+        model,
+        ["generate options"],
+        config=config,
+    )
+
+    assert result is expected
+    assert model.configs == [config]
+
+
+@pytest.mark.asyncio
+async def test_safe_runnable_config_preserves_the_two_attempt_retry_limit() -> None:
+    expected = ExtractionResult(detected=[])
+    model = RetryingConfigCapturingModel(expected)
+    config = {
+        "tags": ["cook-mantra", "nutrition"],
+        "metadata": {
+            "agent": "nutrition",
+            "model": "gpt-oss:20b",
+            "session_id": "session-1",
+            "job_id": "job-1",
+        },
+    }
+
+    result = await invoke_structured(model, ["estimate nutrition"], config=config)
+
+    assert result is expected
+    assert model.attempts == 2
+    assert model.configs == [config, config]

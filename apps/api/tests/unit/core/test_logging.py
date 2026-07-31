@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import pytest
 
 from core.errors import AppError, ErrorCode
-from core.logging import configure_logging, log_context
+from core.logging import configure_logging, current_log_context, log_context
 from domain.jobs import JobOperation
 from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
@@ -49,6 +49,20 @@ def test_log_context_nests_and_restores_unspecified_outer_fields(
     assert "job_id" not in records["restored"]
     assert "request_id" not in records["empty"]
     assert "session_id" not in records["empty"]
+
+
+def test_current_log_context_returns_a_detached_read_only_snapshot() -> None:
+    with log_context(request_id="request-1", session_id="session-1", job_id="job-1"):
+        snapshot = current_log_context()
+        snapshot["job_id"] = "tampered"
+
+        assert current_log_context() == {
+            "request_id": "request-1",
+            "session_id": "session-1",
+            "job_id": "job-1",
+        }
+
+    assert current_log_context() == {}
 
 
 @pytest.mark.asyncio

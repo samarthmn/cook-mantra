@@ -10,6 +10,7 @@ from typing import NotRequired, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langsmith import tracing_context
 
 from agents.master_chef import MasterChef, OllamaMasterChef
 from agents.nutrition import NutritionAgent, OllamaNutritionAgent
@@ -36,6 +37,7 @@ from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
 from services.image_generation import OllamaImageGenerator
+from services.tracing import TracingService, trace_batch_number
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
 
@@ -162,13 +164,14 @@ def build_recipe_options_graph(
     async def generate_drafts(
         state: RecipeOptionState,
     ) -> dict[str, object]:
-        drafts = await dependencies.model_call_limiter.run(
-            lambda: dependencies.master_chef.generate(
-                confirmed_ingredient_names(state["session"]),
-                RecipePreferences.model_validate(state["preferences"]),
-                set(state["exclusions"]),
+        with trace_batch_number(state["session"].option_batch_number + 1):
+            drafts = await dependencies.model_call_limiter.run(
+                lambda: dependencies.master_chef.generate(
+                    confirmed_ingredient_names(state["session"]),
+                    RecipePreferences.model_validate(state["preferences"]),
+                    set(state["exclusions"]),
+                )
             )
-        )
         return {
             "drafts": drafts,
             "attempt_count": state["attempt_count"] + 1,
@@ -258,10 +261,11 @@ def build_recipe_options_graph(
                     preview_call(index, option),
                 )
             )
-        tasks = [
-            asyncio.create_task(dependencies.model_call_limiter.run(call))
-            for call in calls
-        ]
+        with trace_batch_number(state["session"].option_batch_number + 1):
+            tasks = [
+                asyncio.create_task(dependencies.model_call_limiter.run(call))
+                for call in calls
+            ]
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError as cancellation:
@@ -630,6 +634,7 @@ def build_real_recipe_option_dependencies(
 ) -> RecipeOptionDependencies:
     """Wire real lazy agents, a store, and one shared model-call limiter."""
     model_call_limiter = ModelCallLimiter(settings.max_concurrent_model_calls)
+    tracing = TracingService(settings)
     resolved_image_generator = image_generator or OllamaImageGenerator(
         base_url=str(settings.ollama_base_url),
         model=Model.Z_IMAGE,
@@ -640,8 +645,8 @@ def build_real_recipe_option_dependencies(
         ttl_seconds=settings.session_ttl_seconds,
     )
     return RecipeOptionDependencies(
-        master_chef=OllamaMasterChef(settings=settings),
-        nutrition_agent=OllamaNutritionAgent(settings=settings),
+        master_chef=OllamaMasterChef(settings=settings, tracing=tracing),
+        nutrition_agent=OllamaNutritionAgent(settings=settings, tracing=tracing),
         dish_previews=DishPreviewService(
             resolved_image_generator,
             resolved_artifact_store,
@@ -721,14 +726,15 @@ async def run_recipe_options(
     """Run the exact persisted generation attempt with application dependencies."""
     resolved_dependencies = replace(dependencies, progress=progress)
     graph = build_recipe_options_graph(resolved_dependencies)
-    result = await graph.ainvoke(
-        {
-            "session_id": session_id,
-            "preferences": preferences,
-            "more": more,
-            "generation_context": generation_context,
-        }
-    )
+    with tracing_context(enabled=False):
+        result = await graph.ainvoke(
+            {
+                "session_id": session_id,
+                "preferences": preferences,
+                "more": more,
+                "generation_context": generation_context,
+            }
+        )
     return cast(RecipeOptionOutput, dict(result))
 
 

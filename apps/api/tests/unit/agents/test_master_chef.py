@@ -1,9 +1,11 @@
 import pytest
+from tests.tracing_support import enabled_tracing
 
 from agents import master_chef as master_chef_module
 from agents.master_chef import OllamaMasterChef
 from core.config import PROJECT_ROOT, Agent, Settings
 from core.errors import AppError, ErrorCode
+from core.logging import log_context
 from domain.recipe_options import RecipeOptionBatch, RecipePreferences
 
 
@@ -11,9 +13,16 @@ class CapturingStructuredModel:
     def __init__(self, output: RecipeOptionBatch) -> None:
         self.output = output
         self.messages: object | None = None
+        self.configs: list[dict[str, object] | None] = []
 
-    async def ainvoke(self, messages: object) -> RecipeOptionBatch:
+    async def ainvoke(
+        self,
+        messages: object,
+        *,
+        config: dict[str, object] | None = None,
+    ) -> RecipeOptionBatch:
         self.messages = messages
+        self.configs.append(config)
         return self.output
 
 
@@ -130,3 +139,29 @@ async def test_master_chef_forwards_its_exact_settings_to_model_factory(
 
     assert result[0].name == "Tomato masala"
     assert captured_settings is settings
+
+
+@pytest.mark.asyncio
+async def test_master_chef_passes_only_current_job_trace_metadata() -> None:
+    model = CapturingStructuredModel(recipe_batch("Tomato masala"))
+    tracing, _ = enabled_tracing()
+    chef = OllamaMasterChef(model=model, tracing=tracing)
+
+    with log_context(session_id="session-1", job_id="job-1"):
+        await chef.generate(
+            ingredients=["Tomato"],
+            preferences=RecipePreferences(option_count=1),
+            excluded_names=set(),
+        )
+
+    assert model.configs == [
+        {
+            "tags": ["cook-mantra", "master_chef"],
+            "metadata": {
+                "agent": "master_chef",
+                "model": "qwen3.5:27b",
+                "session_id": "session-1",
+                "job_id": "job-1",
+            },
+        }
+    ]

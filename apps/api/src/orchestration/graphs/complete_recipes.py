@@ -9,6 +9,7 @@ from typing import NotRequired, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langsmith import tracing_context
 
 from agents.specialized_recipe import (
     OllamaSpecializedRecipeAgent,
@@ -28,6 +29,7 @@ from domain.session_service import confirmed_ingredient_names
 from domain.sessions import Session, SessionStage
 from repositories.session_store import SessionStore
 from services.concurrency import ModelCallLimiter
+from services.tracing import TracingService
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
 
@@ -463,8 +465,12 @@ def build_real_complete_recipe_dependencies(
 ) -> CompleteRecipeDependencies:
     """Wire one lazy real agent, configured limiter, and in-memory store."""
     resolved_settings = settings or Settings(_env_file=None)
+    tracing = TracingService(resolved_settings)
     return CompleteRecipeDependencies(
-        agent=OllamaSpecializedRecipeAgent(settings=resolved_settings),
+        agent=OllamaSpecializedRecipeAgent(
+            settings=resolved_settings,
+            tracing=tracing,
+        ),
         session_store=SessionStore(ttl_seconds=resolved_settings.session_ttl_seconds),
         model_call_limiter=ModelCallLimiter(
             resolved_settings.max_concurrent_model_calls
@@ -493,14 +499,15 @@ async def run_complete_recipes(
     """Run the exact persisted recipe-generation attempt."""
     resolved_dependencies = replace(dependencies, progress=progress)
     graph = build_complete_recipes_graph(resolved_dependencies)
-    result = await graph.ainvoke(
-        {
-            "session_id": session_id,
-            "generation_context": generation_context,
-            "option_ids": list(generation_context.selected_option_ids),
-            "previous_stage": generation_context.previous_stage,
-        }
-    )
+    with tracing_context(enabled=False):
+        result = await graph.ainvoke(
+            {
+                "session_id": session_id,
+                "generation_context": generation_context,
+                "option_ids": list(generation_context.selected_option_ids),
+                "previous_stage": generation_context.previous_stage,
+            }
+        )
     return cast(CompleteRecipesOutput, dict(result))
 
 

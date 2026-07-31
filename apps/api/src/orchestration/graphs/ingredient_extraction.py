@@ -7,6 +7,7 @@ from typing import NotRequired, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langsmith import tracing_context
 
 from agents.ingredient_extraction import IngredientExtractor, OllamaIngredientExtractor
 from core.config import Settings
@@ -20,6 +21,7 @@ from domain.sessions import Session, SessionStage
 from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
+from services.tracing import TracingService
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
 type IngredientExtractionRunner = Callable[
@@ -178,8 +180,9 @@ class DevelopmentIngredientExtractionRuntime:
 def build_real_extraction_dependencies() -> ExtractionDependencies:
     """Wire the real extractor and temporary stores for development use."""
     settings = Settings(_env_file=None)
+    tracing = TracingService(settings)
     return ExtractionDependencies(
-        extractor=OllamaIngredientExtractor(settings=settings),
+        extractor=OllamaIngredientExtractor(settings=settings, tracing=tracing),
         session_store=SessionStore(ttl_seconds=settings.session_ttl_seconds),
         artifact_store=ArtifactStore(
             settings.artifact_root,
@@ -215,12 +218,13 @@ async def run_ingredient_extraction(
         progress=progress,
     )
     graph = build_ingredient_extraction_graph(resolved_dependencies)
-    result = await graph.ainvoke(
-        {
-            "session_id": session_id,
-            "artifact_id": artifact_id,
-        }
-    )
+    with tracing_context(enabled=False):
+        result = await graph.ainvoke(
+            {
+                "session_id": session_id,
+                "artifact_id": artifact_id,
+            }
+        )
     return dict(result)
 
 

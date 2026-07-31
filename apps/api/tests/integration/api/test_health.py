@@ -4,9 +4,14 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from agents.ingredient_extraction import OllamaIngredientExtractor
+from agents.master_chef import OllamaMasterChef
+from agents.nutrition import OllamaNutritionAgent
+from agents.specialized_recipe import OllamaSpecializedRecipeAgent
 from api.app import create_app
 from core.config import Settings
 from services.ollama_health import OllamaHealthService
+from tests.tracing_support import enabled_tracing
 
 
 class ReadyOllama:
@@ -30,6 +35,11 @@ class MissingModelOllama:
             "available_models": ["qwen3.5:9b"],
             "missing": ["qwen3.5:27b"],
         }
+
+
+class FalseyTracingService:
+    def __bool__(self) -> bool:
+        return False
 
 
 class RecordingArtifactStore:
@@ -101,6 +111,52 @@ def test_health_is_process_only(project_tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_app_shares_one_tracing_service_across_all_real_agents(
+    project_tmp_path: Path,
+) -> None:
+    tracing, _ = enabled_tracing()
+
+    app = create_app(
+        settings=settings_for(project_tmp_path),
+        ollama_health=ReadyOllama(),
+        tracing_service=tracing,
+    )
+
+    assert app.state.tracing_service is tracing
+    assert isinstance(app.state.ingredient_extractor, OllamaIngredientExtractor)
+    assert app.state.ingredient_extractor._tracing is tracing
+    assert isinstance(
+        app.state.recipe_options_dependencies.master_chef,
+        OllamaMasterChef,
+    )
+    assert app.state.recipe_options_dependencies.master_chef._tracing is tracing
+    assert isinstance(
+        app.state.recipe_options_dependencies.nutrition_agent,
+        OllamaNutritionAgent,
+    )
+    assert app.state.recipe_options_dependencies.nutrition_agent._tracing is tracing
+    assert isinstance(
+        app.state.complete_recipes_dependencies.agent,
+        OllamaSpecializedRecipeAgent,
+    )
+    assert app.state.complete_recipes_dependencies.agent._tracing is tracing
+
+
+def test_app_preserves_a_falsey_injected_tracing_double(
+    project_tmp_path: Path,
+) -> None:
+    tracing = FalseyTracingService()
+
+    app = create_app(
+        settings=settings_for(project_tmp_path),
+        ollama_health=ReadyOllama(),
+        tracing_service=tracing,
+    )
+
+    assert app.state.tracing_service is tracing
+    assert app.state.ingredient_extractor._tracing is tracing
 
 
 def test_ready_reports_model_inventory(project_tmp_path: Path) -> None:

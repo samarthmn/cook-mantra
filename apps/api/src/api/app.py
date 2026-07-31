@@ -40,6 +40,7 @@ from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
 from services.image_generation import ImageGenerator, OllamaImageGenerator
 from services.ollama_health import OllamaHealthService
+from services.tracing import TracingService
 from services.uploads import ImageUploadValidator
 
 
@@ -101,6 +102,7 @@ def create_app(
     image_generator: ImageGenerator | None = None,
     image_client: httpx.AsyncClient | None = None,
     specialized_recipe_agent: SpecializedRecipeAgent | None = None,
+    tracing_service: TracingService | None = None,
 ) -> FastAPI:
     """Construct an application with replaceable external-service boundaries."""
     resolved_settings = settings or get_settings()
@@ -124,8 +126,14 @@ def create_app(
     )
     model_call_limiter = ModelCallLimiter(resolved_settings.max_concurrent_model_calls)
     upload_validator = ImageUploadValidator(resolved_settings.max_upload_bytes)
+    resolved_tracing_service = (
+        tracing_service
+        if tracing_service is not None
+        else TracingService(resolved_settings)
+    )
     resolved_ingredient_extractor = ingredient_extractor or OllamaIngredientExtractor(
-        settings=resolved_settings
+        settings=resolved_settings,
+        tracing=resolved_tracing_service,
     )
     ingredient_extraction_runner = build_ingredient_extraction_runner(
         ExtractionDependencies(
@@ -138,12 +146,18 @@ def create_app(
     resolved_master_chef = (
         master_chef
         if master_chef is not None
-        else OllamaMasterChef(settings=resolved_settings)
+        else OllamaMasterChef(
+            settings=resolved_settings,
+            tracing=resolved_tracing_service,
+        )
     )
     resolved_nutrition_agent = (
         nutrition_agent
         if nutrition_agent is not None
-        else OllamaNutritionAgent(settings=resolved_settings)
+        else OllamaNutritionAgent(
+            settings=resolved_settings,
+            tracing=resolved_tracing_service,
+        )
     )
     resolved_image_generator = image_generator
     owned_image_generator: OllamaImageGenerator | None = None
@@ -176,7 +190,10 @@ def create_app(
     resolved_specialized_recipe_agent = (
         specialized_recipe_agent
         if specialized_recipe_agent is not None
-        else OllamaSpecializedRecipeAgent(settings=resolved_settings)
+        else OllamaSpecializedRecipeAgent(
+            settings=resolved_settings,
+            tracing=resolved_tracing_service,
+        )
     )
     complete_recipes_dependencies = CompleteRecipeDependencies(
         agent=resolved_specialized_recipe_agent,
@@ -201,6 +218,7 @@ def create_app(
     app.state.job_runner = job_runner
     app.state.model_call_limiter = model_call_limiter
     app.state.upload_validator = upload_validator
+    app.state.tracing_service = resolved_tracing_service
     app.state.ingredient_extractor = resolved_ingredient_extractor
     app.state.ingredient_extraction_runner = ingredient_extraction_runner
     app.state.image_generator = resolved_image_generator
