@@ -8,7 +8,7 @@ from tests.tracing_support import enabled_tracing
 
 from agents import specialized_recipe as specialized_recipe_module
 from agents.specialized_recipe import OllamaSpecializedRecipeAgent, RecipeModelOutput
-from core.config import PROJECT_ROOT, Agent, Settings
+from core.config import AGENT_MODELS, PROJECT_ROOT, Agent, Settings
 from core.errors import AppError, ErrorCode
 from core.logging import log_context
 from domain.recipe_options import (
@@ -240,7 +240,9 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
     )
 
     assert result.name == recipe_option().name
-    assert calls == [(Agent.SPECIALIZED_RECIPE, True, 8_192, 16_384, settings)]
+    # GPT-OSS needs a bounded reasoning level: True/unbounded fills the context
+    # window mid-JSON, False returns an empty content channel.
+    assert calls == [(Agent.SPECIALIZED_RECIPE, "low", 8_192, 16_384, settings)]
     assert factory.schema is not None
     assert {
         "option_id",
@@ -299,7 +301,7 @@ async def test_specialized_recipe_passes_only_current_job_trace_metadata() -> No
             "tags": ["cook-mantra", "specialized_recipe"],
             "metadata": {
                 "agent": "specialized_recipe",
-                "model": "gemma4:26b",
+                "model": AGENT_MODELS[Agent.SPECIALIZED_RECIPE].value,
                 "session_id": "session-1",
                 "job_id": "job-1",
             },
@@ -349,11 +351,29 @@ async def test_prompt_contains_every_input_fact_and_complete_recipe_constraint()
     assert "warnings" in prompt_lower
     assert "nutrition_notice" not in prompt_lower
     assert "allergen_notice" not in prompt_lower
-    assert "reproduce every used ingredient name exactly" in prompt_lower
-    assert "only exact confirmed ingredient names" in prompt_lower
-    assert 'marked "available"' in prompt_lower
-    assert 'marked "missing" or "optional"' in prompt_lower
-    assert "do not infer pantry ingredients" in prompt_lower
+    assert (
+        "reproduce every used_ingredients string and the `name` field of every "
+        "missing_ingredients and optional_ingredients entry character-for-character"
+        in prompt_lower
+    )
+    assert (
+        "do not translate, pluralize, abbreviate, re-describe, merge in reason or "
+        "substitution text, or drop any of these names" in prompt_lower
+    )
+    assert "add further ingredients only under new names" in prompt_lower
+    assert "each normalized ingredient name must appear exactly once" in prompt_lower
+    assert (
+        'put the split in quantity, for example "3 tbsp - 2 for tempering, 1 to '
+        'finish"' in prompt_lower
+    )
+    assert (
+        'set availability to "available" only for names in confirmed ingredients json'
+        in prompt_lower
+    )
+    assert (
+        "the server re-derives availability, so never omit an ingredient because of "
+        "availability" in prompt_lower
+    )
 
 
 @pytest.mark.asyncio

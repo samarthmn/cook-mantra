@@ -1,8 +1,9 @@
 """Public API schemas for cooking sessions."""
 
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from domain.recipe_options import RecipePreferences
 from domain.sessions import SessionStage
@@ -45,6 +46,19 @@ INGREDIENT_REVIEW_RESPONSE_EXAMPLES = {
                     "confirmed": True,
                 },
             ],
+            "preferences": {
+                "dietary_preferences": [],
+                "allergens": [],
+                "preferred_cuisines": [],
+                "max_total_minutes": None,
+                "servings": 2,
+                "option_count": 4,
+            },
+            "recipe_options": [],
+            "complete_recipes": {},
+            "recipe_failures": {},
+            "excluded_recipe_names": [],
+            "option_batch_number": 0,
             "warnings": [],
             "created_at": "2026-07-30T12:00:00Z",
             "updated_at": "2026-07-30T12:05:00Z",
@@ -62,6 +76,34 @@ INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES = {
         },
     }
 }
+
+
+type ManualIngredientName = Annotated[
+    str, StringConstraints(min_length=1, max_length=80)
+]
+
+
+class ManualSessionRequest(BaseModel):
+    """Ingredient names typed by a user who has no photo to upload."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [{"ingredients": ["Paneer", "Potato", "Curd", "Onion"]}]
+        },
+    )
+
+    ingredients: list[ManualIngredientName] = Field(min_length=1, max_length=100)
+
+    @field_validator("ingredients")
+    @classmethod
+    def require_visible_names(
+        cls, ingredients: list[ManualIngredientName]
+    ) -> list[ManualIngredientName]:
+        """Reject submissions whose names are blank once trimmed."""
+        if any(not name.strip() for name in ingredients):
+            raise ValueError("Ingredient names must not be blank.")
+        return ingredients
 
 
 class QueuedJobResponse(BaseModel):

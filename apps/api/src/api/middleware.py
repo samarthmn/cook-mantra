@@ -7,11 +7,16 @@ from uuid import uuid4
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from core.errors import ErrorCode, _error_response, _handle_unexpected_error
 from core.http import REQUEST_ID_HEADER
 from core.logging import log_context
+from services.uploads import upload_limit_message
 
 logger = logging.getLogger(__name__)
+
+_MULTIPART_OVERHEAD_BYTES = 64 * 1024
 
 
 def _safe_request_id(candidate: str | None) -> str:
@@ -57,3 +62,91 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
                         ),
                     },
                 )
+
+
+class UnexpectedErrorMiddleware(BaseHTTPMiddleware):
+    """Render unhandled failures inside the outer CORS middleware."""
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        try:
+            return await call_next(request)
+        except Exception as error:
+            return await _handle_unexpected_error(request, error)
+
+
+class RequestBodyLimitMiddleware:
+    """Bound raw session-upload request bodies before multipart parsing."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_upload_bytes: int,
+    ) -> None:
+        self.app = app
+        self._max_upload_bytes = max_upload_bytes
+        self._max_body_bytes = max_upload_bytes + _MULTIPART_OVERHEAD_BYTES
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not self._limits_request(scope):
+            await self.app(scope, receive, send)
+            return
+
+        content_length = _content_length(scope)
+        if content_length is not None and content_length > self._max_body_bytes:
+            await self._reject(scope, receive, send)
+            return
+
+        messages: list[Message] = []
+        received_bytes = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] == "http.disconnect":
+                break
+            received_bytes += len(message.get("body", b""))
+            if received_bytes > self._max_body_bytes:
+                await self._reject(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        async def replay_receive() -> Message:
+            if messages:
+                return messages.pop(0)
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    def _limits_request(scope: Scope) -> bool:
+        return (
+            scope["type"] == "http"
+            and scope.get("method") == "POST"
+            and scope.get("path") == "/api/v1/sessions"
+        )
+
+    async def _reject(self, scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive=receive)
+        response = _error_response(
+            request,
+            code=ErrorCode.INVALID_REQUEST,
+            message=upload_limit_message(self._max_upload_bytes),
+            status_code=422,
+            retryable=False,
+        )
+        await response(scope, receive, send)
+
+
+def _content_length(scope: Scope) -> int | None:
+    for name, raw_value in scope.get("headers", []):
+        if name.lower() != b"content-length":
+            continue
+        try:
+            value = int(raw_value)
+        except ValueError:
+            return None
+        return value if value >= 0 else None
+    return None

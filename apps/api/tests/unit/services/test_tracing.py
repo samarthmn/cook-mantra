@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from langsmith import traceable, tracing_context
 
-from core.config import PROJECT_ROOT, Agent, Settings
+from core.config import AGENT_MODELS, PROJECT_ROOT, Agent, Model, Settings
 from core.logging import log_context
 from domain.ingredients import ExtractionResult
 from services.tracing import TracingService
@@ -96,7 +96,7 @@ def test_runnable_config_has_only_safe_detached_metadata() -> None:
         "tags": ["cook-mantra", "master_chef"],
         "metadata": {
             "agent": "master_chef",
-            "model": "qwen3.5:27b",
+            "model": AGENT_MODELS[Agent.MASTER_CHEF].value,
             "session_id": "session-1",
             "job_id": "job-1",
             "batch_number": 2,
@@ -114,7 +114,7 @@ def test_runnable_config_has_only_safe_detached_metadata() -> None:
         "tags": ["cook-mantra", "master_chef"],
         "metadata": {
             "agent": "master_chef",
-            "model": "qwen3.5:27b",
+            "model": AGENT_MODELS[Agent.MASTER_CHEF].value,
             "session_id": "session-1",
             "job_id": "job-1",
             "batch_number": 2,
@@ -126,17 +126,11 @@ def test_runnable_config_has_only_safe_detached_metadata() -> None:
 
 @pytest.mark.parametrize(
     ("agent", "model"),
-    [
-        (Agent.INGREDIENT_EXTRACTION, "qwen3.5:9b"),
-        (Agent.MASTER_CHEF, "qwen3.5:27b"),
-        (Agent.NUTRITION, "gpt-oss:20b"),
-        (Agent.IMAGE, "x/z-image-turbo:fp8"),
-        (Agent.SPECIALIZED_RECIPE, "gemma4:26b"),
-    ],
+    [(agent, AGENT_MODELS[agent]) for agent in Agent],
 )
 def test_runnable_config_maps_each_agent_to_its_exact_model(
     agent: Agent,
-    model: str,
+    model: Model,
 ) -> None:
     tracing = enabled_tracing(RecordingClient())
 
@@ -148,7 +142,7 @@ def test_runnable_config_maps_each_agent_to_its_exact_model(
 
     assert config["metadata"] == {
         "agent": agent.value,
-        "model": model,
+        "model": model.value,
         "session_id": "session-1",
         "job_id": "job-1",
     }
@@ -195,7 +189,7 @@ async def test_text_trace_uses_configured_client_project_and_metadata() -> None:
     assert created["tags"] == ["cook-mantra", "master_chef"]
     assert created["extra"]["metadata"] == {
         "agent": "master_chef",
-        "model": "qwen3.5:27b",
+        "model": AGENT_MODELS[Agent.MASTER_CHEF].value,
         "session_id": "session-1",
         "job_id": "job-1",
         "ls_method": "traceable",

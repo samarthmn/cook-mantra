@@ -1,0 +1,13 @@
+{
+  "name": "cook-mantra",
+  "private": true,
+  "packageManager": "pnpm@10.28.1",
+  "scripts": {
+    "web:build": "pnpm --filter @cook-mantra/web build",
+    "web:dev": "pnpm --filter @cook-mantra/web dev",
+    "web:format": "pnpm --filter @cook-mantra/web format",
+    "web:lint": "pnpm --filter @cook-mantra/web lint",
+    "web:test": "pnpm --filter @cook-mantra/web test",
+    "web:typecheck": "pnpm --filter @cook-mantra/web typecheck"
+  }
+}

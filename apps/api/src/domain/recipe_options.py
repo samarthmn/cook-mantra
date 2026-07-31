@@ -1,6 +1,8 @@
 """Domain models for generated recipe suggestions."""
 
+from collections.abc import Sequence
 from enum import StrEnum
+from unicodedata import normalize as normalize_unicode
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -38,6 +40,7 @@ class RecipePreferences(BaseModel):
     """Optional constraints for a batch of recipe suggestions."""
 
     model_config = ConfigDict(
+        extra="forbid",
         json_schema_extra={
             "examples": [
                 {
@@ -49,7 +52,7 @@ class RecipePreferences(BaseModel):
                     "option_count": 4,
                 }
             ]
-        }
+        },
     )
 
     dietary_preferences: list[str] = Field(default_factory=list, max_length=20)
@@ -109,6 +112,161 @@ class RecipeOptionDraft(BaseModel):
     optional_ingredients: list[IngredientRequirement] = Field(default_factory=list)
 
 
+def _ingredient_key(name: str) -> str:
+    """Compare ingredient names after NFC, whitespace, and case normalization.
+
+    This is the same convention the specialized recipe agent uses for its
+    availability boundary. Comparing raw strings instead would reject honest
+    model output over casing ("onion" for a confirmed "Onion"), which is not
+    the hallucination this boundary exists to stop.
+    """
+    return " ".join(normalize_unicode("NFC", name).split()).casefold()
+
+
+def validate_unique_option_ingredient_names(
+    options: Sequence[RecipeOptionDraft],
+) -> None:
+    """Reject repeated normalized names within each recipe option."""
+    for option in options:
+        names = [
+            *option.used_ingredients,
+            *(requirement.name for requirement in option.missing_ingredients),
+            *(requirement.name for requirement in option.optional_ingredients),
+        ]
+        seen_names: set[str] = set()
+        for name in names:
+            normalized_name = _ingredient_key(name)
+            if normalized_name in seen_names:
+                raise ValueError(
+                    "Ingredient names must be unique within a recipe option."
+                )
+            seen_names.add(normalized_name)
+
+
+def validate_confirmed_used_ingredients(
+    options: Sequence[RecipeOptionDraft],
+    confirmed_names: Sequence[str],
+) -> None:
+    """Require every used ingredient to match a confirmed name."""
+    confirmed = {_ingredient_key(name) for name in confirmed_names}
+    if any(
+        _ingredient_key(ingredient) not in confirmed
+        for option in options
+        for ingredient in option.used_ingredients
+    ):
+        raise ValueError("used_ingredients must come from the confirmed ingredients.")
+
+
+def canonicalize_used_ingredients(
+    options: Sequence[RecipeOptionDraft],
+    confirmed_names: Sequence[str],
+) -> list[RecipeOptionDraft]:
+    """Rewrite used ingredients to the user's confirmed spelling.
+
+    The model may echo a confirmed name with different casing or spacing.
+    Anything that fails to match a confirmed name even after normalization is
+    a genuinely unconfirmed ingredient and is rejected.
+    """
+    canonical_by_key = {_ingredient_key(name): name for name in confirmed_names}
+    canonicalized: list[RecipeOptionDraft] = []
+    for option in options:
+        used: list[str] = []
+        for ingredient in option.used_ingredients:
+            canonical = canonical_by_key.get(_ingredient_key(ingredient))
+            if canonical is None:
+                raise ValueError(
+                    "used_ingredients must come from the confirmed ingredients."
+                )
+            used.append(canonical)
+        canonicalized.append(option.model_copy(update={"used_ingredients": used}))
+    return canonicalized
+
+
+UNCONFIRMED_INGREDIENT_REASON = "Not on your confirmed ingredient list."
+
+
+def reconcile_used_ingredients(
+    options: Sequence[RecipeOptionDraft],
+    confirmed_names: Sequence[str],
+) -> list[RecipeOptionDraft]:
+    """Enforce the confirmation boundary without rejecting honest output.
+
+    Used ingredients that match a confirmed name (after normalization) are
+    rewritten to the user's own spelling. Anything else — a paraphrase the
+    model invented or a genuinely new ingredient — is demoted to
+    missing_ingredients rather than shown as available. Rejecting the whole
+    batch here would turn a single spelling variant ("chili" for a confirmed
+    "chilli") into a hard model_output_invalid failure.
+
+    Duplicate normalized names across used, missing, and optional lists are
+    collapsed the same way: used wins, then the first missing entry, then the
+    first optional entry. Models often echo a seasoning in both used and
+    missing; that must not fail structured-output parsing.
+    """
+    canonical_by_key = {_ingredient_key(name): name for name in confirmed_names}
+    reconciled: list[RecipeOptionDraft] = []
+    for option in options:
+        used: list[str] = []
+        used_keys: set[str] = set()
+        already_listed = {
+            _ingredient_key(requirement.name)
+            for requirement in (
+                *option.missing_ingredients,
+                *option.optional_ingredients,
+            )
+        }
+        demoted: list[IngredientRequirement] = []
+        for ingredient in option.used_ingredients:
+            key = _ingredient_key(ingredient)
+            canonical = canonical_by_key.get(key)
+            if canonical is not None:
+                if key not in used_keys:
+                    used_keys.add(key)
+                    used.append(canonical)
+            elif key not in used_keys and key not in already_listed:
+                already_listed.add(key)
+                demoted.append(
+                    IngredientRequirement(
+                        name=ingredient,
+                        reason=UNCONFIRMED_INGREDIENT_REASON,
+                    )
+                )
+        if not used:
+            raise ValueError("A generated option uses no confirmed ingredient at all.")
+
+        claimed_keys = set(used_keys)
+        missing = _unique_requirements(option.missing_ingredients, claimed_keys)
+        missing.extend(demoted)
+        claimed_keys.update(_ingredient_key(item.name) for item in demoted)
+        optional = _unique_requirements(option.optional_ingredients, claimed_keys)
+
+        reconciled.append(
+            option.model_copy(
+                update={
+                    "used_ingredients": used,
+                    "missing_ingredients": missing,
+                    "optional_ingredients": optional,
+                }
+            )
+        )
+    return reconciled
+
+
+def _unique_requirements(
+    requirements: Sequence[IngredientRequirement],
+    claimed_keys: set[str],
+) -> list[IngredientRequirement]:
+    """Keep the first requirement whose normalized name is not yet claimed."""
+    unique: list[IngredientRequirement] = []
+    for requirement in requirements:
+        key = _ingredient_key(requirement.name)
+        if key in claimed_keys:
+            continue
+        claimed_keys.add(key)
+        unique.append(requirement)
+    return unique
+
+
 class RecipeOptionBatch(BaseModel):
     """A bounded non-empty collection of generated recipe drafts."""
 
@@ -122,13 +280,20 @@ class RecipeOptionBatch(BaseModel):
     ) -> list[RecipeOptionDraft]:
         """Reject unusable text at the model-output boundary."""
         for option in options:
-            if any(
-                not value.strip()
-                for value in (option.name, option.summary, option.cuisine)
-            ):
+            if any(not value.strip() for value in (option.name, option.cuisine)):
                 raise ValueError("Generated recipe text must not be blank.")
             if any(not value.strip() for value in option.used_ingredients):
                 raise ValueError("Used ingredients must not contain blank values.")
+            # A blank summary is prose the model skipped, not a broken dish. It
+            # happens most on short ingredient lists, exactly when the user can
+            # least afford to lose the whole batch. Normalize it and let the UI
+            # omit the line rather than fail four usable options over one
+            # missing sentence.
+            if not option.summary.strip():
+                option.summary = ""
+        # Uniqueness is enforced after parsing via reconcile_used_ingredients.
+        # Rejecting duplicates here turns honest model echo (Salt listed in both
+        # used and missing) into a hard model_output_invalid failure.
         return options
 
 

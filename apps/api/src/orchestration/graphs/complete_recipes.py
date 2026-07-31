@@ -17,6 +17,7 @@ from agents.specialized_recipe import (
 )
 from core.config import Settings
 from core.errors import AppError, ErrorCode
+from core.logging import cause_chain
 from domain.recipe_options import RecipeOption, RecipePreferences
 from domain.recipe_service import (
     RecipeGenerationContext,
@@ -255,7 +256,16 @@ async def _generate_one(
         return option.id, detached
     except AppError as error:
         return option.id, _failure_from_app_error(option.id, error)
-    except Exception:
+    except Exception as error:
+        logger.error(
+            "complete_recipe_generation_failed",
+            extra={
+                "event": "complete_recipe_generation_failed",
+                "option_id": option.id,
+                "exception_type": type(error).__name__,
+                "cause_chain": cause_chain(error),
+            },
+        )
         return option.id, _generic_failure(option.id)
 
 
@@ -276,6 +286,15 @@ def _failure_from_app_error(option_id: str, error: AppError) -> RecipeFailure:
             retryable=error.retryable,
         )
     except (TypeError, ValueError):
+        logger.error(
+            "complete_recipe_app_error_invalid",
+            extra={
+                "event": "complete_recipe_app_error_invalid",
+                "option_id": option_id,
+                "exception_type": type(error).__name__,
+                "cause_chain": cause_chain(error),
+            },
+        )
         return _generic_failure(option_id)
 
 
@@ -372,12 +391,23 @@ async def _cancel_and_drain_tasks(
         return await asyncio.gather(*tasks, return_exceptions=True)
 
     settle_task = asyncio.create_task(settle())
+    cancellation: asyncio.CancelledError | None = None
     while not settle_task.done():
         try:
             await asyncio.shield(settle_task)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            cancellation = error
             continue
-    settle_task.result()
+        except BaseException:
+            break
+    try:
+        settle_task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _replace_settling_cancellation(
@@ -393,6 +423,8 @@ async def _replace_settling_cancellation(
         except asyncio.CancelledError as error:
             cancellation = error
             continue
+        except BaseException:
+            break
 
     try:
         stored = replace_task.result()
@@ -412,12 +444,23 @@ async def _drain_rollback(
 ) -> None:
     """Drain exact-attempt rollback despite repeated cancellation."""
     rollback_task = asyncio.create_task(_preserving_rollback(state, dependencies))
+    cancellation: asyncio.CancelledError | None = None
     while not rollback_task.done():
         try:
             await asyncio.shield(rollback_task)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            cancellation = error
             continue
-    rollback_task.result()
+        except BaseException:
+            break
+    try:
+        rollback_task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _preserving_rollback(

@@ -72,6 +72,33 @@ async def test_startup_removes_previous_runtime_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_second_store_cannot_clear_a_live_store_root(tmp_path: Path) -> None:
+    first_store = ArtifactStore(tmp_path, ttl_seconds=60)
+    second_store = ArtifactStore(tmp_path, ttl_seconds=60)
+    await first_store.startup()
+    artifact = await first_store.write(
+        b"live-image",
+        "image/png",
+        ".png",
+        owner_session_id="session-1",
+        kind=ArtifactKind.DISH_PREVIEW,
+    )
+
+    try:
+        with pytest.raises(AppError) as raised:
+            await second_store.startup()
+
+        assert raised.value.code is ErrorCode.ARTIFACT_FAILURE
+        assert artifact.path.read_bytes() == b"live-image"
+        assert await first_store.read_public_preview(artifact.id) == (
+            b"live-image",
+            "image/png",
+        )
+    finally:
+        await first_store.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_write_rejects_a_suffix_outside_the_image_allowlist(
     tmp_path: Path,
 ) -> None:
@@ -802,10 +829,10 @@ async def test_startup_does_not_publish_state_when_closing_previous_descriptor_f
 
     assert old_fd is not None
 
-    def capture_new_descriptor() -> tuple[int, Path]:
+    def capture_new_descriptor() -> tuple[int, Path, int | None]:
         nonlocal new_fd
-        new_fd, root_path = actual_open_and_clear()
-        return new_fd, root_path
+        new_fd, root_path, root_lock_fd = actual_open_and_clear()
+        return new_fd, root_path, root_lock_fd
 
     def fail_old_close(descriptor: int) -> None:
         if descriptor == old_fd:
@@ -943,7 +970,7 @@ async def test_cancelled_startup_waits_for_thread_and_closes_returned_descriptor
     returned_descriptor: list[int] = []
     actual_open_and_clear = store._open_and_clear_root
 
-    def open_then_block() -> tuple[int, Path]:
+    def open_then_block() -> tuple[int, Path, int | None]:
         result = actual_open_and_clear()
         returned_descriptor.append(result[0])
         opened.set()

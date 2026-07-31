@@ -50,8 +50,8 @@ Useful local URLs:
 - OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
 
 The default CORS allowlist accepts only the local browser origins in `.env`.
-Keep `API_HOST=127.0.0.1` unless you intentionally want a wider network
-exposure.
+The host and port come from the `uvicorn` flags above; keep `--host 127.0.0.1`
+unless you intentionally want a wider network exposure.
 
 ## Postman collection
 
@@ -130,7 +130,10 @@ credentials.
   namespace is cleared when a new API process starts.
 - `MAX_CONCURRENT_JOBS`, `MAX_QUEUED_JOBS`, and
   `MAX_CONCURRENT_MODEL_CALLS` bound local work. A full queue returns
-  `503 service_busy` instead of growing without limit.
+  `503 service_busy` instead of growing without limit. These and the other
+  tuning values default from constants in `apps/api/src/core/config.py`, so
+  `example.env` does not list them; set the environment variable only to
+  override a default on a specific machine.
 - Logs are structured JSON with request, session, and job correlation IDs.
   Secret-like fields, binary image data, and base64-looking values are
   redacted.
@@ -151,8 +154,8 @@ credentials.
 - **Image generation unsupported:** the installed Ollama build or image model
   does not support the expected generation response. Update Ollama, verify
   `x/z-image-turbo:fp8`, and run the focused image live test.
-- **Port already in use:** stop the conflicting process or change `API_PORT` and
-  the `--port` value together.
+- **Port already in use:** stop the conflicting process or pass a different
+  `--port` to `uvicorn`.
 - **`service_busy`:** wait for active jobs to finish or carefully adjust the
   bounded job settings for the machine's available memory.
 - **Live test skipped:** set the exact opt-in flag shown above. LangSmith's

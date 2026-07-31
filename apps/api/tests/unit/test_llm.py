@@ -2,6 +2,7 @@ import pytest
 from langchain_ollama import ChatOllama
 
 from core import Agent, Model, Settings
+from core.config import AGENT_MODELS
 from services import get_model
 
 
@@ -27,7 +28,7 @@ def test_model_targets_the_configured_ollama_host(settings: Settings) -> None:
     model = get_model(Agent.MASTER_CHEF, settings=settings)
 
     assert isinstance(model, ChatOllama)
-    assert model.model == "qwen3.5:27b"
+    assert model.model == AGENT_MODELS[Agent.MASTER_CHEF].value
     assert model.base_url == "http://192.168.29.16:11434"
 
 
@@ -46,14 +47,14 @@ def test_each_agent_uses_its_configured_model(settings: Settings) -> None:
     extraction = get_model(Agent.INGREDIENT_EXTRACTION, settings=settings)
     chef = get_model(Agent.MASTER_CHEF, settings=settings)
 
-    assert extraction.model == "qwen3.5:9b"
-    assert chef.model == "qwen3.5:27b"
+    assert extraction.model == AGENT_MODELS[Agent.INGREDIENT_EXTRACTION].value
+    assert chef.model == AGENT_MODELS[Agent.MASTER_CHEF].value
 
 
 def test_explicit_model_overrides_the_agent_default(settings: Settings) -> None:
     model = get_model(Agent.MASTER_CHEF, model=Model.GEMMA_LARGE, settings=settings)
 
-    assert model.model == "gemma4:26b"
+    assert model.model == Model.GEMMA_LARGE.value
 
 
 def test_thinking_can_be_disabled(settings: Settings) -> None:
@@ -72,6 +73,25 @@ def test_reasoning_effort_levels_are_forwarded(settings: Settings) -> None:
     model = get_model(Agent.NUTRITION, thinking="low", settings=settings)
 
     assert model.reasoning == "low"
+
+
+def test_agents_never_fall_back_to_the_ollama_default_context_window(
+    settings: Settings,
+) -> None:
+    """Ollama's 4k default truncates structured output mid-JSON."""
+    for agent in (Agent.INGREDIENT_EXTRACTION, Agent.MASTER_CHEF, Agent.NUTRITION):
+        model = get_model(agent, settings=settings)
+
+        assert model.num_ctx == settings.llm_num_ctx
+        assert model.num_ctx is not None and model.num_ctx > 4_096
+
+
+def test_explicit_context_window_overrides_the_configured_default(
+    settings: Settings,
+) -> None:
+    model = get_model(Agent.MASTER_CHEF, num_ctx=32_768, settings=settings)
+
+    assert model.num_ctx == 32_768
 
 
 def test_generation_budgets_can_be_configured(settings: Settings) -> None:

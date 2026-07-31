@@ -12,6 +12,8 @@ from domain.recipe_options import (
     RecipeOption,
     RecipeOptionDraft,
     RecipePreferences,
+    validate_confirmed_used_ingredients,
+    validate_unique_option_ingredient_names,
 )
 from domain.session_service import confirmed_ingredient_names, require_stage
 from domain.sessions import Session, SessionStage
@@ -57,6 +59,32 @@ def validate_option_names(
                 retryable=True,
             )
         seen_names.add(normalized_name)
+
+
+def validate_option_ingredients(
+    drafts: Sequence[RecipeOptionDraft],
+    confirmed_names: Sequence[str],
+) -> None:
+    """Enforce ingredient-name consistency and the confirmation boundary."""
+    try:
+        validate_unique_option_ingredient_names(drafts)
+    except ValueError:
+        raise AppError(
+            code=ErrorCode.MODEL_OUTPUT_INVALID,
+            message="Generated options contain a repeated ingredient name.",
+            status_code=502,
+            retryable=True,
+        ) from None
+
+    try:
+        validate_confirmed_used_ingredients(drafts, confirmed_names)
+    except ValueError:
+        raise AppError(
+            code=ErrorCode.MODEL_OUTPUT_INVALID,
+            message="Generated options contain an unconfirmed used ingredient.",
+            status_code=502,
+            retryable=True,
+        ) from None
 
 
 def begin_option_generation(
@@ -119,6 +147,7 @@ def commit_option_batch(
             session_id=session.id,
         )
     validate_option_names(drafts, session.excluded_recipe_names)
+    validate_option_ingredients(drafts, confirmed_ingredient_names(session))
 
     new_options = [
         RecipeOption(

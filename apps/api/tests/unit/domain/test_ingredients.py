@@ -6,6 +6,7 @@ from domain.ingredients import (
     ExtractionResult,
     Ingredient,
     IngredientSource,
+    assemble_manual_review_ingredients,
     assemble_review_ingredients,
 )
 from schemas.ingredients import IngredientResponse
@@ -69,3 +70,43 @@ def test_ingredient_source_controls_whether_confidence_is_allowed(
 def test_detected_ingredients_reject_whitespace_only_names() -> None:
     with pytest.raises(ValidationError):
         DetectedIngredient(name="   ", confidence=0.9)
+
+
+def test_manual_names_become_confirmed_user_added_ingredients() -> None:
+    ingredients = assemble_manual_review_ingredients([" Paneer ", "Soya chunks"])
+    named = [item for item in ingredients if item.confirmed]
+
+    assert [(item.name, item.source) for item in named] == [
+        ("Paneer", IngredientSource.USER_ADDED),
+        ("Soya chunks", IngredientSource.USER_ADDED),
+    ]
+    assert all(item.confidence is None for item in named)
+
+
+def test_manual_names_are_deduplicated_case_insensitively() -> None:
+    ingredients = assemble_manual_review_ingredients(["Potato", " potato "])
+
+    assert [item.name for item in ingredients if item.confirmed] == ["Potato"]
+
+
+def test_manual_pantry_name_stays_a_confirmed_pantry_suggestion() -> None:
+    ingredients = assemble_manual_review_ingredients([" onion "])
+    onions = [item for item in ingredients if item.name.casefold() == "onion"]
+
+    assert len(onions) == 1
+    assert onions[0].source is IngredientSource.PANTRY_SUGGESTION
+    assert onions[0].confirmed is True
+    assert onions[0].name == "Onion"
+
+
+def test_manual_entry_offers_the_remaining_pantry_suggestions() -> None:
+    ingredients = assemble_manual_review_ingredients(["Paneer"])
+    salt = next(item for item in ingredients if item.name == "Salt")
+
+    assert salt.source is IngredientSource.PANTRY_SUGGESTION
+    assert salt.confirmed is False
+
+
+def test_manual_entry_rejects_blank_names() -> None:
+    with pytest.raises(ValueError):
+        assemble_manual_review_ingredients(["   "])

@@ -33,7 +33,7 @@ class ImageUploadValidator:
     async def read(self, upload: UploadFile) -> ValidatedImage:
         data = await upload.read(self.max_bytes + 1)
         if len(data) > self.max_bytes:
-            raise _invalid_upload("Image uploads must be no larger than 10 MiB.")
+            raise _invalid_upload(upload_limit_message(self.max_bytes))
 
         try:
             with Image.open(BytesIO(data)) as image:
@@ -48,6 +48,15 @@ class ImageUploadValidator:
             raise _invalid_upload("Image format must be JPEG, PNG, or WebP.") from None
 
         return ValidatedImage(data=data, media_type=media_type, suffix=suffix)
+
+
+def upload_limit_message(max_bytes: int) -> str:
+    """Describe the configured byte limit without hard-coded units."""
+    if max_bytes % (1024 * 1024) == 0:
+        limit = f"{max_bytes // (1024 * 1024)} MiB"
+    else:
+        limit = f"{max_bytes} bytes"
+    return f"Image uploads must be no larger than {limit}."
 
 
 def _invalid_upload(message: str) -> AppError:

@@ -15,7 +15,11 @@ from agents.specialized_recipe import (
     OllamaSpecializedRecipeAgent,
     SpecializedRecipeAgent,
 )
-from api.middleware import RequestIdMiddleware
+from api.middleware import (
+    RequestBodyLimitMiddleware,
+    RequestIdMiddleware,
+    UnexpectedErrorMiddleware,
+)
 from api.routes import artifacts, health, jobs, recipe_options, recipes, sessions
 from core.config import Model, Settings, get_settings
 from core.errors import install_error_handlers
@@ -165,7 +169,7 @@ def create_app(
     if dish_previews is None:
         if resolved_image_generator is None:
             owned_image_generator = OllamaImageGenerator(
-                base_url=str(resolved_settings.ollama_base_url),
+                base_url=str(resolved_settings.image_base_url()),
                 model=Model.Z_IMAGE,
                 client=image_client,
                 timeout_seconds=resolved_settings.image_timeout_seconds,
@@ -184,6 +188,7 @@ def create_app(
         dish_previews=resolved_dish_previews,
         session_store=session_store,
         model_call_limiter=model_call_limiter,
+        dish_previews_enabled=resolved_settings.dish_previews_enabled,
     )
     recipe_options_runner = build_recipe_options_runner(
         recipe_options_dependencies,
@@ -206,6 +211,7 @@ def create_app(
     )
     resolved_ollama_health = ollama_health or OllamaHealthService(
         str(resolved_settings.ollama_base_url),
+        image_base_url=str(resolved_settings.image_base_url()),
         timeout_seconds=resolved_settings.llm_timeout_seconds,
     )
 
@@ -240,7 +246,12 @@ def create_app(
     app.state.ollama_health = resolved_ollama_health
 
     install_error_handlers(app)
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_upload_bytes=resolved_settings.max_upload_bytes,
+    )
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(UnexpectedErrorMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=resolved_settings.cors_origins,

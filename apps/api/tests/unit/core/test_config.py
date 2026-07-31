@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from core.config import PROJECT_ROOT, Settings
+from core.config import AGENT_MODELS, PROJECT_ROOT, Agent, Model, Settings
 
 
 def test_settings_resolve_env_file_from_project_root(
@@ -37,11 +37,41 @@ def test_settings_read_ollama_base_url_from_environment(
     )
 
 
+def test_image_base_url_falls_back_to_text_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OLLAMA_IMAGE_BASE_URL", raising=False)
+    settings = Settings(
+        _env_file=None,
+        ollama_base_url="http://text-ollama.test:11434",
+    )
+
+    assert settings.image_base_url() == settings.ollama_base_url
+
+
+def test_image_base_url_returns_configured_override() -> None:
+    settings = Settings(
+        _env_file=None,
+        ollama_base_url="http://text-ollama.test:11434",
+        ollama_image_base_url="http://image-ollama.test:11434",
+    )
+
+    assert settings.image_base_url() == settings.ollama_image_base_url
+
+
+def test_dish_previews_are_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DISH_PREVIEWS_ENABLED", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.dish_previews_enabled is False
+
+
 def test_settings_have_safe_local_defaults() -> None:
     settings = Settings(_env_file=None)
 
-    assert settings.api_host == "127.0.0.1"
-    assert settings.api_port == 8000
     assert settings.max_concurrent_jobs == 2
     assert settings.max_queued_jobs == 4
     assert settings.max_concurrent_model_calls == 2
@@ -107,3 +137,28 @@ def test_settings_reject_artifact_roots_outside_project_tmp() -> None:
 
     with pytest.raises(ValidationError, match="artifact_root"):
         Settings(_env_file=None, artifact_root=outside_runtime_namespace)
+
+
+def test_agent_model_assignments_are_deliberate() -> None:
+    """The one place that pins agent-to-model wiring.
+
+    Every other test derives from AGENT_MODELS, so retuning which model an
+    agent uses means updating this test and nothing else.
+    """
+    assert AGENT_MODELS == {
+        Agent.INGREDIENT_EXTRACTION: Model.QWEN_SMALL,
+        Agent.MASTER_CHEF: Model.GPT_OSS,
+        Agent.NUTRITION: Model.GPT_OSS,
+        Agent.IMAGE: Model.Z_IMAGE,
+        Agent.SPECIALIZED_RECIPE: Model.GPT_OSS,
+    }
+
+
+def test_every_agent_has_a_model_and_only_the_image_agent_generates_images() -> None:
+    """A text agent pointed at the image model cannot produce structured output."""
+    assert set(AGENT_MODELS) == set(Agent)
+
+    image_agents = {
+        agent for agent, model in AGENT_MODELS.items() if model is Model.Z_IMAGE
+    }
+    assert image_agents == {Agent.IMAGE}

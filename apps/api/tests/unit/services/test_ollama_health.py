@@ -1,16 +1,12 @@
 import httpx
 import pytest
 
+from core.config import Model
 from core.errors import AppError, ErrorCode
 from services.ollama_health import OllamaHealthService
 
-ALL_REQUIRED_MODELS = [
-    "qwen3.5:27b",
-    "qwen3.5:9b",
-    "gemma4:26b",
-    "gpt-oss:20b",
-    "x/z-image-turbo:fp8",
-]
+ALL_REQUIRED_MODELS = [model.value for model in Model]
+TEXT_MODELS = [model.value for model in Model if model is not Model.Z_IMAGE]
 
 
 def model_tag(name: str) -> dict[str, object]:
@@ -34,7 +30,7 @@ def model_tag(name: str) -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_inspect_uses_tags_without_pulling_and_compares_every_model() -> None:
     requests: list[tuple[str, str]] = []
-    installed = ["qwen3.5:9b", "gpt-oss:20b", "custom:latest"]
+    installed = [Model.QWEN_SMALL.value, Model.GPT_OSS.value, "custom:latest"]
 
     async def respond(request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
@@ -55,11 +51,17 @@ async def test_inspect_uses_tags_without_pulling_and_compares_every_model() -> N
     assert result == {
         "reachable": True,
         "available_models": installed,
-        "missing": [
-            "qwen3.5:27b",
-            "gemma4:26b",
-            "x/z-image-turbo:fp8",
-        ],
+        "missing": list(
+            dict.fromkeys(
+                model.value
+                for model in (
+                    Model.QWEN_LARGE,
+                    Model.GEMMA_LARGE,
+                    Model.Z_IMAGE,
+                )
+                if model.value not in installed
+            )
+        ),
     }
 
 
@@ -86,6 +88,121 @@ async def test_inspect_returns_the_complete_available_inventory() -> None:
         "available_models": list(reversed(ALL_REQUIRED_MODELS)),
         "missing": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_inspect_checks_each_model_on_its_designated_host() -> None:
+    requests: list[str] = []
+    text_model_on_wrong_host = TEXT_MODELS[0]
+    text_inventory = [
+        *TEXT_MODELS[1:],
+        "shared:latest",
+        "text-extra:latest",
+    ]
+    image_inventory = [
+        "shared:latest",
+        text_model_on_wrong_host,
+        Model.Z_IMAGE.value,
+        "image-extra:latest",
+    ]
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        inventory = (
+            text_inventory
+            if request.url.host == "text-ollama.test"
+            else image_inventory
+        )
+        return httpx.Response(
+            200,
+            json={"models": [model_tag(name) for name in inventory]},
+        )
+
+    service = OllamaHealthService(
+        "http://text-ollama.test:11434",
+        image_base_url="http://image-ollama.test:11434",
+        timeout_seconds=1,
+        transport=httpx.MockTransport(respond),
+    )
+
+    result = await service.inspect()
+
+    assert requests == [
+        "http://text-ollama.test:11434/api/tags",
+        "http://image-ollama.test:11434/api/tags",
+    ]
+    assert result == {
+        "reachable": True,
+        "available_models": [
+            *text_inventory,
+            text_model_on_wrong_host,
+            Model.Z_IMAGE.value,
+            "image-extra:latest",
+        ],
+        "missing": [text_model_on_wrong_host],
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_queries_equal_hosts_only_once() -> None:
+    requests: list[str] = []
+    installed = list(dict.fromkeys([*TEXT_MODELS, Model.Z_IMAGE.value]))
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"models": [model_tag(name) for name in installed]},
+        )
+
+    service = OllamaHealthService(
+        "http://ollama.local:11434",
+        image_base_url="http://ollama.local:11434/",
+        timeout_seconds=1,
+        transport=httpx.MockTransport(respond),
+    )
+
+    result = await service.inspect()
+
+    assert requests == ["http://ollama.local:11434/api/tags"]
+    assert result == {
+        "reachable": True,
+        "available_models": installed,
+        "missing": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_unreachable_image_host_is_reported_as_unavailable() -> None:
+    requests: list[str] = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.host == "image-ollama.test":
+            raise httpx.ConnectError("image host refused connection", request=request)
+        return httpx.Response(
+            200,
+            json={"models": [model_tag(name) for name in TEXT_MODELS]},
+        )
+
+    service = OllamaHealthService(
+        "http://text-ollama.test:11434",
+        image_base_url="http://image-ollama.test:11434",
+        timeout_seconds=1,
+        transport=httpx.MockTransport(respond),
+    )
+
+    with pytest.raises(AppError) as raised:
+        await service.inspect()
+
+    assert requests == [
+        "http://text-ollama.test:11434/api/tags",
+        "http://image-ollama.test:11434/api/tags",
+    ]
+    assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
+    assert raised.value.message == "Ollama is unavailable."
+    assert raised.value.status_code == 503
+    assert raised.value.retryable is True
 
 
 @pytest.mark.asyncio

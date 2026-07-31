@@ -121,6 +121,37 @@ def assemble_review_ingredients(result: ExtractionResult) -> list[Ingredient]:
     return ingredients
 
 
+def assemble_manual_review_ingredients(names: list[str]) -> list[Ingredient]:
+    """Build a review list from names typed by a user instead of extracted."""
+    pantry_by_name = {name.casefold(): name for name in PANTRY_SUGGESTIONS}
+    confirmed_names: dict[str, str] = {}
+    for name in names:
+        normalized_name = _normalize_ingredient_name(name)
+        key = normalized_name.casefold()
+        if key in confirmed_names:
+            continue
+        confirmed_names[key] = pantry_by_name.get(key, normalized_name)
+
+    ingredients = [
+        Ingredient(
+            name=name,
+            source=(
+                IngredientSource.PANTRY_SUGGESTION
+                if key in pantry_by_name
+                else IngredientSource.USER_ADDED
+            ),
+            confirmed=True,
+        )
+        for key, name in confirmed_names.items()
+    ]
+    ingredients.extend(
+        Ingredient(name=name, source=IngredientSource.PANTRY_SUGGESTION)
+        for key, name in pantry_by_name.items()
+        if key not in confirmed_names
+    )
+    return ingredients
+
+
 def apply_ingredient_review(
     existing: list[Ingredient], drafts: list[IngredientDraft]
 ) -> list[Ingredient]:

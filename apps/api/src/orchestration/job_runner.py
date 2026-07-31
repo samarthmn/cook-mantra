@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from time import perf_counter
 
 from core.errors import AppError, ErrorCode
-from core.logging import log_context
+from core.logging import cause_chain, log_context
 from domain.jobs import Job, JobError, JobOperation
 from repositories.job_store import JobStore
 
@@ -124,6 +124,18 @@ class JobRunner:
                     error_code = None
                 except AppError as error:
                     error_code = error.code.value
+                    # The job payload only carries the sanitised message, so
+                    # keep the underlying cause visible in the local logs.
+                    logger.error(
+                        "job_app_failure",
+                        extra={
+                            "event": "job_app_failure",
+                            "operation": operation.value,
+                            "error_code": error.code.value,
+                            "error_message": error.message,
+                            "cause_chain": cause_chain(error),
+                        },
+                    )
                     await self._record_failure(
                         job_id,
                         JobError(
@@ -141,6 +153,7 @@ class JobRunner:
                             "operation": operation.value,
                             "error_code": ErrorCode.INTERNAL_ERROR.value,
                             "exception_type": type(error).__name__,
+                            "cause_chain": cause_chain(error),
                         },
                     )
                     await self._record_failure(

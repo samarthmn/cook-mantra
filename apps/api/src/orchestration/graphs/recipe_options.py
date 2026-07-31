@@ -16,6 +16,7 @@ from agents.master_chef import MasterChef, OllamaMasterChef
 from agents.nutrition import NutritionAgent, OllamaNutritionAgent
 from core.config import Model, Settings
 from core.errors import AppError, ErrorCode
+from core.logging import cause_chain
 from domain.images import DishPreview
 from domain.recipe_option_service import (
     OptionGenerationContext,
@@ -44,6 +45,8 @@ type ProgressReporter = Callable[[int], Awaitable[None]]
 logger = logging.getLogger(__name__)
 
 _MAX_GENERATION_ATTEMPTS = 3
+_DRAFT_PROGRESS_START = 15
+_DRAFT_PROGRESS_INCREMENT = 10
 _ENRICHMENT_PROGRESS_START = 45
 _ENRICHMENT_PROGRESS_END = 80
 _NUTRITION_WARNING = "Nutrition estimate unavailable."
@@ -108,6 +111,7 @@ class RecipeOptionDependencies:
     session_store: SessionStore
     model_call_limiter: ModelCallLimiter
     progress: ProgressReporter = _ignore_progress
+    dish_previews_enabled: bool = True
 
 
 class _ProgressReportingFailure(Exception):
@@ -164,6 +168,9 @@ def build_recipe_options_graph(
     async def generate_drafts(
         state: RecipeOptionState,
     ) -> dict[str, object]:
+        await dependencies.progress(
+            _DRAFT_PROGRESS_START + (state["attempt_count"] * _DRAFT_PROGRESS_INCREMENT)
+        )
         with trace_batch_number(state["session"].option_batch_number + 1):
             drafts = await dependencies.model_call_limiter.run(
                 lambda: dependencies.master_chef.generate(
@@ -192,6 +199,14 @@ def build_recipe_options_graph(
             expanded_exclusions = set(state["exclusions"])
             expanded_exclusions.update(
                 normalize_recipe_name(option.name) for option in state["drafts"]
+            )
+            logger.info(
+                "recipe_option_duplicate_retry",
+                extra={
+                    "event": "recipe_option_duplicate_retry",
+                    "attempt_number": state["attempt_count"],
+                    "option_names": [option.name for option in state["drafts"]],
+                },
             )
             return {
                 "exclusions": expanded_exclusions,
@@ -253,61 +268,104 @@ def build_recipe_options_graph(
 
             return call
 
-        calls: list[Callable[[], Awaitable[NutritionEstimate | DishPreview]]] = []
-        for index, option in enumerate(state["drafts"]):
-            calls.extend(
-                (
-                    nutrition_call(option),
-                    preview_call(index, option),
-                )
-            )
-        with trace_batch_number(state["session"].option_batch_number + 1):
-            tasks = [
-                asyncio.create_task(dependencies.model_call_limiter.run(call))
-                for call in calls
+        nutrition_calls = [nutrition_call(option) for option in state["drafts"]]
+        preview_calls = (
+            [
+                preview_call(index, option)
+                for index, option in enumerate(state["drafts"])
             ]
+            if dependencies.dish_previews_enabled
+            else []
+        )
+        with trace_batch_number(state["session"].option_batch_number + 1):
+            nutrition_tasks: list[asyncio.Task[NutritionEstimate]] = []
+            preview_tasks: list[asyncio.Task[DishPreview]] = []
+            if dependencies.dish_previews_enabled:
+                for nutrition_operation, preview_operation in zip(
+                    nutrition_calls,
+                    preview_calls,
+                    strict=True,
+                ):
+                    nutrition_tasks.append(
+                        asyncio.create_task(
+                            dependencies.model_call_limiter.run(nutrition_operation)
+                        )
+                    )
+                    preview_tasks.append(
+                        asyncio.create_task(
+                            dependencies.model_call_limiter.run(preview_operation)
+                        )
+                    )
+            else:
+                nutrition_tasks = [
+                    asyncio.create_task(dependencies.model_call_limiter.run(call))
+                    for call in nutrition_calls
+                ]
         try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            nutrition_results, preview_results = await _settle_enrichment_tasks(
+                nutrition_tasks,
+                preview_tasks,
+            )
         except asyncio.CancelledError as cancellation:
-            for task in tasks:
+            for task in [*nutrition_tasks, *preview_tasks]:
                 task.cancel()
-            results = await _drain_enrichment_tasks(tasks)
+            nutrition_results, preview_results = await _drain_enrichment_tasks(
+                nutrition_tasks,
+                preview_tasks,
+            )
             await _drain_preview_cleanup(
-                _successful_preview_ids(results, len(state["drafts"])),
+                _successful_preview_ids(preview_results),
                 dependencies,
             )
             raise cancellation
 
-        attempt_preview_ids = _successful_preview_ids(
-            results,
-            len(state["drafts"]),
-        )
+        attempt_preview_ids = _successful_preview_ids(preview_results)
         nutrition: list[NutritionEstimate | None] = []
         nutrition_warnings: list[list[str]] = []
-        previews: list[DishPreview | None] = []
-        preview_warnings: list[list[str]] = []
         try:
-            for index in range(len(state["drafts"])):
-                nutrition_result = results[index * 2]
-                preview_result = results[index * 2 + 1]
+            for index, (option, nutrition_result) in enumerate(
+                zip(state["drafts"], nutrition_results, strict=True)
+            ):
                 if isinstance(nutrition_result, asyncio.CancelledError):
                     raise nutrition_result
-                if isinstance(preview_result, asyncio.CancelledError):
-                    raise preview_result
-                if isinstance(preview_result, _ProgressReportingFailure):
-                    raise preview_result.error
                 if isinstance(nutrition_result, Exception):
+                    _log_enrichment_failure(
+                        enrichment_type="nutrition",
+                        option_index=index,
+                        option=option,
+                        error=nutrition_result,
+                    )
                     nutrition.append(None)
                     nutrition_warnings.append([_NUTRITION_WARNING])
                 else:
                     nutrition.append(cast(NutritionEstimate, nutrition_result))
                     nutrition_warnings.append([])
-                if isinstance(preview_result, Exception):
-                    previews.append(None)
-                    preview_warnings.append([_PREVIEW_WARNING])
-                else:
-                    previews.append(cast(DishPreview, preview_result))
-                    preview_warnings.append([])
+
+            previews: list[DishPreview | None] = []
+            preview_warnings: list[list[str]] = []
+            if dependencies.dish_previews_enabled:
+                for index, (option, preview_result) in enumerate(
+                    zip(state["drafts"], preview_results, strict=True)
+                ):
+                    if isinstance(preview_result, asyncio.CancelledError):
+                        raise preview_result
+                    if isinstance(preview_result, _ProgressReportingFailure):
+                        raise preview_result.error
+                    if isinstance(preview_result, Exception):
+                        _log_enrichment_failure(
+                            enrichment_type="preview",
+                            option_index=index,
+                            option=option,
+                            error=preview_result,
+                        )
+                        previews.append(None)
+                        preview_warnings.append([_PREVIEW_WARNING])
+                    else:
+                        previews.append(cast(DishPreview, preview_result))
+                        preview_warnings.append([])
+            else:
+                previews = [None for _ in state["drafts"]]
+                preview_warnings = [[] for _ in state["drafts"]]
 
             await dependencies.progress(_ENRICHMENT_PROGRESS_END)
         except BaseException:
@@ -396,6 +454,34 @@ def build_recipe_options_graph(
     return builder.compile()
 
 
+def _log_enrichment_failure(
+    *,
+    enrichment_type: str,
+    option_index: int,
+    option: RecipeOptionDraft,
+    error: Exception,
+) -> None:
+    extra: dict[str, object] = {
+        "event": "recipe_option_enrichment_failed",
+        "enrichment_type": enrichment_type,
+        "option_index": option_index,
+        "option_name": option.name,
+        "exception_type": type(error).__name__,
+        "cause_chain": cause_chain(error),
+    }
+    if isinstance(error, AppError):
+        extra.update(
+            {
+                "error_code": error.code.value,
+                "error_message": error.message,
+                "status_code": error.status_code,
+                "retryable": error.retryable,
+                "error_details": error.details,
+            }
+        )
+    logger.warning("recipe_option_enrichment_failed", extra=extra)
+
+
 def _rollback_on_failure(
     operation: Callable[
         [RecipeOptionState],
@@ -411,18 +497,10 @@ def _rollback_on_failure(
         except _CommitSucceededDuringCancellation as committed:
             raise committed.cancellation from None
         except asyncio.CancelledError as cancellation:
-            await _drain_preview_cleanup(
-                state.get("attempt_preview_ids", []),
-                dependencies,
-            )
-            await _drain_rollback(state, dependencies)
+            await _drain_failure_cleanup(state, dependencies)
             raise cancellation
         except Exception:
-            await _drain_preview_cleanup(
-                state.get("attempt_preview_ids", []),
-                dependencies,
-            )
-            await _drain_rollback(state, dependencies)
+            await _drain_failure_cleanup(state, dependencies)
             raise
 
     return guarded
@@ -441,6 +519,8 @@ async def _replace_settling_cancellation(
         except asyncio.CancelledError as error:
             cancellation = error
             continue
+        except BaseException:
+            break
 
     try:
         stored = replace_task.result()
@@ -452,6 +532,38 @@ async def _replace_settling_cancellation(
     if cancellation is not None:
         raise _CommitSucceededDuringCancellation(cancellation)
     return stored
+
+
+async def _drain_failure_cleanup(
+    state: RecipeOptionState,
+    dependencies: RecipeOptionDependencies,
+) -> None:
+    """Finish preview deletion and rollback before surfacing cancellation."""
+    cancellation: asyncio.CancelledError | None = None
+    cleanup_failure: BaseException | None = None
+    try:
+        await _drain_preview_cleanup(
+            state.get("attempt_preview_ids", []),
+            dependencies,
+        )
+    except asyncio.CancelledError as error:
+        cancellation = error
+    except BaseException as error:
+        cleanup_failure = error
+
+    try:
+        await _drain_rollback(state, dependencies)
+    except asyncio.CancelledError as error:
+        if cancellation is None:
+            cancellation = error
+    except BaseException as error:
+        if cleanup_failure is None:
+            cleanup_failure = error
+
+    if cancellation is not None:
+        raise cancellation from None
+    if cleanup_failure is not None:
+        raise cleanup_failure
 
 
 async def _drain_rollback(
@@ -467,20 +579,47 @@ async def _drain_rollback(
         except asyncio.CancelledError as error:
             cancellation = error
             continue
-    rollback_task.result()
+        except BaseException:
+            break
+    try:
+        rollback_task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
     if cancellation is not None:
-        raise cancellation
+        raise cancellation from None
+
+
+async def _settle_enrichment_tasks(
+    nutrition_tasks: list[asyncio.Task[NutritionEstimate]],
+    preview_tasks: list[asyncio.Task[DishPreview]],
+) -> tuple[
+    list[NutritionEstimate | BaseException],
+    list[DishPreview | BaseException],
+]:
+    nutrition_results = await asyncio.gather(
+        *nutrition_tasks,
+        return_exceptions=True,
+    )
+    preview_results = await asyncio.gather(
+        *preview_tasks,
+        return_exceptions=True,
+    )
+    return nutrition_results, preview_results
 
 
 async def _drain_enrichment_tasks(
-    tasks: list[asyncio.Task[NutritionEstimate | DishPreview]],
-) -> list[NutritionEstimate | DishPreview | BaseException]:
+    nutrition_tasks: list[asyncio.Task[NutritionEstimate]],
+    preview_tasks: list[asyncio.Task[DishPreview]],
+) -> tuple[
+    list[NutritionEstimate | BaseException],
+    list[DishPreview | BaseException],
+]:
     """Settle every fan-out child despite repeated parent cancellation."""
-
-    async def settle() -> list[NutritionEstimate | DishPreview | BaseException]:
-        return await asyncio.gather(*tasks, return_exceptions=True)
-
-    settle_task = asyncio.create_task(settle())
+    settle_task = asyncio.create_task(
+        _settle_enrichment_tasks(nutrition_tasks, preview_tasks)
+    )
     while not settle_task.done():
         try:
             await asyncio.shield(settle_task)
@@ -490,14 +629,9 @@ async def _drain_enrichment_tasks(
 
 
 def _successful_preview_ids(
-    results: list[NutritionEstimate | DishPreview | BaseException],
-    option_count: int,
+    results: list[DishPreview | BaseException],
 ) -> list[str]:
-    return [
-        result.artifact_id
-        for index in range(option_count)
-        if isinstance((result := results[index * 2 + 1]), DishPreview)
-    ]
+    return [result.artifact_id for result in results if isinstance(result, DishPreview)]
 
 
 async def _drain_preview_cleanup(
@@ -511,12 +645,23 @@ async def _drain_preview_cleanup(
     cleanup_task = asyncio.create_task(
         _delete_preview_artifacts(artifact_ids, dependencies)
     )
+    cancellation: asyncio.CancelledError | None = None
     while not cleanup_task.done():
         try:
             await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            cancellation = error
             continue
-    cleanup_task.result()
+        except BaseException:
+            break
+    try:
+        cleanup_task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation from None
 
 
 async def _delete_preview_artifacts(
@@ -571,7 +716,7 @@ class DevelopmentRecipeOptionsRuntime:
 
     def __post_init__(self) -> None:
         image_generator = OllamaImageGenerator(
-            base_url=str(self.settings.ollama_base_url),
+            base_url=str(self.settings.image_base_url()),
             model=Model.Z_IMAGE,
             timeout_seconds=self.settings.image_timeout_seconds,
         )
@@ -636,7 +781,7 @@ def build_real_recipe_option_dependencies(
     model_call_limiter = ModelCallLimiter(settings.max_concurrent_model_calls)
     tracing = TracingService(settings)
     resolved_image_generator = image_generator or OllamaImageGenerator(
-        base_url=str(settings.ollama_base_url),
+        base_url=str(settings.image_base_url()),
         model=Model.Z_IMAGE,
         timeout_seconds=settings.image_timeout_seconds,
     )
@@ -654,6 +799,7 @@ def build_real_recipe_option_dependencies(
         ),
         session_store=SessionStore(ttl_seconds=settings.session_ttl_seconds),
         model_call_limiter=model_call_limiter,
+        dish_previews_enabled=settings.dish_previews_enabled,
     )
 
 

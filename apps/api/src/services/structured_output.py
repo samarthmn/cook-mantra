@@ -51,5 +51,16 @@ async def invoke_structured[ResultT](
                     status_code=504,
                     retryable=True,
                 ) from error
+        except ValueError as error:
+            # A model that yields nothing raises a bare ValueError from the
+            # client rather than an HTTP error. Without this it escapes as a
+            # non-retryable internal_error carrying no usable detail.
+            if attempt + 1 == attempt_limit:
+                raise AppError(
+                    code=ErrorCode.OLLAMA_UNAVAILABLE,
+                    message="The model returned an empty response.",
+                    status_code=503,
+                    retryable=True,
+                ) from error
 
     raise RuntimeError("Structured model invocation completed without a result.")

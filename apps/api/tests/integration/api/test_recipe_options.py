@@ -151,6 +151,36 @@ class FailingJobRunner:
         )
 
 
+class AdvancingFailingJobRunner:
+    """Commit a newer result before surfacing a submission failure."""
+
+    def __init__(self, store: SessionStore, replacement: RecipeOption) -> None:
+        self.store = store
+        self.replacement = replacement
+
+    async def submit(self, operation, session_id, worker):
+        current = await self.store.require(session_id)
+        await self.store.replace(
+            current.model_copy(
+                update={
+                    "stage": SessionStage.OPTIONS_READY,
+                    "option_generation_id": None,
+                    "recipe_options": [self.replacement],
+                    "excluded_recipe_names": {self.replacement.name.casefold()},
+                    "option_batch_number": 1,
+                    "updated_at": current.updated_at,
+                }
+            )
+        )
+        raise AppError(
+            code=ErrorCode.SERVICE_BUSY,
+            message="Queue ownership was not transferred.",
+            status_code=503,
+            retryable=True,
+            session_id=session_id,
+        )
+
+
 class BlockingJobRunner:
     def __init__(self) -> None:
         self.submit_started = asyncio.Event()
@@ -359,6 +389,58 @@ def test_first_option_request_returns_job_and_persists_generating_state(
     assert context.generation_id == saved.option_generation_id
     assert context.previous_stage is SessionStage.INGREDIENTS_CONFIRMED
     assert context.more is False
+
+
+def test_stale_submission_rollback_preserves_original_error_and_newer_result(
+    client: TestClient,
+    confirmed_session: Session,
+) -> None:
+    replacement = stored_option("Newer Tomato Curry")
+    runner = AdvancingFailingJobRunner(
+        client.app.state.session_store,
+        replacement,
+    )
+    client.app.dependency_overrides[get_job_runner] = lambda: runner
+
+    response = client.post(
+        f"/api/v1/sessions/{confirmed_session.id}/recipe-options",
+        json={"option_count": 1},
+    )
+    stored = client.portal.call(
+        client.app.state.session_store.require,
+        confirmed_session.id,
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "service_busy"
+    assert stored.stage is SessionStage.OPTIONS_READY
+    assert stored.recipe_options == [replacement]
+
+
+def test_first_option_request_rejects_unknown_preference_fields(
+    client: TestClient,
+    confirmed_session: Session,
+) -> None:
+    response = client.post(
+        f"/api/v1/sessions/{confirmed_session.id}/recipe-options",
+        json={"optionCount": 1},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_more_option_request_rejects_unknown_preference_fields(
+    client: TestClient,
+    options_session: Session,
+) -> None:
+    response = client.post(
+        f"/api/v1/sessions/{options_session.id}/recipe-options/more",
+        json={"maxTotalMinutes": 20},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
 
 
 def test_more_persists_every_canonical_shown_name_and_uses_more_operation(

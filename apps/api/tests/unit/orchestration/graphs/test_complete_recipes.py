@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,6 +172,37 @@ class FirstCompletesOthersBlockAgent:
         return self.recipes[option.id].model_copy(deep=True)
 
 
+class FatalThenPausingCancellationAgent:
+    def __init__(self, fatal: BaseException) -> None:
+        self.fatal = fatal
+        self.all_started = asyncio.Event()
+        self.release_fatal = asyncio.Event()
+        self.child_cancellation_started = asyncio.Event()
+        self.allow_child_cancellation = asyncio.Event()
+        self.calls: list[str] = []
+        self.cancelled: list[str] = []
+
+    async def generate(
+        self,
+        option: RecipeOption,
+        confirmed_ingredients: list[str],
+        preferences: RecipePreferences,
+    ) -> CompleteRecipe:
+        self.calls.append(option.id)
+        if len(self.calls) == 2:
+            self.all_started.set()
+        if option.id == "option-1":
+            await self.release_fatal.wait()
+            raise self.fatal
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.child_cancellation_started.set()
+            await self.allow_child_cancellation.wait()
+            self.cancelled.append(option.id)
+            raise
+
+
 class FatalAgentSignal(BaseException):
     pass
 
@@ -211,6 +243,28 @@ class PausingRollbackStore(SessionStore):
         return await super().replace(session, before_commit=before_commit)
 
 
+class SuspendedFatalRollbackStore(SessionStore):
+    def __init__(self, fatal: BaseException) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.fatal = fatal
+        self.fail_rollback = False
+        self.rollback_started = asyncio.Event()
+        self.allow_rollback = asyncio.Event()
+
+    async def replace(
+        self,
+        session: Session,
+        *,
+        before_commit: PreCommitHook | None = None,
+    ) -> Session:
+        if self.fail_rollback and session.stage is SessionStage.OPTIONS_READY:
+            self.rollback_started.set()
+            await self.allow_rollback.wait()
+            await super().replace(session, before_commit=before_commit)
+            raise self.fatal
+        return await super().replace(session, before_commit=before_commit)
+
+
 class FailingRecipeCommitStore(SessionStore):
     def __init__(self) -> None:
         super().__init__(ttl_seconds=21_600)
@@ -224,6 +278,32 @@ class FailingRecipeCommitStore(SessionStore):
     ) -> Session:
         if self.fail_recipe_commit and session.stage is SessionStage.RECIPES_READY:
             self.fail_recipe_commit = False
+            raise AppError(
+                code=ErrorCode.INVALID_SESSION_TRANSITION,
+                message="The session changed before this update could be applied.",
+                status_code=409,
+                retryable=True,
+                session_id=session.id,
+            )
+        return await super().replace(session, before_commit=before_commit)
+
+
+class SuspendedFailingRecipeCommitStore(SessionStore):
+    def __init__(self) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.fail_recipe_commit = False
+        self.recipe_commit_started = asyncio.Event()
+        self.allow_recipe_failure = asyncio.Event()
+
+    async def replace(
+        self,
+        session: Session,
+        *,
+        before_commit: PreCommitHook | None = None,
+    ) -> Session:
+        if self.fail_recipe_commit and session.stage is SessionStage.RECIPES_READY:
+            self.recipe_commit_started.set()
+            await self.allow_recipe_failure.wait()
             raise AppError(
                 code=ErrorCode.INVALID_SESSION_TRANSITION,
                 message="The session changed before this update could be applied.",
@@ -536,19 +616,23 @@ async def test_all_failed_restores_exact_ready_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_generic_agent_exception_is_fixed_retryable_failure_without_text() -> (
-    None
-):
+async def test_generic_agent_exception_is_fixed_retryable_failure_without_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     fixture = await make_generation()
     private_text = "secret provider payload token=abc123"
+    provider_error = ConnectionError("Ollama connection failed")
+    agent_error = RuntimeError(private_text)
+    agent_error.__cause__ = provider_error
     agent = ScriptedAgent(
         {
             "option-1": complete_recipe(fixture.selected[0]),
-            "option-2": RuntimeError(private_text),
+            "option-2": agent_error,
         }
     )
 
-    result = await graph_for(fixture, agent).ainvoke(invocation(fixture))
+    with caplog.at_level(logging.ERROR, logger=recipe_graph.__name__):
+        result = await graph_for(fixture, agent).ainvoke(invocation(fixture))
 
     failure = result["recipe_failures"][0]
     assert failure == RecipeFailure(
@@ -559,6 +643,59 @@ async def test_generic_agent_exception_is_fixed_retryable_failure_without_text()
     )
     assert private_text not in failure.message
     assert "RuntimeError" not in failure.message
+    record = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "complete_recipe_generation_failed"
+    )
+    assert record.event == "complete_recipe_generation_failed"
+    assert record.option_id == "option-2"
+    assert record.exception_type == "RuntimeError"
+    assert record.cause_chain == [
+        f"RuntimeError: {private_text}",
+        "ConnectionError: Ollama connection failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_malformed_app_error_is_logged_and_sanitized_to_generic_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fixture = await make_generation()
+    malformed = AppError(
+        code=ErrorCode.MODEL_NOT_FOUND,
+        message="Malformed provider failure.",
+        status_code=503,
+        retryable=False,
+    )
+    malformed.code = "not-an-error-code"  # type: ignore[assignment]
+    agent = ScriptedAgent(
+        {
+            "option-1": complete_recipe(fixture.selected[0]),
+            "option-2": malformed,
+        }
+    )
+
+    with caplog.at_level(logging.ERROR, logger=recipe_graph.__name__):
+        result = await graph_for(fixture, agent).ainvoke(invocation(fixture))
+
+    assert result["recipe_failures"] == [
+        RecipeFailure(
+            option_id="option-2",
+            code=ErrorCode.MODEL_OUTPUT_INVALID,
+            message="The model returned invalid structured output.",
+            retryable=True,
+        )
+    ]
+    record = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "complete_recipe_app_error_invalid"
+    )
+    assert record.event == "complete_recipe_app_error_invalid"
+    assert record.option_id == "option-2"
+    assert record.exception_type == "AppError"
+    assert record.cause_chain == ["AppError: Malformed provider failure."]
 
 
 @pytest.mark.asyncio
@@ -732,7 +869,7 @@ async def test_progress_failure_cancels_and_drains_children_then_rolls_back() ->
     ],
     ids=["normal", "fatal"],
 )
-async def test_primary_failure_survives_repeated_cancellation_during_rollback(
+async def test_cancellation_during_rollback_supersedes_primary_failure_after_drain(
     primary_failure: BaseException,
 ) -> None:
     store = PausingRollbackStore()
@@ -763,9 +900,8 @@ async def test_primary_failure_survives_repeated_cancellation_during_rollback(
         assert not graph_task.done()
 
         store.allow_rollback.set()
-        with pytest.raises(type(primary_failure)) as raised:
+        with pytest.raises(asyncio.CancelledError):
             await graph_task
-        assert raised.value is primary_failure
     finally:
         store.allow_rollback.set()
         if not graph_task.done():
@@ -773,6 +909,46 @@ async def test_primary_failure_survives_repeated_cancellation_during_rollback(
         await asyncio.gather(graph_task, return_exceptions=True)
 
     assert agent.calls == []
+    assert_exact_restore(fixture, await store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_cancellation_wins_when_settled_rollback_task_raises_base_exception() -> (
+    None
+):
+    rollback_failure = FatalAgentSignal()
+    store = SuspendedFatalRollbackStore(rollback_failure)
+    fixture = await make_generation(store=store)
+    agent = ScriptedAgent(
+        {option.id: complete_recipe(option) for option in fixture.selected}
+    )
+
+    async def fail_load_progress(value: int) -> None:
+        assert value == 10
+        raise PrimaryGraphFailure("recipe progress failed")
+
+    store.fail_rollback = True
+    graph_task = asyncio.create_task(
+        graph_for(fixture, agent, progress=fail_load_progress).ainvoke(
+            invocation(fixture)
+        )
+    )
+
+    try:
+        await asyncio.wait_for(store.rollback_started.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        store.allow_rollback.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        store.allow_rollback.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
     assert_exact_restore(fixture, await store.require(fixture.generating.id))
 
 
@@ -898,6 +1074,47 @@ async def test_agent_base_exception_cancels_children_and_is_not_a_failure() -> N
 
 
 @pytest.mark.asyncio
+async def test_cancellation_while_draining_children_supersedes_primary_failure() -> (
+    None
+):
+    fixture = await make_generation()
+    fatal = FatalAgentSignal()
+    agent = FatalThenPausingCancellationAgent(fatal)
+    graph_task = asyncio.create_task(
+        graph_for(
+            fixture,
+            agent,
+            limiter=ModelCallLimiter(max_concurrent_calls=2),
+        ).ainvoke(invocation(fixture))
+    )
+
+    try:
+        await asyncio.wait_for(agent.all_started.wait(), timeout=1)
+        agent.release_fatal.set()
+        await asyncio.wait_for(agent.child_cancellation_started.wait(), timeout=1)
+
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        agent.allow_child_cancellation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        agent.release_fatal.set()
+        agent.allow_child_cancellation.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    assert agent.cancelled == ["option-2"]
+    assert_exact_restore(
+        fixture,
+        await fixture.store.require(fixture.generating.id),
+    )
+
+
+@pytest.mark.asyncio
 async def test_optimistic_recipe_replace_failure_uses_exact_rollback() -> None:
     store = FailingRecipeCommitStore()
     fixture = await make_generation(store=store)
@@ -910,6 +1127,36 @@ async def test_optimistic_recipe_replace_failure_uses_exact_rollback() -> None:
         await graph_for(fixture, agent).ainvoke(invocation(fixture))
 
     assert raised.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert_exact_restore(fixture, await store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_cancellation_wins_when_pending_recipe_replace_later_fails() -> None:
+    store = SuspendedFailingRecipeCommitStore()
+    fixture = await make_generation(store=store)
+    store.fail_recipe_commit = True
+    agent = ScriptedAgent(
+        {option.id: complete_recipe(option) for option in fixture.selected}
+    )
+    graph_task = asyncio.create_task(
+        graph_for(fixture, agent).ainvoke(invocation(fixture))
+    )
+
+    try:
+        await asyncio.wait_for(store.recipe_commit_started.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        store.allow_recipe_failure.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        store.allow_recipe_failure.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
     assert_exact_restore(fixture, await store.require(fixture.generating.id))
 
 

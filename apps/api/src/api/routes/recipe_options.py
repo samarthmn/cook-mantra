@@ -1,6 +1,7 @@
 """Recipe-option generation routes."""
 
 import asyncio
+import logging
 from collections.abc import Awaitable
 from typing import Annotated
 
@@ -25,6 +26,7 @@ from schemas.errors import ErrorResponse
 from schemas.sessions import QueuedJobResponse
 
 router = APIRouter(prefix="/sessions", tags=["recipe options"])
+logger = logging.getLogger(__name__)
 
 _ERROR_RESPONSES = {
     status.HTTP_404_NOT_FOUND: {
@@ -159,6 +161,15 @@ async def _queue_recipe_options(
             )
         )
         raise
+    except BaseException:
+        await _run_cancellation_safe(
+            _restore_unowned_generation(
+                session_store,
+                persisted.id,
+                generation_context,
+            )
+        )
+        raise
     return QueuedJobResponse(session_id=persisted.id, job_id=job.id)
 
 
@@ -167,11 +178,18 @@ async def _restore_unowned_generation(
     session_id: str,
     generation_context: OptionGenerationContext,
 ) -> None:
-    current = await session_store.require(session_id)
-    restored = restore_option_generation(current, generation_context)
-    await session_store.replace(
-        restored.model_copy(update={"updated_at": current.updated_at})
-    )
+    """Restore only the exact attempt that never transferred to a job."""
+    try:
+        current = await session_store.require(session_id)
+        restored = restore_option_generation(current, generation_context)
+        await session_store.replace(
+            restored.model_copy(update={"updated_at": current.updated_at})
+        )
+    except Exception:
+        logger.exception(
+            "Unowned recipe-option generation rollback was not applied",
+            extra={"session_id": session_id},
+        )
 
 
 async def _run_cancellation_safe(operation: Awaitable[None]) -> None:

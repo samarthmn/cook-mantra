@@ -27,6 +27,8 @@ _CONTEXT: ContextVar[dict[str, str] | None] = ContextVar(
     "cook_mantra_log_context",
     default=None,
 )
+_MAX_CAUSE_DEPTH = 5
+_MAX_CAUSE_TEXT = 600
 _SENSITIVE_KEY = re.compile(r"(key|secret|token|image|base64)", re.IGNORECASE)
 _SECRET_TEXT = re.compile(
     r"(?:api(?:[_\s-])?key|secret|token|password|authorization)"
@@ -79,6 +81,24 @@ def log_context(
 def current_log_context() -> dict[str, str]:
     """Return a detached snapshot of the current correlation identifiers."""
     return dict(_CONTEXT.get() or {})
+
+
+def cause_chain(error: BaseException) -> list[str]:
+    """Describe an exception and everything it was raised from.
+
+    The JSON formatter drops tracebacks on purpose, so the chain is flattened
+    into explicit strings that survive formatting.
+    """
+    chain: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and len(chain) < _MAX_CAUSE_DEPTH:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        chain.append(f"{type(current).__name__}: {str(current)[:_MAX_CAUSE_TEXT]}")
+        current = current.__cause__ or current.__context__
+    return chain
 
 
 def configure_logging(level: str) -> None:

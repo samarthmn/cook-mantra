@@ -1,6 +1,8 @@
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from langgraph_api.asyncio import as_asynccontextmanager
@@ -245,6 +247,31 @@ class PausingRollbackStore(SessionStore):
         return await super().replace(session, before_commit=before_commit)
 
 
+class FailingReadyCommitStore(SessionStore):
+    def __init__(self) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.fail_ready_commits = False
+        self.ready_commit_started = asyncio.Event()
+        self.allow_ready_failure = asyncio.Event()
+
+    async def replace(
+        self,
+        session: Session,
+        *,
+        before_commit: PreCommitHook | None = None,
+    ) -> Session:
+        if self.fail_ready_commits and session.stage is SessionStage.OPTIONS_READY:
+            self.ready_commit_started.set()
+            await self.allow_ready_failure.wait()
+            raise AppError(
+                code=ErrorCode.INVALID_SESSION_TRANSITION,
+                message="The session changed before this update could be applied.",
+                status_code=409,
+                retryable=True,
+            )
+        return await super().replace(session, before_commit=before_commit)
+
+
 @dataclass
 class GenerationFixture:
     store: SessionStore
@@ -320,6 +347,7 @@ def graph_for(
     previews: FakeDishPreviewService | None = None,
     limiter: ModelCallLimiter | None = None,
     progress: Callable[[int], Awaitable[None]] | None = None,
+    dish_previews_enabled: bool = True,
 ):
     resolved_previews = previews or FakeDishPreviewService()
     dependencies = RecipeOptionDependencies(
@@ -328,6 +356,7 @@ def graph_for(
         dish_previews=resolved_previews,
         session_store=fixture.store,
         model_call_limiter=limiter or ModelCallLimiter(max_concurrent_calls=2),
+        dish_previews_enabled=dish_previews_enabled,
     )
     if progress is not None:
         dependencies = RecipeOptionDependencies(
@@ -337,6 +366,7 @@ def graph_for(
             session_store=fixture.store,
             model_call_limiter=dependencies.model_call_limiter,
             progress=progress,
+            dish_previews_enabled=dish_previews_enabled,
         )
     return build_recipe_options_graph(dependencies)
 
@@ -402,13 +432,15 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
     assert previews.completed_names == ["Tomato Curry", "Tomato Rice"]
     assert limiter.call_count == 5
     assert progress_updates == sorted(progress_updates)
-    assert progress_updates == [10, 45, 80]
+    assert progress_updates == [10, 15, 45, 80]
     assert observed_before_commit is not None
     assert observed_before_commit.stage is SessionStage.GENERATING_OPTIONS
 
 
 @pytest.mark.asyncio
-async def test_duplicate_retries_expand_feedback_and_stop_after_two_retries() -> None:
+async def test_duplicate_retries_report_progress_and_log_each_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     fixture = await make_generation(
         more=True,
         option_count=2,
@@ -425,12 +457,19 @@ async def test_duplicate_retries_expand_feedback_and_stop_after_two_retries() ->
         ]
     )
     limiter = CountingLimiter(max_concurrent_calls=2)
+    progress_updates: list[int] = []
+
+    async def record_progress(value: int) -> None:
+        progress_updates.append(value)
+
     graph = graph_for(
         fixture,
         chef,
         FakeNutritionAgent(),
         limiter=limiter,
+        progress=record_progress,
     )
+    caplog.set_level(logging.INFO, logger=option_graph.__name__)
 
     with pytest.raises(AppError) as raised:
         await graph.ainvoke(invocation(fixture))
@@ -451,6 +490,17 @@ async def test_duplicate_retries_expand_feedback_and_stop_after_two_retries() ->
         "onion soup",
     }
     assert limiter.call_count == 3
+    assert progress_updates == [10, 15, 25, 35]
+    retry_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "recipe_option_duplicate_retry"
+    ]
+    assert [record.attempt_number for record in retry_records] == [1, 2]
+    assert [record.option_names for record in retry_records] == [
+        [" tomato  CURRY ", "Potato Curry"],
+        ["Onion Soup", " onion   soup "],
+    ]
     assert saved.model_copy(update={"updated_at": fixture.previous.updated_at}) == (
         fixture.previous
     )
@@ -626,6 +676,39 @@ async def test_cancellation_waits_for_safe_rollback_before_propagating() -> None
 
 
 @pytest.mark.asyncio
+async def test_cancellation_wins_when_pending_commit_later_fails() -> None:
+    store = FailingReadyCommitStore()
+    fixture = await make_generation(store=store, option_count=1)
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry")]]),
+        FakeNutritionAgent(),
+    )
+    store.fail_ready_commits = True
+    graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
+
+    try:
+        await asyncio.wait_for(store.ready_commit_started.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        store.allow_ready_failure.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        store.allow_ready_failure.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    saved = await store.require(fixture.generating.id)
+    assert saved.model_copy(update={"updated_at": fixture.previous.updated_at}) == (
+        fixture.previous
+    )
+
+
+@pytest.mark.asyncio
 async def test_bound_runner_uses_the_persisted_attempt_and_reports_progress() -> None:
     fixture = await make_generation(option_count=1)
     progress_updates: list[int] = []
@@ -651,7 +734,7 @@ async def test_bound_runner_uses_the_persisted_attempt_and_reports_progress() ->
     )
 
     assert result["stage"] is SessionStage.OPTIONS_READY
-    assert progress_updates == [10, 45, 80]
+    assert progress_updates == [10, 15, 45, 80]
 
 
 @pytest.mark.asyncio
@@ -689,12 +772,19 @@ async def test_graph_attaches_the_target_batch_to_each_text_model_call() -> None
     assert master_chef.configs[0]["metadata"]["batch_number"] == 1
     assert nutrition.configs[0]["metadata"]["batch_number"] == 1
     assert result["stage"] is SessionStage.OPTIONS_READY
-    assert progress_updates == [10, 45, 80]
+    assert progress_updates == [10, 15, 45, 80]
     assert limiter.call_count == 3
 
 
 @pytest.mark.asyncio
-async def test_development_factory_is_stable_and_uses_one_settings_object() -> None:
+async def test_development_factory_is_stable_and_uses_one_settings_object(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp_path: Path,
+) -> None:
+    # The development runtime takes an exclusive lock on its artifact root, so
+    # point it at a private one. Sharing the default root would make this test
+    # fail whenever a local API process is running.
+    monkeypatch.setenv("ARTIFACT_ROOT", str(project_tmp_path / "development"))
     option_graph.get_development_recipe_options_runtime.cache_clear()
 
     runtime = option_graph.get_development_recipe_options_runtime()

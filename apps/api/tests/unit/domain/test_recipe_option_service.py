@@ -15,6 +15,7 @@ from domain.recipe_option_service import (
 )
 from domain.recipe_options import (
     Difficulty,
+    IngredientRequirement,
     NutritionEstimate,
     RecipeOption,
     RecipeOptionDraft,
@@ -395,6 +396,90 @@ def test_commit_rejects_duplicates_before_changing_the_session() -> None:
     assert generating.stage is SessionStage.GENERATING_OPTIONS
     assert generating.option_batch_number == 1
     assert len(generating.recipe_options) == 1
+
+
+@pytest.mark.parametrize("used_ingredient", ["Paneer", "Coconut milk"])
+def test_commit_rejects_used_ingredients_not_copied_from_confirmed_names(
+    used_ingredient: str,
+) -> None:
+    generating, _, context = begin_option_generation(
+        confirmed_session(),
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+    draft = option_draft("Tomato Curry").model_copy(
+        update={"used_ingredients": [used_ingredient]}
+    )
+
+    with pytest.raises(AppError, match="unconfirmed") as error:
+        commit_option_batch(
+            generating,
+            [draft],
+            [nutrition_estimate()],
+            context,
+        )
+
+    assert error.value.code is ErrorCode.MODEL_OUTPUT_INVALID
+    assert error.value.status_code == 502
+    assert error.value.retryable is True
+    assert generating.recipe_options == []
+
+
+def test_commit_accepts_confirmed_names_despite_model_casing() -> None:
+    """'tomato' for a confirmed 'Tomato' is honest output, not a hallucination."""
+    generating, _, context = begin_option_generation(
+        confirmed_session(),
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+    draft = option_draft("Tomato Curry").model_copy(
+        update={"used_ingredients": ["tomato"]}
+    )
+
+    committed = commit_option_batch(
+        generating,
+        [draft],
+        [nutrition_estimate()],
+        context,
+    )
+
+    assert committed.recipe_options[0].used_ingredients == ["tomato"]
+
+
+def test_commit_rejects_repeated_ingredient_names_before_persisting() -> None:
+    generating, _, context = begin_option_generation(
+        confirmed_session(),
+        RecipePreferences(option_count=1),
+        more=False,
+    )
+    draft = option_draft("Tomato Curry").model_copy(
+        update={
+            "missing_ingredients": [
+                IngredientRequirement(
+                    name="Paneer",
+                    reason="Needed for body.",
+                )
+            ],
+            "optional_ingredients": [
+                IngredientRequirement(
+                    name=" paneer ",
+                    reason="Useful garnish.",
+                )
+            ],
+        }
+    )
+
+    with pytest.raises(AppError, match="repeated ingredient") as error:
+        commit_option_batch(
+            generating,
+            [draft],
+            [nutrition_estimate()],
+            context,
+        )
+
+    assert error.value.code is ErrorCode.MODEL_OUTPUT_INVALID
+    assert error.value.retryable is True
+    assert generating.recipe_options == []
 
 
 def test_failed_generation_restores_exact_stage_and_prior_options() -> None:

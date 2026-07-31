@@ -15,8 +15,10 @@ EMPTY_DETECTION_WARNING = "No ingredients were confidently detected. Add them ma
 EXTRACTION_PROMPT = (
     "Report only visible food ingredients. "
     "Do not infer pantry items. "
-    "Assign confidence from 0 to 1. "
-    "Return an empty list when uncertain."
+    "List every food ingredient you can see, including uncertain ones. "
+    "Assign each a confidence from 0.0 to 1.0. "
+    "Use confidence below 0.5 instead of omitting an uncertain ingredient. "
+    "Return an empty detected list only when the image contains no food."
 )
 
 

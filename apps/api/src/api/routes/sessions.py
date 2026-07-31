@@ -16,6 +16,7 @@ from api.dependencies import (
     get_upload_validator,
 )
 from domain.artifacts import ArtifactKind
+from domain.ingredients import assemble_manual_review_ingredients
 from domain.jobs import JobOperation
 from domain.session_service import confirm_ingredients, review_ingredients
 from domain.sessions import SessionStage
@@ -27,6 +28,7 @@ from schemas.ingredients import IngredientReviewRequest
 from schemas.sessions import (
     INGREDIENT_CONFIRMATION_RESPONSE_EXAMPLES,
     INGREDIENT_REVIEW_RESPONSE_EXAMPLES,
+    ManualSessionRequest,
     QueuedJobResponse,
     SessionResponse,
 )
@@ -108,6 +110,35 @@ async def create_session(
         raise
 
     return QueuedJobResponse(session_id=session.id, job_id=job.id)
+
+
+@router.post(
+    "/manual",
+    response_model=SessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="createManualSession",
+    summary="Create a cooking session from typed ingredients",
+    responses={
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorResponse,
+            "description": "Invalid ingredient list.",
+        },
+    },
+)
+async def create_manual_session(
+    request: ManualSessionRequest,
+    session_store: Annotated[SessionStore, Depends(get_session_store)],
+) -> SessionResponse:
+    """Open a review-ready session for a user who typed their ingredients."""
+    session = await session_store.create(SessionStage.REVIEWING_INGREDIENTS)
+    committed = await session_store.replace(
+        session.model_copy(
+            update={
+                "ingredients": assemble_manual_review_ingredients(request.ingredients)
+            }
+        )
+    )
+    return SessionResponse.model_validate(committed)
 
 
 @router.get(

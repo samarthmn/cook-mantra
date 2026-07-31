@@ -11,6 +11,7 @@ from core.config import Settings
 from domain.ingredients import ExtractionResult, Ingredient, IngredientSource
 from domain.sessions import Session, SessionStage
 from repositories.session_store import SessionStore
+from schemas.sessions import SessionResponse
 
 
 class ReadyOllama:
@@ -296,6 +297,25 @@ def test_ingredient_route_response_examples_show_every_source(
             ingredient["source"] for ingredient in example["value"]["ingredients"]
         }
         assert sources == {"detected", "pantry_suggestion", "user_added"}
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("put", "/api/v1/sessions/{session_id}/ingredients"),
+        ("post", "/api/v1/sessions/{session_id}/ingredients/confirm"),
+    ],
+)
+def test_ingredient_route_response_examples_are_complete_sessions(
+    client: TestClient,
+    method: str,
+    path: str,
+) -> None:
+    operation = client.app.openapi()["paths"][path][method]
+    examples = operation["responses"]["200"]["content"]["application/json"]["examples"]
+
+    for example in examples.values():
+        SessionResponse.model_validate(example["value"])
 
 
 @pytest.mark.parametrize(

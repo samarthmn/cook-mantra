@@ -42,7 +42,7 @@ async def test_validator_detects_allowed_type_from_bytes(
 async def test_validator_rejects_oversized_image() -> None:
     upload = UploadFile(filename="large.png", file=BytesIO(image_bytes("PNG")))
 
-    with pytest.raises(AppError, match="10 MiB"):
+    with pytest.raises(AppError, match="4 bytes"):
         await ImageUploadValidator(max_bytes=4).read(upload)
 
 

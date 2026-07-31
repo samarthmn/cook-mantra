@@ -1,9 +1,10 @@
 from uuid import UUID
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
-from api.middleware import RequestIdMiddleware
+from api.middleware import RequestIdMiddleware, UnexpectedErrorMiddleware
 from core.errors import AppError, ErrorCode, install_error_handlers
 
 
@@ -11,6 +12,12 @@ def create_app() -> FastAPI:
     app = FastAPI()
     install_error_handlers(app)
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(UnexpectedErrorMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],
+        expose_headers=["X-Request-ID"],
+    )
     return app
 
 
@@ -139,11 +146,17 @@ def test_unexpected_errors_do_not_expose_exception_details() -> None:
         raise RuntimeError("sensitive implementation detail")
 
     response = TestClient(app, raise_server_exceptions=False).get(
-        "/unexpected", headers={"X-Request-ID": "req-unexpected"}
+        "/unexpected",
+        headers={
+            "Origin": "http://localhost:3000",
+            "X-Request-ID": "req-unexpected",
+        },
     )
 
     assert response.status_code == 500
     assert response.headers["X-Request-ID"] == "req-unexpected"
+    assert response.headers["Access-Control-Allow-Origin"] == ("http://localhost:3000")
+    assert response.headers["Access-Control-Expose-Headers"] == "X-Request-ID"
     assert response.json() == {
         "error": {
             "code": "internal_error",

@@ -8,6 +8,7 @@ import pytest
 from langgraph_api.asyncio import as_asynccontextmanager
 from tests.unit.orchestration.graphs.test_recipe_options import (
     CountingLimiter,
+    FailingReadyCommitStore,
     FakeDishPreviewService,
     FakeMasterChef,
     FakeNutritionAgent,
@@ -128,6 +129,18 @@ class BlockingDishPreviewService:
         finally:
             self.cancelled.set()
         return DishPreview(artifact_id="unreachable-preview")
+
+
+class BlockingDeleteDishPreviewService(FakeDishPreviewService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.delete_started = asyncio.Event()
+        self.allow_delete = asyncio.Event()
+
+    async def delete(self, artifact_id: str) -> None:
+        self.delete_started.set()
+        await self.allow_delete.wait()
+        await super().delete(artifact_id)
 
 
 class ArtifactWritingDishPreviewService:
@@ -317,6 +330,43 @@ async def test_option_workflow_attaches_generated_preview_to_committed_option() 
 
 
 @pytest.mark.asyncio
+async def test_disabled_previews_skip_generation_and_commit_without_warnings() -> None:
+    fixture = await make_generation(option_count=2)
+    previews = RecordingDishPreviewService()
+    limiter = CountingLimiter(max_concurrent_calls=2)
+    progress_updates: list[int] = []
+
+    async def record_progress(value: int) -> None:
+        progress_updates.append(value)
+
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Rice")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+        limiter=limiter,
+        progress=record_progress,
+        dish_previews_enabled=False,
+    )
+
+    result = await graph.ainvoke(invocation(fixture))
+
+    saved = await fixture.store.require(fixture.generating.id)
+    assert previews.calls == []
+    assert previews.deleted_artifact_ids == []
+    assert limiter.call_count == 3
+    assert all(option.preview is None for option in result["recipe_options"])
+    assert all(
+        "Dish preview unavailable." not in option.warnings
+        for option in result["recipe_options"]
+    )
+    assert saved.stage is SessionStage.OPTIONS_READY
+    assert saved.recipe_options == result["recipe_options"]
+    assert result["batch_number"] == 1
+    assert progress_updates == [10, 15, 45, 80]
+
+
+@pytest.mark.asyncio
 async def test_image_failure_preserves_option_with_only_image_warning() -> None:
     fixture = await make_generation(option_count=1)
     graph = graph_for(
@@ -357,6 +407,75 @@ async def test_nutrition_and_image_failures_add_independent_warnings() -> None:
     assert option.warnings == [
         "Nutrition estimate unavailable.",
         "Dish preview unavailable.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_failures_log_structured_app_error_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    nutrition_failure = AppError(
+        code=ErrorCode.OLLAMA_UNAVAILABLE,
+        message="Nutrition provider unavailable.",
+        status_code=503,
+        retryable=True,
+        details={"provider": "ollama"},
+    )
+    nutrition_failure.__cause__ = ConnectionError("nutrition transport failed")
+    preview_failure = AppError(
+        code=ErrorCode.ARTIFACT_FAILURE,
+        message="Preview generation misconfigured.",
+        status_code=500,
+        retryable=False,
+        details={"provider": "ollama"},
+    )
+    preview_failure.__cause__ = RuntimeError("preview model initialization failed")
+    fixture = await make_generation(option_count=1)
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry")]]),
+        FakeNutritionAgent({"Tomato Curry": nutrition_failure}),
+        previews=RecordingDishPreviewService({"Tomato Curry": preview_failure}),
+    )
+    caplog.set_level(logging.WARNING, logger=option_graph.__name__)
+
+    result = await graph.ainvoke(invocation(fixture))
+
+    assert result["recipe_options"][0].warnings == [
+        "Nutrition estimate unavailable.",
+        "Dish preview unavailable.",
+    ]
+    failure_records = {
+        record.enrichment_type: record
+        for record in caplog.records
+        if getattr(record, "event", None) == "recipe_option_enrichment_failed"
+    }
+    assert set(failure_records) == {"nutrition", "preview"}
+    nutrition_record = failure_records["nutrition"]
+    assert nutrition_record.option_index == 0
+    assert nutrition_record.option_name == "Tomato Curry"
+    assert nutrition_record.exception_type == "AppError"
+    assert nutrition_record.error_code == ErrorCode.OLLAMA_UNAVAILABLE.value
+    assert nutrition_record.error_message == "Nutrition provider unavailable."
+    assert nutrition_record.status_code == 503
+    assert nutrition_record.retryable is True
+    assert nutrition_record.error_details == {"provider": "ollama"}
+    assert nutrition_record.cause_chain == [
+        "AppError: Nutrition provider unavailable.",
+        "ConnectionError: nutrition transport failed",
+    ]
+    preview_record = failure_records["preview"]
+    assert preview_record.option_index == 0
+    assert preview_record.option_name == "Tomato Curry"
+    assert preview_record.exception_type == "AppError"
+    assert preview_record.error_code == ErrorCode.ARTIFACT_FAILURE.value
+    assert preview_record.error_message == "Preview generation misconfigured."
+    assert preview_record.status_code == 500
+    assert preview_record.retryable is False
+    assert preview_record.error_details == {"provider": "ollama"}
+    assert preview_record.cause_chain == [
+        "AppError: Preview generation misconfigured.",
+        "RuntimeError: preview model initialization failed",
     ]
 
 
@@ -418,7 +537,7 @@ async def test_preview_progress_is_monotonic_bounded_and_never_completes_job() -
 
     await graph.ainvoke(invocation(fixture))
 
-    assert progress_updates[:2] == [10, 45]
+    assert progress_updates[:3] == [10, 15, 45]
     assert progress_updates[-1] == 80
     assert progress_updates == sorted(progress_updates)
     assert 79 in progress_updates
@@ -656,6 +775,46 @@ async def test_stale_commit_deletes_only_its_attempt_previews(
             graph_task.cancel()
         await asyncio.gather(graph_task, return_exceptions=True)
         await artifact_store.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_preview_cleanup_finishes_rollback_and_wins() -> None:
+    store = FailingReadyCommitStore()
+    fixture = await make_generation(store=store, option_count=1)
+    previews = BlockingDeleteDishPreviewService()
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry")]]),
+        FakeNutritionAgent(),
+        previews=previews,
+    )
+    store.fail_ready_commits = True
+    graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
+
+    try:
+        await asyncio.wait_for(store.ready_commit_started.wait(), timeout=1)
+        store.allow_ready_failure.set()
+        await asyncio.wait_for(previews.delete_started.wait(), timeout=1)
+
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        previews.allow_delete.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        store.allow_ready_failure.set()
+        previews.allow_delete.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    saved = await store.require(fixture.generating.id)
+    assert saved.model_copy(update={"updated_at": fixture.previous.updated_at}) == (
+        fixture.previous
+    )
+    assert previews.deleted_artifact_ids == ["preview-tomato-curry"]
 
 
 @pytest.mark.asyncio
@@ -998,6 +1157,7 @@ async def test_development_runtime_owns_real_image_resources_without_server_call
     settings = Settings(
         _env_file=None,
         artifact_root=project_tmp_path / "development-preview-runtime",
+        dish_previews_enabled=False,
     )
     runtime = option_graph.DevelopmentRecipeOptionsRuntime(settings)
     preview_service = runtime.dependencies.dish_previews
@@ -1011,6 +1171,7 @@ async def test_development_runtime_owns_real_image_resources_without_server_call
     assert image_generator._model == Model.Z_IMAGE
     assert runtime.dependencies.master_chef._settings is settings
     assert runtime.dependencies.nutrition_agent._settings is settings
+    assert runtime.dependencies.dish_previews_enabled is settings.dish_previews_enabled
 
     await runtime.startup()
     try:

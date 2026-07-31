@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
 from agents.ingredient_extraction import IngredientExtractor
@@ -376,7 +377,7 @@ def test_oversized_image_uses_the_standard_error(project_tmp_path: Path) -> None
     assert response.json() == {
         "error": {
             "code": "invalid_request",
-            "message": "Image uploads must be no larger than 10 MiB.",
+            "message": "Image uploads must be no larger than 4 bytes.",
             "details": {},
             "retryable": False,
             "request_id": "req-oversized-image",
@@ -384,6 +385,49 @@ def test_oversized_image_uses_the_standard_error(project_tmp_path: Path) -> None
             "job_id": None,
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_chunked_oversized_upload_is_rejected_before_full_body_is_read(
+    project_tmp_path: Path,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+        max_upload_bytes=4,
+    )
+    yielded_chunks = 0
+
+    async def oversized_body():
+        nonlocal yielded_chunks
+        for _ in range(4):
+            yielded_chunks += 1
+            yield b"x" * (40 * 1024)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.post(
+            "/api/v1/sessions",
+            content=oversized_body(),
+            headers={
+                "Content-Type": "multipart/form-data; boundary=upload-boundary",
+                "X-Request-ID": "req-chunked-oversized",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == {
+        "code": "invalid_request",
+        "message": "Image uploads must be no larger than 4 bytes.",
+        "details": {},
+        "retryable": False,
+        "request_id": "req-chunked-oversized",
+        "session_id": None,
+        "job_id": None,
+    }
+    assert yielded_chunks == 2
 
 
 def test_missing_session_uses_the_standard_not_found_error(
@@ -923,3 +967,74 @@ def test_background_failure_retains_extracting_session_and_artifact(
     assert session_response.json()["ingredients"] == []
     assert session_response.json()["warnings"] == []
     assert retained_artifact.owner_session_id == created["session_id"]
+
+
+def test_manual_entry_creates_a_reviewable_session(project_tmp_path: Path) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions/manual",
+            json={"ingredients": ["Paneer", " Potato ", "onion"]},
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["stage"] == "reviewing_ingredients"
+    assert body["image_artifact_id"] is None
+    confirmed = [item for item in body["ingredients"] if item["confirmed"]]
+    assert [(item["name"], item["source"]) for item in confirmed] == [
+        ("Paneer", "user_added"),
+        ("Potato", "user_added"),
+        ("Onion", "pantry_suggestion"),
+    ]
+    assert "Salt" in [item["name"] for item in body["ingredients"]]
+
+
+def test_manual_session_is_retrievable_and_confirmable(project_tmp_path: Path) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/sessions/manual",
+            json={"ingredients": ["Paneer"]},
+        ).json()
+        fetched = client.get(f"/api/v1/sessions/{created['id']}")
+        confirmed = client.post(
+            f"/api/v1/sessions/{created['id']}/ingredients/confirm",
+        )
+
+    assert fetched.status_code == 200
+    assert fetched.json()["id"] == created["id"]
+    assert confirmed.status_code == 200
+    assert confirmed.json()["stage"] == "ingredients_confirmed"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ingredients": []},
+        {"ingredients": ["   "]},
+        {"ingredients": ["x" * 81]},
+        {"ingredients": ["Paneer"], "extra": True},
+    ],
+)
+def test_manual_entry_rejects_unusable_ingredient_lists(
+    project_tmp_path: Path, payload: dict[str, object]
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/sessions/manual", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"

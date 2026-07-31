@@ -37,6 +37,10 @@ def e2e_client(project_tmp_path: Path) -> Iterator[TestClient]:
             artifact_root=project_tmp_path / "e2e-artifacts",
             max_concurrent_jobs=2,
             max_concurrent_model_calls=2,
+            # Previews ship disabled because the image model is MLX-only, but
+            # this journey covers the preview path against a deterministic
+            # generator, so it opts in explicitly.
+            dish_previews_enabled=True,
         ),
         ingredient_extractor=DeterministicIngredientExtractor(),
         master_chef=DeterministicMasterChef(),

@@ -36,7 +36,9 @@ def get_model(
         thinking: Enable or disable reasoning traces. None leaves the model's
             own default in place.
         num_predict: Maximum generated tokens. None leaves the model default.
-        num_ctx: Context window size. None leaves the model default.
+        num_ctx: Context window size. None uses the configured
+            `llm_num_ctx` rather than Ollama's 4k default, which is too small
+            to hold a prompt plus a full structured-output response.
         timeout: Request timeout in seconds.
         settings: Override configuration, primarily for tests.
 
@@ -51,6 +53,7 @@ def get_model(
         else settings.model_for(_select_agent(agent))
     )
     resolved_timeout = timeout if timeout is not None else settings.llm_timeout_seconds
+    resolved_num_ctx = num_ctx if num_ctx is not None else settings.llm_num_ctx
 
     if resolved_model is Model.Z_IMAGE:
         raise ValueError(
@@ -64,7 +67,7 @@ def get_model(
         temperature=temperature,
         reasoning=thinking,
         num_predict=num_predict,
-        num_ctx=num_ctx,
+        num_ctx=resolved_num_ctx,
         client_kwargs={"timeout": resolved_timeout},
     )
 

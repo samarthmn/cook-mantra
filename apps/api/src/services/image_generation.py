@@ -1,5 +1,6 @@
 """Experimental Ollama HTTP adapter for generated dish preview images."""
 
+import asyncio
 import base64
 import json
 import math
@@ -51,6 +52,7 @@ class OllamaImageGenerator:
 
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._timeout_seconds = timeout_seconds
         self._owns_client = client is None
         self._client = (
             client
@@ -68,6 +70,24 @@ class OllamaImageGenerator:
         progress: ProgressCallback,
     ) -> GeneratedImage:
         """Generate and verify one supported image from streamed NDJSON."""
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                return await self._generate(request, progress)
+        except (httpx.TimeoutException, TimeoutError) as error:
+            raise AppError(
+                code=ErrorCode.OPERATION_TIMED_OUT,
+                message="Image generation timed out.",
+                status_code=504,
+                retryable=True,
+            ) from error
+        except (httpx.HTTPStatusError, httpx.RequestError) as error:
+            raise _ollama_unavailable() from error
+
+    async def _generate(
+        self,
+        request: ImageGenerationRequest,
+        progress: ProgressCallback,
+    ) -> GeneratedImage:
         payload: dict[str, object] = {
             "model": self._model,
             "prompt": request.prompt,
@@ -80,43 +100,33 @@ class OllamaImageGenerator:
 
         final_image: str | None = None
         last_progress = -1
-        try:
-            async with self._client.stream(
-                "POST",
-                f"{self._base_url}/api/generate",
-                json=payload,
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/api/generate",
+            json=payload,
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.strip():
+                    continue
 
-                    event = _parse_event(line)
-                    if event is None:
+                event = _parse_event(line)
+                if event is None:
+                    raise _artifact_failure()
+                if _has_provider_error(event):
+                    raise _ollama_unavailable()
+
+                next_progress = _event_progress(event)
+                if next_progress is not None and next_progress > last_progress:
+                    await progress(next_progress)
+                    last_progress = next_progress
+
+                if event.get("done") is True:
+                    image_value = event.get("image")
+                    if not isinstance(image_value, str) or not image_value:
                         raise _artifact_failure()
-                    if _has_provider_error(event):
-                        raise _ollama_unavailable()
-
-                    next_progress = _event_progress(event)
-                    if next_progress is not None and next_progress > last_progress:
-                        await progress(next_progress)
-                        last_progress = next_progress
-
-                    if event.get("done") is True:
-                        image_value = event.get("image")
-                        if not isinstance(image_value, str) or not image_value:
-                            raise _artifact_failure()
-                        final_image = image_value
-                        break
-        except (httpx.TimeoutException, TimeoutError) as error:
-            raise AppError(
-                code=ErrorCode.OPERATION_TIMED_OUT,
-                message="Image generation timed out.",
-                status_code=504,
-                retryable=True,
-            ) from error
-        except (httpx.HTTPStatusError, httpx.RequestError) as error:
-            raise _ollama_unavailable() from error
+                    final_image = image_value
+                    break
 
         if final_image is None:
             raise _artifact_failure()

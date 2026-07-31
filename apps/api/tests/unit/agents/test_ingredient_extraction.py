@@ -52,8 +52,10 @@ async def test_extractor_sends_visible_ingredient_multimodal_message() -> None:
     prompt = text_block["text"].lower()
     assert "only visible food ingredients" in prompt
     assert "do not infer pantry items" in prompt
-    assert "confidence from 0 to 1" in prompt
-    assert "empty list when uncertain" in prompt
+    assert "confidence from 0.0 to 1.0" in prompt
+    assert "including uncertain ones" in prompt
+    assert "below 0.5 instead of omitting" in prompt
+    assert "empty detected list only when the image contains no food" in prompt
 
     assert message.content[1] == {
         "type": "image_url",

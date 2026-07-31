@@ -21,12 +21,16 @@ class StreamingByteStream(httpx.AsyncByteStream):
         chunks: list[bytes],
         *,
         stream_error: Exception | None = None,
+        chunk_delay_seconds: float = 0,
     ) -> None:
         self._chunks = chunks
         self._stream_error = stream_error
+        self._chunk_delay_seconds = chunk_delay_seconds
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self._chunks:
+            if self._chunk_delay_seconds:
+                await asyncio.sleep(self._chunk_delay_seconds)
             yield chunk
         if self._stream_error is not None:
             raise self._stream_error
@@ -40,11 +44,13 @@ class StreamingJsonTransport(httpx.AsyncBaseTransport):
         status_code: int = 200,
         request_error: Exception | None = None,
         stream_error: Exception | None = None,
+        chunk_delay_seconds: float = 0,
     ) -> None:
         self._chunks = chunks or []
         self._status_code = status_code
         self._request_error = request_error
         self._stream_error = stream_error
+        self._chunk_delay_seconds = chunk_delay_seconds
         self.requests: list[httpx.Request] = []
         self.close_calls = 0
 
@@ -57,6 +63,7 @@ class StreamingJsonTransport(httpx.AsyncBaseTransport):
             stream=StreamingByteStream(
                 self._chunks,
                 stream_error=self._stream_error,
+                chunk_delay_seconds=self._chunk_delay_seconds,
             ),
             request=request,
         )
@@ -625,6 +632,31 @@ async def test_timeout_is_mapped_to_operation_timed_out(
         "details": {},
     }
     assert "private timeout detail" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_timeout_bounds_total_time_for_a_progressing_stream() -> None:
+    transport = StreamingJsonTransport(
+        [b'{"completed":1,"total":10,"done":false}\n'] * 10,
+        chunk_delay_seconds=0.02,
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        generator = OllamaImageGenerator(
+            base_url="http://ollama.test",
+            model="configured-image-model",
+            client=client,
+            timeout_seconds=0.05,
+        )
+
+        with pytest.raises(AppError) as raised:
+            await generator.generate(
+                ImageGenerationRequest(prompt="Tomato curry"),
+                no_progress,
+            )
+
+    assert raised.value.code is ErrorCode.OPERATION_TIMED_OUT
+    assert raised.value.status_code == 504
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ EXPECTED_OPERATIONS = {
     ("GET", "/api/v1/ready"): "getReadiness",
     ("GET", "/api/v1/jobs/{job_id}"): "getJob",
     ("POST", "/api/v1/sessions"): "createSession",
+    ("POST", "/api/v1/sessions/manual"): "createManualSession",
     ("GET", "/api/v1/sessions/{session_id}"): "getSession",
     ("PUT", "/api/v1/sessions/{session_id}/ingredients"): "updateIngredients",
     (
@@ -32,6 +33,7 @@ EXPECTED_ERROR_RESPONSES = {
     ("GET", "/api/v1/ready"): {"503"},
     ("GET", "/api/v1/jobs/{job_id}"): {"404"},
     ("POST", "/api/v1/sessions"): {"422", "503"},
+    ("POST", "/api/v1/sessions/manual"): {"422"},
     ("GET", "/api/v1/sessions/{session_id}"): {"404"},
     ("PUT", "/api/v1/sessions/{session_id}/ingredients"): {"404", "409", "422"},
     (
@@ -83,6 +85,10 @@ def test_openapi_contains_the_complete_stable_backend_contract(
         "description": "Local backend for Cook Mantra's image-to-recipe workflow.",
         "version": "0.1.0",
     }
+    assert (
+        document["components"]["schemas"]["RecipePreferences"]["additionalProperties"]
+        is False
+    )
 
     operation_ids = []
     for (method, path), expected_operation_id in EXPECTED_OPERATIONS.items():

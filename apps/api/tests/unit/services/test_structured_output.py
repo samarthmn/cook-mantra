@@ -197,3 +197,37 @@ async def test_safe_runnable_config_preserves_the_two_attempt_retry_limit() -> N
     assert result is expected
     assert model.attempts == 2
     assert model.configs == [config, config]
+
+
+@pytest.mark.asyncio
+async def test_empty_model_response_is_retried_then_reported_as_retryable() -> None:
+    """A model that yields nothing raises a bare ValueError from the client."""
+    model = SequencedStructuredModel(
+        [
+            ValueError("No data received from Ollama stream."),
+            ExtractionResult(detected=[{"name": "Tomato", "confidence": 0.9}]),
+        ]
+    )
+
+    result = await invoke_structured(model, [])
+
+    assert model.attempts == 2
+    assert result.detected[0].name == "Tomato"
+
+
+@pytest.mark.asyncio
+async def test_persistently_empty_model_response_is_not_an_internal_error() -> None:
+    """Escaping as internal_error would be non-retryable and undiagnosable."""
+    model = SequencedStructuredModel(
+        [
+            ValueError("No data received from Ollama stream."),
+            ValueError("No data received from Ollama stream."),
+        ]
+    )
+
+    with pytest.raises(AppError) as raised:
+        await invoke_structured(model, [])
+
+    assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
+    assert raised.value.retryable is True
+    assert raised.value.status_code == 503
