@@ -16,11 +16,11 @@ From `apps/api`, install the locked dependencies and create local configuration:
 
 ```bash
 uv sync
-cp ../../example.env .env
+cp ../../example.env ../../.env
 ```
 
 `OLLAMA_BASE_URL` is required. The API reads it from the environment or the
-local `.env` file and refuses to start when it is missing or invalid.
+repository-root `.env` file and refuses to start when it is missing or invalid.
 
 The five configured Ollama models are fixed in `src/core/config.py`. Pull all of
 them before starting the API:

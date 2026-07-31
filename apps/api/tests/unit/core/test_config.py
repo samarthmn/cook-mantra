@@ -1,7 +1,21 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
 from core.config import PROJECT_ROOT, Settings
+
+
+def test_settings_resolve_env_file_from_project_root(
+    monkeypatch: pytest.MonkeyPatch,
+    project_tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(project_tmp_path)
+
+    configured_env_file = Path(Settings.model_config["env_file"])
+
+    assert configured_env_file == PROJECT_ROOT / ".env"
+    assert configured_env_file.is_absolute()
 
 
 def test_settings_require_ollama_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
