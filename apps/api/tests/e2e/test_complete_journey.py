@@ -21,6 +21,7 @@ from api.app import create_app
 from core.config import Settings
 
 _REQUEST_SEQUENCE = count(1)
+pytestmark = pytest.mark.e2e
 
 
 @pytest.fixture
