@@ -41,6 +41,18 @@ logger = logging.getLogger(__name__)
     "",
     response_model=QueuedJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    operation_id="createSession",
+    summary="Create a cooking session",
+    responses={
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorResponse,
+            "description": "Invalid ingredient image.",
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ErrorResponse,
+            "description": "The background job queue is full.",
+        },
+    },
 )
 async def create_session(
     image: Annotated[UploadFile, File()],
@@ -98,7 +110,22 @@ async def create_session(
     return QueuedJobResponse(session_id=session.id, job_id=job.id)
 
 
-@router.get("/{session_id}", response_model=SessionResponse)
+@router.get(
+    "/{session_id}",
+    response_model=SessionResponse,
+    operation_id="getSession",
+    summary="Get a cooking session",
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorResponse,
+            "description": "Session not found.",
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorResponse,
+            "description": "Invalid session identifier.",
+        },
+    },
+)
 async def get_session(
     session_id: str,
     session_store: Annotated[SessionStore, Depends(get_session_store)],
@@ -110,6 +137,8 @@ async def get_session(
 @router.put(
     "/{session_id}/ingredients",
     response_model=SessionResponse,
+    operation_id="updateIngredients",
+    summary="Update reviewed ingredients",
     responses={
         status.HTTP_200_OK: {
             "content": {
@@ -149,6 +178,8 @@ async def update_ingredients(
 @router.post(
     "/{session_id}/ingredients/confirm",
     response_model=SessionResponse,
+    operation_id="confirmIngredients",
+    summary="Confirm reviewed ingredients",
     responses={
         status.HTTP_200_OK: {
             "content": {

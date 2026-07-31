@@ -3,7 +3,7 @@
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from domain.images import DishPreview
 
@@ -36,6 +36,21 @@ class Difficulty(StrEnum):
 
 class RecipePreferences(BaseModel):
     """Optional constraints for a batch of recipe suggestions."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "dietary_preferences": ["vegetarian"],
+                    "allergens": ["peanut"],
+                    "preferred_cuisines": ["Italian"],
+                    "max_total_minutes": 45,
+                    "servings": 2,
+                    "option_count": 4,
+                }
+            ]
+        }
+    )
 
     dietary_preferences: list[str] = Field(default_factory=list, max_length=20)
     allergens: list[str] = Field(default_factory=list, max_length=20)

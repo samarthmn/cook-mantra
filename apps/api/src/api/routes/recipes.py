@@ -44,6 +44,10 @@ _ERROR_RESPONSES = {
         "model": ErrorResponse,
         "description": "Invalid recipe selection.",
     },
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "model": ErrorResponse,
+        "description": "The background job queue is full.",
+    },
 }
 
 
@@ -51,6 +55,8 @@ _ERROR_RESPONSES = {
     "/{session_id}/recipes",
     response_model=QueuedJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    operation_id="generateCompleteRecipes",
+    summary="Generate complete recipes",
     responses=_ERROR_RESPONSES,
 )
 async def generate_complete_recipes(

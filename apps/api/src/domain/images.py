@@ -29,7 +29,17 @@ class GeneratedImage:
 class DishPreview(BaseModel):
     """A stored reference to a generated dish illustration."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "artifact_id": "artifact-preview-123",
+                    "label": ILLUSTRATION_LABEL,
+                }
+            ]
+        },
+    )
 
     artifact_id: str
     label: str = ILLUSTRATION_LABEL

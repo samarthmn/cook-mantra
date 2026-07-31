@@ -21,6 +21,8 @@ _BINARY_RESPONSES = {
 @router.get(
     "/{artifact_id}",
     response_class=Response,
+    operation_id="getArtifact",
+    summary="Get a generated dish image",
     responses={
         status.HTTP_200_OK: {
             "description": "Generated dish image.",
@@ -33,6 +35,10 @@ _BINARY_RESPONSES = {
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
             "model": ErrorResponse,
             "description": "Artifact storage failure.",
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "model": ErrorResponse,
+            "description": "Invalid artifact identifier.",
         },
     },
 )

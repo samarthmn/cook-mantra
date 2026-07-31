@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from agents.ingredient_extraction import IngredientExtractor, OllamaIngredientExtractor
 from agents.master_chef import MasterChef, OllamaMasterChef
@@ -208,7 +209,14 @@ def create_app(
         timeout_seconds=resolved_settings.llm_timeout_seconds,
     )
 
-    app = FastAPI(title="Cook Mantra API", lifespan=lifespan)
+    app = FastAPI(
+        title="Cook Mantra API",
+        description="Local backend for Cook Mantra's image-to-recipe workflow.",
+        version="0.1.0",
+        docs_url="/docs",
+        redoc_url=None,
+        lifespan=lifespan,
+    )
     app.state.settings = resolved_settings
     app.state.job_store = job_store
     app.state.session_store = session_store
@@ -233,6 +241,14 @@ def create_app(
 
     install_error_handlers(app)
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved_settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Content-Type", "X-Request-ID"],
+        expose_headers=["X-Request-ID"],
+    )
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(jobs.router, prefix="/api/v1")
     app.include_router(sessions.router, prefix="/api/v1")

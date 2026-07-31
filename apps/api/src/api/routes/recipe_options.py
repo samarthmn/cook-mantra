@@ -39,6 +39,10 @@ _ERROR_RESPONSES = {
         "model": ErrorResponse,
         "description": "Invalid recipe preferences.",
     },
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "model": ErrorResponse,
+        "description": "The background job queue is full.",
+    },
 }
 
 
@@ -46,6 +50,8 @@ _ERROR_RESPONSES = {
     "/{session_id}/recipe-options",
     response_model=QueuedJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    operation_id="generateRecipeOptions",
+    summary="Generate recipe options",
     responses=_ERROR_RESPONSES,
 )
 async def generate_recipe_options(
@@ -73,6 +79,8 @@ async def generate_recipe_options(
     "/{session_id}/recipe-options/more",
     response_model=QueuedJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    operation_id="generateMoreRecipeOptions",
+    summary="Generate more recipe options",
     responses=_ERROR_RESPONSES,
 )
 async def generate_more_recipe_options(

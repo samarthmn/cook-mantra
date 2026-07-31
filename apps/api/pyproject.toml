@@ -21,6 +21,7 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.9.1",
     "langgraph-cli[inmem]>=0.4.31",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
@@ -31,6 +32,7 @@ dev = [
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "live: opt-in checks that call locally running external services",
 ]

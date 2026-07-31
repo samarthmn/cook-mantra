@@ -4,6 +4,53 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from domain.recipes import CompleteRecipe, RecipeFailure
 
+COMPLETE_RECIPE_EXAMPLE = {
+    "option_id": "option-123",
+    "name": "Tomato Basil Pasta",
+    "cuisine": "Italian",
+    "servings": 2,
+    "total_minutes": 30,
+    "ingredients": [
+        {
+            "name": "Tomato",
+            "quantity": "3 medium",
+            "availability": "available",
+            "substitution": None,
+        },
+        {
+            "name": "Pasta",
+            "quantity": "200 g",
+            "availability": "missing",
+            "substitution": "Use any short pasta.",
+        },
+    ],
+    "steps": [
+        {
+            "number": 1,
+            "instruction": "Cook the pasta until tender.",
+            "duration_minutes": 10,
+        },
+        {
+            "number": 2,
+            "instruction": "Simmer the tomatoes, then combine with pasta.",
+            "duration_minutes": 15,
+        },
+    ],
+    "tips": ["Reserve a little pasta water for the sauce."],
+    "substitutions": ["Use coriander if basil is unavailable."],
+    "nutrition_notice": "Estimated values; not medical advice.",
+    "allergen_notice": "Check ingredient labels for allergens.",
+    "assumptions": ["Salt and cooking oil are available."],
+    "warnings": ["Pasta must be purchased before cooking."],
+}
+
+RECIPE_FAILURE_EXAMPLE = {
+    "option_id": "option-456",
+    "code": "model_output_invalid",
+    "message": "The recipe could not be generated.",
+    "retryable": False,
+}
+
 
 def _normalize_option_id(option_id: str) -> str:
     normalized_id = option_id.strip()
@@ -15,7 +62,10 @@ def _normalize_option_id(option_id: str) -> str:
 class RecipeSelectionRequest(BaseModel):
     """A bounded selection of unique server-owned recipe options."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"option_ids": ["option-123", "option-456"]}]},
+    )
 
     option_ids: list[str] = Field(min_length=1, max_length=6)
 
@@ -32,10 +82,16 @@ class RecipeSelectionRequest(BaseModel):
 class CompleteRecipeResponse(CompleteRecipe):
     """Public representation of a complete recipe."""
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={"examples": [COMPLETE_RECIPE_EXAMPLE]},
+    )
 
 
 class RecipeFailureResponse(RecipeFailure):
     """Public representation of one selected option failure."""
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={"examples": [RECIPE_FAILURE_EXAMPLE]},
+    )
