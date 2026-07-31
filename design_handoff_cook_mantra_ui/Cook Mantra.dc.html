@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="_ds/modernist-3697d321-e48c-4021-b952-12f9a879c0e6/styles.css">
+  <script src="_ds/modernist-3697d321-e48c-4021-b952-12f9a879c0e6/_ds_bundle.js"></script>
+  <style>
+    html[data-theme="dark"]{
+      --color-bg:#1a1817; --color-surface:#242120; --color-text:#f0eeed;
+      --color-divider:color-mix(in srgb,#f0eeed 35%,transparent);
+      --color-neutral-100:#2d2b2b; --color-neutral-200:#3a3737; --color-neutral-300:#575353;
+      --color-neutral-700:#bab6b6; --color-neutral-800:#d7d3d3; --color-neutral-900:#f8f4f4;
+      --color-accent-100:#4d170e; --color-accent-200:#6f1707; --color-accent-300:#9c1a02;
+      --color-accent-600:#ff563c; --color-accent-700:#ff9783; --color-accent-800:#ffc4b8; --color-accent-900:#fff2ef;
+      --color-accent-2-100:#471d16; --color-accent-2-200:#67251c; --color-accent-2-700:#ff9784; --color-accent-2-800:#ffc4b9;
+      --shadow-sm:0 1px 2px rgba(0,0,0,.5); --shadow-md:0 3px 10px rgba(0,0,0,.55); --shadow-lg:0 12px 32px rgba(0,0,0,.65);
+    }
+    body{transition:background .25s,color .25s}
+    a{color:var(--color-accent)} a:hover{color:var(--color-accent-600)}
+    @keyframes cm-spin{to{transform:rotate(360deg)}}
+    @keyframes cm-pulse{0%,100%{opacity:.3}50%{opacity:.85}}
+  </style>
+</helmet>
+
+<div style="min-height:100vh;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body)">
+
+  <header class="nav" style="gap:var(--space-3);padding:var(--space-3) clamp(16px,4vw,48px)">
+    <div class="nav-brand" style="display:flex;align-items:center;gap:10px;margin-right:auto;letter-spacing:-0.01em">
+      <span style="width:14px;height:14px;background:var(--color-accent);display:inline-block;flex:none"></span>
+      COOK MANTRA
+    </div>
+    <a href="Design Guide.dc.html" style="font-size:13px;color:inherit;text-decoration:none;border-bottom:1px solid var(--color-divider)" style-hover="color:var(--color-accent)">Design guide</a>
+    <button class="btn btn-secondary btn-icon" onClick="{{ toggleTheme }}" aria-label="Toggle dark mode" title="{{ themeTitle }}" style="width:44px;height:44px">
+      <sc-if value="{{ isDark }}" hint-placeholder-val="{{ false }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>
+      </sc-if>
+      <sc-if value="{{ isLight }}" hint-placeholder-val="{{ true }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"></path></svg>
+      </sc-if>
+    </button>
+  </header>
+
+  <nav aria-label="Progress" style="display:flex;gap:clamp(16px,3vw,40px);padding:0 clamp(16px,4vw,48px);border-bottom:2px solid var(--color-divider);overflow-x:auto">
+    <sc-for list="{{ stepper }}" as="st" hint-placeholder-count="4">
+      <button onClick="{{ st.go }}" disabled="{{ st.locked }}" style="{{ st.style }}">
+        <span style="{{ st.numStyle }}">{{ st.num }}</span>
+        <span>{{ st.label }}</span>
+      </button>
+    </sc-for>
+  </nav>
+
+  <main style="flex:1;width:100%;max-width:1160px;margin:0 auto;padding:clamp(20px,4vw,48px) clamp(16px,4vw,48px) 120px">
+
+    <sc-if value="{{ showError }}" hint-placeholder-val="{{ false }}">
+      <div role="alert" style="display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3);border:2px solid var(--color-accent);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-6);background:var(--color-accent-100)">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+        <div style="flex:1 1 240px;min-width:0">
+          <div style="font-family:var(--font-heading);font-weight:800;font-size:14px;color:var(--color-accent-800)">{{ errorTitle }}</div>
+          <div style="font-size:13px;color:var(--color-accent-800);opacity:.85">{{ errorMsg }}</div>
+        </div>
+        <button class="btn btn-primary" onClick="{{ retryError }}" style="min-height:44px">Try again</button>
+        <button class="btn btn-ghost" onClick="{{ dismissError }}">Dismiss</button>
+      </div>
+    </sc-if>
+
+    <!-- ═══════ STEP 1 · UPLOAD ═══════ -->
+    <sc-if value="{{ isUpload }}" hint-placeholder-val="{{ true }}">
+      <section data-screen-label="Upload">
+        <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent);font-weight:800;margin-bottom:var(--space-2)">Step 1 — Ingredients</div>
+        <h1 style="font-size:clamp(32px,6vw,52px);max-width:16ch">What's in your kitchen?</h1>
+        <p class="text-muted" style="max-width:52ch;font-size:15px">Take a photo of what you have. Cook Mantra reads it, you check the list — nothing is assumed without your say-so.</p>
+        <div class="hr" style="margin:var(--space-6) 0"></div>
+        <div style="border:2px dashed var(--color-divider);padding:clamp(32px,6vw,64px) var(--space-4);display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-4);max-width:720px">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"></path><circle cx="12" cy="13" r="3"></circle></svg>
+          <div>
+            <div style="font-family:var(--font-heading);font-weight:800;font-size:19px">Photograph your ingredients</div>
+            <div class="text-muted" style="font-size:13px;margin-top:4px">Lay them out on a counter — one photo is enough. Photos stay on this device.</div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:var(--space-2)">
+            <button class="btn btn-primary" onClick="{{ startExtract }}" style="min-height:48px;padding-inline:20px">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"></path><circle cx="12" cy="13" r="3"></circle></svg>
+              Take a photo
+            </button>
+            <button class="btn btn-secondary" onClick="{{ startExtract }}" style="min-height:48px;padding-inline:20px">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18"></rect><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"></path></svg>
+              Choose from gallery
+            </button>
+          </div>
+          <div class="text-muted" style="font-size:11px">Prototype: both buttons load a sample photo.</div>
+        </div>
+        <div style="margin-top:var(--space-6);display:flex;flex-wrap:wrap;gap:var(--space-4);align-items:center">
+          <button class="btn btn-ghost" onClick="{{ startManual }}" style="min-height:44px">Type ingredients instead →</button>
+          <button class="btn btn-ghost" onClick="{{ startWeak }}" style="min-height:44px;color:var(--color-text);opacity:.55">Simulate weak detection</button>
+        </div>
+      </section>
+    </sc-if>
+
+    <!-- ═══════ LOADING (shared checklist) ═══════ -->
+    <sc-if value="{{ isJob }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Working" style="max-width:640px">
+        <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent);font-weight:800;margin-bottom:var(--space-2)">{{ jobKicker }}</div>
+        <h1 style="font-size:clamp(28px,5vw,42px)">{{ jobTitle }}</h1>
+        <p class="text-muted" style="font-size:14px;max-width:48ch">{{ jobSub }}</p>
+        <div class="hr"></div>
+        <div style="display:flex;flex-direction:column">
+          <sc-for list="{{ jobLines }}" as="line" hint-placeholder-count="3">
+            <div style="display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) 0;border-bottom:1px solid var(--color-divider);min-height:56px">
+              <sc-if value="{{ line.done }}" hint-placeholder-val="{{ false }}">
+                <span style="width:22px;height:22px;flex:none;background:var(--color-accent);display:grid;place-items:center">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--color-bg)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
+                </span>
+              </sc-if>
+              <sc-if value="{{ line.running }}" hint-placeholder-val="{{ false }}">
+                <span style="width:22px;height:22px;flex:none;border:2.5px solid var(--color-divider);border-top-color:var(--color-accent);border-radius:50%;animation:cm-spin .8s linear infinite"></span>
+              </sc-if>
+              <sc-if value="{{ line.pending }}" hint-placeholder-val="{{ true }}">
+                <span style="width:22px;height:22px;flex:none;border:2px solid var(--color-divider)"></span>
+              </sc-if>
+              <div style="flex:1;min-width:0">
+                <div style="font-size:14px;font-weight:600;opacity:{{ line.opacity }}">{{ line.label }}</div>
+                <div class="text-muted" style="font-size:12px">{{ line.detail }}</div>
+              </div>
+              <sc-if value="{{ line.isAgent }}" hint-placeholder-val="{{ false }}"><span class="tag tag-neutral" style="flex:none">agent</span></sc-if>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display:flex;gap:var(--space-3);margin-top:var(--space-6)">
+          <button class="btn btn-ghost" onClick="{{ cancelJob }}" style="min-height:44px">← Cancel</button>
+          <button class="btn btn-ghost" onClick="{{ failJob }}" style="min-height:44px;color:var(--color-text);opacity:.55">Simulate a failure</button>
+        </div>
+      </section>
+    </sc-if>
+
+    <!-- ═══════ STEP 2 · CONFIRM ═══════ -->
+    <sc-if value="{{ isConfirm }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Confirm ingredients">
+        <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent);font-weight:800;margin-bottom:var(--space-2)">Step 2 — Confirm</div>
+        <h1 style="font-size:clamp(30px,5.5vw,48px)">Check what we found</h1>
+        <p class="text-muted" style="max-width:52ch;font-size:15px">Rename, remove, or add anything. Only ingredients you confirm here are used in recipes.</p>
+        <sc-if value="{{ weakBanner }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;gap:var(--space-3);align-items:flex-start;border-left:3px solid var(--color-accent);background:var(--color-surface);padding:var(--space-3) var(--space-4);margin-top:var(--space-3);max-width:640px">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-top:2px"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+            <div style="font-size:13px"><strong>Detection was weak on this photo.</strong> We only found what's listed below — add the rest by hand, or <button class="btn btn-ghost" onClick="{{ startExtract }}" style="padding:0;font-size:13px;min-height:0">retake the photo</button>.</div>
+          </div>
+        </sc-if>
+        <div class="hr" style="margin:var(--space-6) 0"></div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:clamp(24px,3vw,40px)">
+
+          <div>
+            <h6 style="color:var(--color-text);opacity:.7">Detected in your photo</h6>
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ detectedRows }}" as="row" hint-placeholder-count="4">
+                <div style="display:flex;align-items:center;gap:var(--space-2);border-bottom:1px solid var(--color-divider);padding:6px 0;min-height:52px">
+                  <input class="input" value="{{ row.name }}" onChange="{{ row.rename }}" aria-label="Ingredient name" style="border-color:transparent;background:transparent;flex:1;min-width:0;font-weight:600;padding-left:0"></input>
+                  <sc-if value="{{ row.uncertain }}" hint-placeholder-val="{{ false }}"><span class="tag tag-outline" style="flex:none">check this</span></sc-if>
+                  <span class="tag tag-neutral" style="flex:none">{{ row.conf }}%</span>
+                  <button class="btn btn-secondary btn-icon" onClick="{{ row.remove }}" aria-label="Remove" style="width:44px;height:44px;flex:none">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+                  </button>
+                </div>
+              </sc-for>
+              <sc-if value="{{ noDetected }}" hint-placeholder-val="{{ false }}">
+                <div class="text-muted" style="padding:var(--space-4) 0;font-size:13px;border-bottom:1px solid var(--color-divider)">Nothing detected — add ingredients below.</div>
+              </sc-if>
+            </div>
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ addedRows }}" as="row" hint-placeholder-count="0">
+                <div style="display:flex;align-items:center;gap:var(--space-2);border-bottom:1px solid var(--color-divider);padding:6px 0;min-height:52px">
+                  <input class="input" value="{{ row.name }}" onChange="{{ row.rename }}" aria-label="Ingredient name" style="border-color:transparent;background:transparent;flex:1;min-width:0;font-weight:600;padding-left:0"></input>
+                  <span class="tag tag-accent" style="flex:none">added by you</span>
+                  <button class="btn btn-secondary btn-icon" onClick="{{ row.remove }}" aria-label="Remove" style="width:44px;height:44px;flex:none">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+                  </button>
+                </div>
+              </sc-for>
+            </div>
+            <form onSubmit="{{ addIngredient }}" style="display:flex;gap:var(--space-2);margin-top:var(--space-3)">
+              <input class="input" placeholder="Add an ingredient…" value="{{ newIng }}" onChange="{{ onNewIng }}" style="flex:1;min-height:44px"></input>
+              <button class="btn btn-secondary" type="submit" style="min-height:44px">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg>
+                Add
+              </button>
+            </form>
+          </div>
+
+          <div>
+            <h6 style="color:var(--color-text);opacity:.7">Pantry staples — tick what you actually have</h6>
+            <p class="text-muted" style="font-size:12px;margin-bottom:var(--space-3)">These are common in most kitchens but weren't in your photo. Nothing is assumed until you tick it.</p>
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ pantryRows }}" as="row" hint-placeholder-count="7">
+                <label style="display:flex;align-items:center;gap:var(--space-3);border-bottom:1px solid var(--color-divider);padding:6px 0;min-height:52px;cursor:pointer" style-hover="background:color-mix(in srgb,var(--color-text) 4%,transparent)">
+                  <input type="checkbox" checked="{{ row.on }}" onChange="{{ row.toggle }}" style="position:absolute;opacity:0;width:0;height:0"></input>
+                  <span style="{{ row.boxStyle }}">
+                    <sc-if value="{{ row.on }}" hint-placeholder-val="{{ false }}">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--color-bg)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
+                    </sc-if>
+                  </span>
+                  <span style="flex:1;font-weight:600;font-size:14px;opacity:{{ row.opacity }}">{{ row.name }}</span>
+                  <span class="tag tag-neutral" style="flex:none">pantry</span>
+                </label>
+              </sc-for>
+            </div>
+
+            <div style="margin-top:var(--space-6);border:1px solid var(--color-divider)">
+              <button onClick="{{ togglePrefs }}" style="all:unset;box-sizing:border-box;display:flex;align-items:center;gap:var(--space-2);width:100%;padding:var(--space-3) var(--space-4);cursor:pointer;min-height:48px" style-hover="background:color-mix(in srgb,var(--color-text) 5%,transparent)">
+                <span style="font-family:var(--font-heading);font-weight:800;font-size:14px;flex:1">Preferences — optional</span>
+                <span class="text-muted" style="font-size:12px">{{ prefsSummary }}</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="{{ chevStyle }}"><path d="m6 9 6 6 6-6"></path></svg>
+              </button>
+              <sc-if value="{{ prefsOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:var(--space-4);border-top:1px solid var(--color-divider);display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:var(--space-4)">
+                  <div class="field">
+                    <label>Diet</label>
+                    <div class="seg">
+                      <sc-for list="{{ dietOpts }}" as="o" hint-placeholder-count="3">
+                        <label class="seg-opt" style="min-height:40px"><input type="radio" name="diet" checked="{{ o.on }}" onChange="{{ o.pick }}"></input>{{ o.label }}</label>
+                      </sc-for>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label>Servings</label>
+                    <div class="seg">
+                      <sc-for list="{{ servingOpts }}" as="o" hint-placeholder-count="3">
+                        <label class="seg-opt" style="min-height:40px"><input type="radio" name="serv" checked="{{ o.on }}" onChange="{{ o.pick }}"></input>{{ o.label }}</label>
+                      </sc-for>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label>Max cooking time</label>
+                    <div class="seg">
+                      <sc-for list="{{ timeOpts }}" as="o" hint-placeholder-count="3">
+                        <label class="seg-opt" style="min-height:40px"><input type="radio" name="time" checked="{{ o.on }}" onChange="{{ o.pick }}"></input>{{ o.label }}</label>
+                      </sc-for>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label>Ideas per batch</label>
+                    <div class="seg">
+                      <sc-for list="{{ countOpts }}" as="o" hint-placeholder-count="3">
+                        <label class="seg-opt" style="min-height:40px"><input type="radio" name="count" checked="{{ o.on }}" onChange="{{ o.pick }}"></input>{{ o.label }}</label>
+                      </sc-for>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label>Allergens to avoid</label>
+                    <input class="input" placeholder="e.g. peanuts, shellfish" value="{{ allergens }}" onChange="{{ onAllergens }}" style="min-height:44px"></input>
+                  </div>
+                </div>
+              </sc-if>
+            </div>
+          </div>
+        </div>
+      </section>
+    </sc-if>
+
+    <!-- ═══════ STEP 3 · OPTIONS ═══════ -->
+    <sc-if value="{{ isOptions }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Recipe options">
+        <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent);font-weight:800;margin-bottom:var(--space-2)">Step 3 — Choose</div>
+        <h1 style="font-size:clamp(30px,5.5vw,48px)">{{ optionsTitle }}</h1>
+        <p class="text-muted" style="max-width:56ch;font-size:15px">Pick one or more. Every image is an AI illustration — your dish may look different. Nutrition is an estimate, not medical advice.</p>
+        <div class="hr" style="margin:var(--space-6) 0"></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr));gap:clamp(16px,2.5vw,28px)">
+          <sc-for list="{{ optionCards }}" as="op" hint-placeholder-count="4">
+            <div role="button" tabIndex="{{ zero }}" onClick="{{ op.toggle }}" onKeyDown="{{ op.key }}" aria-pressed="{{ op.sel }}" style="{{ op.cardStyle }}">
+              <div style="position:relative;aspect-ratio:16/9;background:var(--color-neutral-200);display:grid;place-items:center;overflow:hidden">
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--color-neutral-500)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"></path><path d="M7 2v20"></path><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"></path></svg>
+                <span class="tag tag-neutral" style="position:absolute;left:8px;bottom:8px;font-size:9px;letter-spacing:.08em;text-transform:uppercase">AI illustration</span>
+                <sc-if value="{{ op.sel }}" hint-placeholder-val="{{ false }}">
+                  <span style="position:absolute;top:8px;right:8px;width:28px;height:28px;background:var(--color-accent);display:grid;place-items:center">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-bg)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
+                  </span>
+                </sc-if>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3);flex:1">
+                <div style="display:flex;align-items:baseline;gap:8px">
+                  <span class="card-kicker">{{ op.cuisine }}</span>
+                  <sc-if value="{{ op.fresh }}" hint-placeholder-val="{{ false }}"><span class="tag tag-accent" style="font-size:9px">new batch</span></sc-if>
+                </div>
+                <div class="card-title" style="font-size:19px">{{ op.name }}</div>
+                <p class="card-body">{{ op.summary }}</p>
+                <div class="card-meta" style="gap:var(--space-3);flex-wrap:wrap">
+                  <span style="display:inline-flex;align-items:center;gap:5px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>{{ op.time }} min</span>
+                  <span>{{ op.difficulty }}</span>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;border-top:1px solid var(--color-divider);padding-top:var(--space-2)">
+                  <div><div style="font-family:var(--font-heading);font-weight:800;font-size:14px">{{ op.kcal }}</div><div class="text-muted" style="font-size:9px;text-transform:uppercase;letter-spacing:.06em">kcal</div></div>
+                  <div><div style="font-family:var(--font-heading);font-weight:800;font-size:14px">{{ op.protein }}g</div><div class="text-muted" style="font-size:9px;text-transform:uppercase;letter-spacing:.06em">protein</div></div>
+                  <div><div style="font-family:var(--font-heading);font-weight:800;font-size:14px">{{ op.carbs }}g</div><div class="text-muted" style="font-size:9px;text-transform:uppercase;letter-spacing:.06em">carbs</div></div>
+                  <div><div style="font-family:var(--font-heading);font-weight:800;font-size:14px">{{ op.fat }}g</div><div class="text-muted" style="font-size:9px;text-transform:uppercase;letter-spacing:.06em">fat</div></div>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:2px">
+                  <span class="tag tag-neutral">uses {{ op.usedCount }} of {{ confirmedCount }}</span>
+                  <sc-for list="{{ op.dietTags }}" as="t" hint-placeholder-count="1"><span class="tag tag-neutral">{{ t }}</span></sc-for>
+                </div>
+                <sc-if value="{{ op.hasMissing }}" hint-placeholder-val="{{ false }}">
+                  <div style="font-size:12px;color:var(--color-accent-700);border-top:1px solid var(--color-divider);padding-top:var(--space-2)"><strong>Missing:</strong> {{ op.missingText }}</div>
+                </sc-if>
+                <sc-if value="{{ op.hasOptional }}" hint-placeholder-val="{{ false }}">
+                  <div class="text-muted" style="font-size:12px">Optional: {{ op.optionalText }}</div>
+                </sc-if>
+                <sc-if value="{{ op.hasAllergens }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--color-accent-700)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+                    Contains {{ op.allergenText }}
+                  </div>
+                </sc-if>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <sc-if value="{{ moreExhausted }}" hint-placeholder-val="{{ false }}">
+          <div class="text-muted" style="margin-top:var(--space-6);font-size:13px;border-left:3px solid var(--color-divider);padding-left:var(--space-3)">No fresh ideas left for these ingredients — recipes already shown are never repeated. Try editing your ingredient list.</div>
+        </sc-if>
+        <div style="margin-top:var(--space-6)">
+          <button class="btn btn-ghost" onClick="{{ backToConfirm }}" style="min-height:44px">← Edit ingredients</button>
+        </div>
+      </section>
+    </sc-if>
+
+    <!-- ═══════ STEP 4 · RECIPES ═══════ -->
+    <sc-if value="{{ isRecipes }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Complete recipes">
+        <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent);font-weight:800;margin-bottom:var(--space-2)">Step 4 — Cook</div>
+        <h1 style="font-size:clamp(30px,5.5vw,48px)">{{ recipesTitle }}</h1>
+        <sc-if value="{{ hasTabs }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;gap:0;border:1px solid var(--color-divider);width:fit-content;max-width:100%;overflow-x:auto;margin-top:var(--space-4)">
+            <sc-for list="{{ recipeTabs }}" as="tab" hint-placeholder-count="2">
+              <button onClick="{{ tab.pick }}" style="{{ tab.style }}">{{ tab.name }}</button>
+            </sc-for>
+          </div>
+        </sc-if>
+        <div class="hr" style="margin:var(--space-6) 0"></div>
+
+        <div style="display:flex;flex-wrap:wrap;gap:var(--space-4) clamp(24px,3vw,48px);align-items:baseline">
+          <h2 style="font-size:clamp(24px,4vw,34px);margin:0">{{ r.name }}</h2>
+          <div style="display:flex;flex-wrap:wrap;gap:var(--space-4);font-size:13px" class="text-muted">
+            <span class="tag tag-accent">{{ r.cuisine }}</span>
+            <span style="display:inline-flex;align-items:center;gap:5px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>{{ r.time }} min</span>
+            <span style="display:inline-flex;align-items:center;gap:5px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>serves {{ r.servings }}</span>
+          </div>
+        </div>
+        <sc-if value="{{ r.hasAssumptions }}" hint-placeholder-val="{{ false }}">
+          <p class="text-muted" style="font-size:13px;max-width:60ch;margin-top:var(--space-2)">Assumes: {{ r.assumptionsText }}</p>
+        </sc-if>
+
+        <div style="display:flex;flex-wrap:wrap;gap:clamp(24px,4vw,56px);margin-top:var(--space-6);align-items:flex-start">
+          <div style="flex:1 1 280px;min-width:0;max-width:420px">
+            <h6 style="color:var(--color-text);opacity:.7">Ingredients</h6>
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ r.ings }}" as="ing" hint-placeholder-count="8">
+                <div style="display:flex;align-items:center;gap:var(--space-2);border-bottom:1px solid var(--color-divider);padding:8px 0;min-height:44px">
+                  <span style="font-family:var(--font-heading);font-weight:800;font-size:13px;min-width:64px;flex:none">{{ ing.q }}</span>
+                  <span style="flex:1;font-size:14px;min-width:0">{{ ing.n }}</span>
+                  <span class="tag {{ ing.tagClass }}" style="flex:none">{{ ing.tagLabel }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="margin-top:var(--space-6);border:1px solid var(--color-divider);padding:var(--space-3) var(--space-4)">
+              <h6 style="color:var(--color-text);opacity:.7;margin-bottom:var(--space-2)">Per serving — estimate</h6>
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--space-2);text-align:left">
+                <div><div style="font-family:var(--font-heading);font-weight:800;font-size:18px">{{ r.kcal }}</div><div class="text-muted" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em">kcal</div></div>
+                <div><div style="font-family:var(--font-heading);font-weight:800;font-size:18px">{{ r.protein }}g</div><div class="text-muted" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em">protein</div></div>
+                <div><div style="font-family:var(--font-heading);font-weight:800;font-size:18px">{{ r.carbs }}g</div><div class="text-muted" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em">carbs</div></div>
+                <div><div style="font-family:var(--font-heading);font-weight:800;font-size:18px">{{ r.fat }}g</div><div class="text-muted" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em">fat</div></div>
+              </div>
+              <sc-if value="{{ r.hasAllergens }}" hint-placeholder-val="{{ false }}">
+                <div style="font-size:12px;color:var(--color-accent-700);margin-top:var(--space-2)">Contains {{ r.allergenText }}.</div>
+              </sc-if>
+              <div class="text-muted" style="font-size:11px;margin-top:var(--space-2)">Estimates only — not medical advice.</div>
+            </div>
+          </div>
+
+          <div style="flex:2 1 340px;min-width:0">
+            <div style="display:flex;align-items:baseline;gap:var(--space-3)">
+              <h6 style="color:var(--color-text);opacity:.7;flex:1">Method — tap a step when done</h6>
+              <span class="tag tag-accent" style="flex:none">{{ r.stepsDone }}</span>
+            </div>
+            <div style="display:flex;flex-direction:column">
+              <sc-for list="{{ r.steps }}" as="st" hint-placeholder-count="6">
+                <button onClick="{{ st.toggle }}" style="{{ st.rowStyle }}">
+                  <span style="{{ st.numStyle }}">
+                    <sc-if value="{{ st.done }}" hint-placeholder-val="{{ false }}">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-bg)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>
+                    </sc-if>
+                    <sc-if value="{{ st.notDone }}" hint-placeholder-val="{{ true }}">{{ st.num }}</sc-if>
+                  </span>
+                  <span style="{{ st.textStyle }}">{{ st.text }}</span>
+                </button>
+              </sc-for>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:var(--space-4);margin-top:var(--space-6)">
+              <div style="border-left:2px solid var(--color-accent);padding-left:var(--space-3)">
+                <h6 style="color:var(--color-text);opacity:.7">Tips</h6>
+                <sc-for list="{{ r.tips }}" as="t" hint-placeholder-count="2"><p style="font-size:13px;margin-bottom:var(--space-2)">{{ t }}</p></sc-for>
+              </div>
+              <div style="border-left:2px solid var(--color-divider);padding-left:var(--space-3)">
+                <h6 style="color:var(--color-text);opacity:.7">Substitutions</h6>
+                <sc-for list="{{ r.subs }}" as="s" hint-placeholder-count="2"><p style="font-size:13px;margin-bottom:var(--space-2)">{{ s }}</p></sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:flex;flex-wrap:wrap;gap:var(--space-3);margin-top:var(--space-8)">
+          <button class="btn btn-secondary" onClick="{{ backToOptions }}" style="min-height:48px">← Back to recipe ideas</button>
+          <button class="btn btn-ghost" onClick="{{ startOver }}" style="min-height:48px">Start over with a new photo</button>
+        </div>
+      </section>
+    </sc-if>
+  </main>
+
+  <!-- sticky action bar -->
+  <sc-if value="{{ showBar }}" hint-placeholder-val="{{ false }}">
+    <div style="position:fixed;left:0;right:0;bottom:0;border-top:2px solid var(--color-divider);background:var(--color-bg);z-index:20">
+      <div style="max-width:1160px;margin:0 auto;padding:var(--space-3) clamp(16px,4vw,48px);display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap">
+        <div style="flex:1 1 160px;min-width:0">
+          <div style="font-family:var(--font-heading);font-weight:800;font-size:15px">{{ barCount }}</div>
+          <div class="text-muted" style="font-size:12px">{{ barHint }}</div>
+        </div>
+        <sc-if value="{{ barMore }}" hint-placeholder-val="{{ false }}">
+          <button class="btn btn-secondary" onClick="{{ moreOptions }}" style="min-height:48px">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path><path d="M8 16H3v5"></path></svg>
+            More ideas
+          </button>
+        </sc-if>
+        <button class="btn btn-primary" onClick="{{ barAction }}" disabled="{{ barDisabled }}" style="min-height:48px;padding-inline:22px">
+          {{ barLabel }}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
+        </button>
+      </div>
+    </div>
+  </sc-if>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;theme&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;system&quot;, &quot;light&quot;, &quot;dark&quot;], &quot;default&quot;: &quot;system&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Appearance&quot;},
+  &quot;jobSpeed&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;demo&quot;, &quot;realistic&quot;], &quot;default&quot;: &quot;demo&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Behavior&quot;},
+  &quot;startScreen&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;upload&quot;, &quot;confirm&quot;, &quot;options&quot;, &quot;recipes&quot;], &quot;default&quot;: &quot;upload&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Behavior&quot;}
+}">
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = {
+      step: 'upload', maxReached: 0, dark: null, weak: false,
+      detected: [], added: [], pantry: this.defaultPantry(),
+      newIng: '', prefsOpen: false,
+      prefs: { diet: 'Veg', servings: '2', time: '45 min', count: '4' }, allergens: '',
+      jobLines: [], jobKind: null,
+      selected: {}, batch: 1, moreExhausted: false, shownCount: 0, lastBatchStart: 0,
+      activeTab: 0, checked: {}, error: null,
+    };
+    this.timers = [];
+  }
+  defaultPantry() {
+    return ['Salt', 'Pepper powder', 'Oil or ghee', 'Chilli powder', 'Onion', 'Garlic', 'Ginger']
+      .map((n, i) => ({ id: 'p' + i, name: n, on: false }));
+  }
+  defaultDetected() {
+    return [
+      { id: 'd1', name: 'Tomatoes', conf: 96 }, { id: 'd2', name: 'Paneer', conf: 91 },
+      { id: 'd3', name: 'Spinach', conf: 88 }, { id: 'd4', name: 'Green chillies', conf: 74 },
+      { id: 'd5', name: 'Curd', conf: 63 }, { id: 'd6', name: 'Coriander', conf: 58 },
+    ];
+  }
+  optionData() {
+    return [
+      { id: 'o1', batch: 1, name: 'Palak Paneer', cuisine: 'North Indian', summary: 'Silky spinach gravy with soft paneer cubes — a beginner-friendly classic.', time: 35, difficulty: 'Easy', kcal: 410, protein: 19, carbs: 14, fat: 31, usedCount: 8, dietTags: ['Vegetarian', 'Gluten-free'], missing: ['cream'], optional: ['coriander'], allergens: ['dairy'] },
+      { id: 'o2', batch: 1, name: 'Paneer Bhurji', cuisine: 'North Indian', summary: 'Scrambled paneer with tomato, onion and green chilli. Fast weeknight food.', time: 20, difficulty: 'Easy', kcal: 360, protein: 21, carbs: 9, fat: 27, usedCount: 7, dietTags: ['Vegetarian', 'Gluten-free'], missing: [], optional: ['coriander'], allergens: ['dairy'] },
+      { id: 'o3', batch: 1, name: 'Tomato Rasam', cuisine: 'South Indian', summary: 'A light, peppery tomato broth. Drink it or pour it over rice.', time: 25, difficulty: 'Medium', kcal: 120, protein: 4, carbs: 18, fat: 4, usedCount: 6, dietTags: ['Vegan', 'Gluten-free'], missing: ['tamarind'], optional: [], allergens: [] },
+      { id: 'o4', batch: 1, name: 'Chilli Paneer', cuisine: 'Indo-Chinese', summary: 'Crisp paneer tossed in a hot-sweet chilli glaze with peppers and onion.', time: 30, difficulty: 'Medium', kcal: 450, protein: 20, carbs: 26, fat: 30, usedCount: 6, dietTags: ['Vegetarian'], missing: ['soy sauce', 'cornflour'], optional: [], allergens: ['dairy', 'soy'] },
+      { id: 'o5', batch: 2, name: 'Spinach Tomato Dal', cuisine: 'North Indian', summary: 'Comforting lentils simmered with spinach and tomato tempering.', time: 30, difficulty: 'Easy', kcal: 260, protein: 13, carbs: 34, fat: 8, usedCount: 7, dietTags: ['Vegan', 'Gluten-free'], missing: ['toor dal'], optional: ['curd'], allergens: [] },
+      { id: 'o6', batch: 2, name: 'Paneer-Stuffed Tomatoes', cuisine: 'Continental', summary: 'Whole tomatoes baked with a spiced paneer-spinach filling.', time: 40, difficulty: 'Medium', kcal: 330, protein: 16, carbs: 15, fat: 24, usedCount: 8, dietTags: ['Vegetarian', 'Gluten-free'], missing: [], optional: ['cheese'], allergens: ['dairy'] },
+    ];
+  }
+  recipeData() {
+    const T = (q, n, s) => ({ q, n, s });
+    return {
+      o1: { name: 'Palak Paneer', cuisine: 'North Indian', servings: 2, time: 35, kcal: 410, protein: 19, carbs: 14, fat: 31, allergens: 'dairy',
+        assumptions: ['medium spice level', 'fresh spinach, not frozen'],
+        ings: [T('250 g', 'spinach', 'have'), T('200 g', 'paneer', 'have'), T('2', 'tomatoes', 'have'), T('1', 'green chilli', 'have'), T('1', 'onion, chopped', 'pantry'), T('4 cloves', 'garlic', 'pantry'), T('2 tbsp', 'oil or ghee', 'pantry'), T('1 tsp', 'chilli powder', 'pantry'), T('to taste', 'salt', 'pantry'), T('3 tbsp', 'cream', 'missing')],
+        steps: ['Blanch spinach in boiling water for 90 seconds, then move it straight into cold water.', 'Blend the spinach with the green chilli into a smooth purée.', 'Heat oil, then soften the onion and garlic over medium heat, about 5 minutes.', 'Add chopped tomatoes, chilli powder and salt; cook until the oil separates.', 'Pour in the spinach purée and simmer gently for 6–8 minutes.', 'Fold in paneer cubes and cook 3 more minutes without boiling hard.', 'Finish with cream — or whisked curd, since cream is missing.'],
+        tips: ['Cold water after blanching keeps the gravy bright green.', 'Soak paneer in warm salted water for 10 minutes to keep it soft.'],
+        subs: ['Cream → whisked curd (you confirmed curd).', 'Paneer → firm tofu for a vegan version.'] },
+      o2: { name: 'Paneer Bhurji', cuisine: 'North Indian', servings: 2, time: 20, kcal: 360, protein: 21, carbs: 9, fat: 27, allergens: 'dairy',
+        assumptions: ['crumbled, not cubed paneer'],
+        ings: [T('200 g', 'paneer, crumbled', 'have'), T('2', 'tomatoes, chopped', 'have'), T('1', 'green chilli, sliced', 'have'), T('1', 'onion, diced', 'pantry'), T('2 tbsp', 'oil or ghee', 'pantry'), T('1 tsp', 'chilli powder', 'pantry'), T('to taste', 'salt', 'pantry'), T('a handful', 'coriander', 'optional')],
+        steps: ['Heat oil in a wide pan over medium-high heat.', 'Fry the onion and green chilli until the onion edges brown.', 'Add tomatoes, chilli powder and salt; cook until jammy, about 6 minutes.', 'Crumble in the paneer and toss for 2–3 minutes — no longer, or it toughens.', 'Taste, adjust salt, and finish with coriander if you have it.'],
+        tips: ['High heat and a wide pan stop the bhurji going watery.', 'Great stuffed into a toasted sandwich the next day.'],
+        subs: ['Paneer → scrambled tofu.', 'Coriander is optional — skip it freely.'] },
+      o3: { name: 'Tomato Rasam', cuisine: 'South Indian', servings: 2, time: 25, kcal: 120, protein: 4, carbs: 18, fat: 4, allergens: '',
+        assumptions: ['no rasam powder — a simple pepper-cumin base instead'],
+        ings: [T('4', 'ripe tomatoes', 'have'), T('1', 'green chilli, slit', 'have'), T('4 cloves', 'garlic, crushed', 'pantry'), T('1 tsp', 'pepper powder', 'pantry'), T('1 tbsp', 'oil or ghee', 'pantry'), T('to taste', 'salt', 'pantry'), T('small ball', 'tamarind', 'missing')],
+        steps: ['Simmer chopped tomatoes in 500 ml water with salt for 10 minutes.', 'Mash the tomatoes roughly in the pot to release their pulp.', 'Add crushed garlic, slit chilli and pepper powder; simmer 5 minutes.', 'No tamarind? Cook the tomatoes 5 minutes longer to deepen the sourness.', 'Heat oil, bloom a pinch of pepper in it, and pour over the rasam.', 'Rest 5 minutes before serving so the flavours settle.'],
+        tips: ['Rasam should stay thin — resist thickening it.', 'Serve over rice or sip it hot like a soup.'],
+        subs: ['Tamarind → extra-ripe tomatoes cooked longer.', 'Pepper powder → extra green chilli.'] },
+      o4: { name: 'Chilli Paneer', cuisine: 'Indo-Chinese', servings: 2, time: 30, kcal: 450, protein: 20, carbs: 26, fat: 30, allergens: 'dairy and soy',
+        assumptions: ['a restaurant-style dry version, not gravy'],
+        ings: [T('200 g', 'paneer, cubed', 'have'), T('1', 'green chilli, sliced', 'have'), T('1', 'onion, in petals', 'pantry'), T('4 cloves', 'garlic, minced', 'pantry'), T('3 tbsp', 'oil', 'pantry'), T('1 tsp', 'chilli powder', 'pantry'), T('2 tbsp', 'soy sauce', 'missing'), T('2 tbsp', 'cornflour', 'missing')],
+        steps: ['Toss paneer cubes in cornflour, salt and chilli powder.', 'Shallow-fry the cubes until golden on all sides; set aside.', 'Stir-fry garlic, green chilli and onion petals on high heat for 2 minutes.', 'Add soy sauce and a splash of water to make a quick glaze.', 'Return the paneer, toss to coat, and cook 1 more minute.', 'Serve hot — the coating softens as it sits.'],
+        tips: ['Keep the flame high; this dish hates a crowded, cool pan.'],
+        subs: ['Cornflour → rice flour or plain flour.', 'Soy sauce is hard to replace — this dish really needs it.'] },
+      o5: { name: 'Spinach Tomato Dal', cuisine: 'North Indian', servings: 2, time: 30, kcal: 260, protein: 13, carbs: 34, fat: 8, allergens: '',
+        assumptions: ['pressure cooker or instant pot available'],
+        ings: [T('150 g', 'toor dal', 'missing'), T('150 g', 'spinach, chopped', 'have'), T('2', 'tomatoes', 'have'), T('1', 'green chilli', 'have'), T('4 cloves', 'garlic', 'pantry'), T('1 tbsp', 'oil or ghee', 'pantry'), T('1 tsp', 'chilli powder', 'pantry'), T('to taste', 'salt', 'pantry')],
+        steps: ['Pressure-cook the dal with salt and 400 ml water until soft.', 'Sauté garlic and green chilli in oil until fragrant.', 'Add tomatoes and chilli powder; cook down to a thick masala.', 'Stir in spinach and wilt it for 2 minutes.', 'Combine with the cooked dal and simmer 5 minutes.', 'Adjust salt and consistency with hot water.'],
+        tips: ['A spoon of ghee at the end transforms this dal.'],
+        subs: ['Toor dal → red lentils (cook faster, no pressure cooker needed).'] },
+      o6: { name: 'Paneer-Stuffed Tomatoes', cuisine: 'Continental', servings: 2, time: 40, kcal: 330, protein: 16, carbs: 15, fat: 24, allergens: 'dairy',
+        assumptions: ['an oven or air fryer available', 'large, firm tomatoes'],
+        ings: [T('4 large', 'tomatoes', 'have'), T('150 g', 'paneer, crumbled', 'have'), T('80 g', 'spinach, chopped', 'have'), T('1', 'onion, minced', 'pantry'), T('2 cloves', 'garlic', 'pantry'), T('1 tbsp', 'oil', 'pantry'), T('to taste', 'salt', 'pantry'), T('30 g', 'cheese', 'optional')],
+        steps: ['Slice the tops off the tomatoes and scoop out the pulp; save it.', 'Sauté onion and garlic in oil, then add the pulp and cook it down.', 'Stir in spinach, crumbled paneer and salt; cook 3 minutes.', 'Fill the tomato shells with the paneer mixture.', 'Bake at 190 °C for 18–20 minutes until the shells wrinkle.', 'Rest 5 minutes — the filling sets as it cools.'],
+        tips: ['Salt the empty shells and drain them upside down while you cook the filling.'],
+        subs: ['Cheese topping is optional — the dish stands without it.'] },
+    };
+  }
+  jobPlans() {
+    return {
+      extract: { kicker: 'Step 1 — Reading your photo', title: 'Looking at your ingredients', sub: 'The Ingredient Extraction Agent lists what it sees and how sure it is. You check everything next.', next: 'confirm', lines: [
+        { label: 'Photo uploaded', detail: 'Stays on this device', agent: false },
+        { label: 'Ingredient Extraction Agent', detail: 'Identifying items in the image', agent: true },
+        { label: 'Scoring confidence', detail: 'Uncertain items get flagged for you', agent: false }] },
+      genopts: { kicker: 'Step 3 — Generating ideas', title: 'Cooking up suggestions', sub: 'Only your confirmed ingredients are used. Nothing else is assumed.', next: 'options', lines: [
+        { label: 'Master Chef Agent', detail: 'Drafting dishes from your confirmed list', agent: true },
+        { label: 'Nutrition Agent', detail: 'Estimating calories, macros and diet tags', agent: true },
+        { label: 'Image Agent', detail: 'Illustrating each dish (AI illustration)', agent: true },
+        { label: 'Assembling options', detail: 'Combining ideas, nutrition and images', agent: false }] },
+    };
+  }
+  recipeJobPlan(names) {
+    return { kicker: 'Step 4 — Writing your recipes', title: names.length > 1 ? names.length + ' recipes, in parallel' : 'Writing your recipe', sub: 'One Specialized Recipe Agent per dish, each an expert in its cuisine. They run at the same time.', next: 'recipes', lines: names.map(n => ({ label: 'Specialized Recipe Agent — ' + n, detail: 'Quantities, numbered steps, tips, substitutions', agent: true })).concat([{ label: 'Collecting results', detail: 'All recipes return together', agent: false }]) };
+  }
+  clearTimers() { this.timers.forEach(clearTimeout); this.timers = []; }
+  componentWillUnmount() { this.clearTimers(); this._mq && this._mq.removeEventListener('change', this._mqFn); }
+  componentDidMount() {
+    const stored = (() => { try { return localStorage.getItem('cm-theme'); } catch (e) { return null; } })();
+    const pref = stored || this.props.theme || 'system';
+    this._mq = window.matchMedia('(prefers-color-scheme: dark)');
+    this._mqFn = () => { if (this.themeChoice() === 'system') this.applyTheme(); };
+    this._mq.addEventListener('change', this._mqFn);
+    this.setState({ themeChoice: pref }, () => this.applyTheme());
+    const start = this.props.startScreen;
+    if (start === 'confirm') this.seedConfirm();
+    else if (start === 'options') this.seedOptions();
+    else if (start === 'recipes') { this.seedOptions(); this.setState({ selected: { o1: true, o2: true }, step: 'recipes', maxReached: 3 }); }
+  }
+  seedConfirm() { this.setState({ detected: this.defaultDetected(), step: 'confirm', maxReached: 1 }); }
+  seedOptions() { const p = this.defaultPantry(); [0, 2, 3, 4, 5].forEach(i => p[i].on = true); this.setState({ detected: this.defaultDetected(), pantry: p, step: 'options', maxReached: 2, shownCount: 4 }); }
+  themeChoice() { return this.state.themeChoice || this.props.theme || 'system'; }
+  resolvedDark() { const c = this.themeChoice(); return c === 'dark' || (c === 'system' && this._mq && this._mq.matches); }
+  applyTheme() { document.documentElement.dataset.theme = this.resolvedDark() ? 'dark' : 'light'; this.forceUpdate(); }
+  setTheme(c) { try { localStorage.setItem('cm-theme', c); } catch (e) {} this.setState({ themeChoice: c }, () => this.applyTheme()); }
+  runJob(kind, plan, onDone) {
+    this.clearTimers();
+    const speed = (this.props.jobSpeed === 'realistic') ? 2100 : 850;
+    const lines = plan.lines.map(l => ({ ...l, state: 'pending' }));
+    this.setState({ step: 'job', jobKind: kind, jobPlan: plan, jobLines: lines });
+    const parallel = kind === 'genrecipes';
+    lines.forEach((_, i) => {
+      const startAt = parallel ? (i === lines.length - 1 ? speed * 0.4 : 120 + i * 260) : i * speed;
+      const endAt = parallel ? (i === lines.length - 1 ? speed * 2.4 : speed * (1.4 + i * 0.35)) : (i + 1) * speed;
+      this.timers.push(setTimeout(() => this.mark(i, 'running'), startAt));
+      this.timers.push(setTimeout(() => this.mark(i, 'done'), endAt));
+    });
+    const total = parallel ? speed * 2.4 + 400 : lines.length * speed + 350;
+    this.timers.push(setTimeout(onDone, total));
+  }
+  mark(i, s) { this.setState(st => ({ jobLines: st.jobLines.map((l, j) => j === i ? { ...l, state: s } : l) })); }
+  goStep(step, maxIdx) { this.setState(st => ({ step, maxReached: Math.max(st.maxReached, maxIdx), error: null })); }
+  renderVals() {
+    const st = this.state, opts = this.optionData(), recipes = this.recipeData();
+    const stepIdx = { upload: 0, confirm: 1, options: 2, recipes: 3 }[st.step];
+    const jobTarget = st.jobKind === 'extract' ? 1 : st.jobKind === 'genopts' ? 2 : 3;
+    const curIdx = st.step === 'job' ? jobTarget : stepIdx;
+    const confirmedCount = st.detected.length + st.added.length + st.pantry.filter(p => p.on).length;
+    const selectedIds = Object.keys(st.selected).filter(k => st.selected[k]);
+    const shownOpts = opts.slice(0, st.shownCount || 4);
+    const dark = this.resolvedDark();
+
+    const stepper = [{ label: 'Photo' }, { label: 'Confirm' }, { label: 'Choose' }, { label: 'Cook' }].map((s, i) => {
+      const active = i === curIdx, done = i < curIdx || (i <= st.maxReached && i !== curIdx);
+      const reachable = i <= st.maxReached && st.step !== 'job';
+      return {
+        num: String(i + 1), label: s.label, locked: !reachable,
+        go: () => { if (!reachable) return; this.clearTimers(); this.setState({ step: ['upload', 'confirm', 'options', 'recipes'][i], error: null }); },
+        style: `all:unset;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:14px 2px;font-family:var(--font-heading);font-weight:800;font-size:12px;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap;cursor:${reachable ? 'pointer' : 'default'};color:${active ? 'var(--color-accent)' : done ? 'var(--color-text)' : 'color-mix(in srgb,var(--color-text) 40%,transparent)'};box-shadow:${active ? 'inset 0 -3px 0 var(--color-accent)' : 'none'}`,
+        numStyle: `display:grid;place-items:center;width:22px;height:22px;font-size:11px;flex:none;border:1.5px solid currentColor;${active ? 'background:var(--color-accent);border-color:var(--color-accent);color:var(--color-bg)' : ''}`,
+      };
+    });
+
+    const mkRow = (list, key) => list.map(item => ({
+      name: item.name, conf: item.conf, uncertain: item.conf != null && item.conf < 70,
+      rename: (e) => this.setState(s => ({ [key]: s[key].map(x => x.id === item.id ? { ...x, name: e.target.value } : x) })),
+      remove: () => this.setState(s => ({ [key]: s[key].filter(x => x.id !== item.id) })),
+    }));
+
+    const pantryRows = st.pantry.map(p => ({
+      name: p.name, on: p.on, opacity: p.on ? 1 : 0.6,
+      toggle: () => this.setState(s => ({ pantry: s.pantry.map(x => x.id === p.id ? { ...x, on: !x.on } : x) })),
+      boxStyle: `width:22px;height:22px;flex:none;display:grid;place-items:center;border:2px solid ${p.on ? 'var(--color-accent)' : 'var(--color-divider)'};background:${p.on ? 'var(--color-accent)' : 'transparent'}`,
+    }));
+
+    const segRow = (key, options) => options.map(label => ({
+      label, on: st.prefs[key] === label,
+      pick: () => this.setState(s => ({ prefs: { ...s.prefs, [key]: label } })),
+    }));
+
+    const optionCards = shownOpts.map((o, idx) => {
+      const sel = !!st.selected[o.id];
+      return {
+        ...o, sel, usedCount: Math.min(o.usedCount, confirmedCount), fresh: st.lastBatchStart > 0 && idx >= st.lastBatchStart,
+        hasMissing: o.missing.length > 0, missingText: o.missing.join(', '),
+        hasOptional: o.optional.length > 0, optionalText: o.optional.join(', '),
+        hasAllergens: o.allergens.length > 0, allergenText: o.allergens.join(' and '),
+        toggle: () => this.setState(s => ({ selected: { ...s.selected, [o.id]: !s.selected[o.id] } })),
+        key: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.setState(s => ({ selected: { ...s.selected, [o.id]: !s.selected[o.id] } })); } },
+        cardStyle: `display:flex;flex-direction:column;background:var(--color-surface);cursor:pointer;outline:${sel ? '2px solid var(--color-accent)' : '1px solid var(--color-divider)'};outline-offset:-1px;box-shadow:${sel ? 'var(--shadow-md)' : 'none'}`,
+      };
+    });
+
+    const activeId = selectedIds[Math.min(st.activeTab, Math.max(selectedIds.length - 1, 0))] || selectedIds[0];
+    const rd = recipes[activeId] || recipes.o1;
+    const checked = st.checked[activeId] || {};
+    const doneCount = rd.steps.filter((_, i) => checked[i]).length;
+    const r = {
+      ...rd,
+      hasAssumptions: rd.assumptions.length > 0, assumptionsText: rd.assumptions.join('; '),
+      hasAllergens: !!rd.allergens, allergenText: rd.allergens,
+      stepsDone: doneCount + ' / ' + rd.steps.length + ' done',
+      ings: rd.ings.map(i => ({ q: i.q, n: i.n,
+        tagClass: i.s === 'missing' ? 'tag-outline' : i.s === 'optional' ? 'tag-accent-2' : i.s === 'pantry' ? 'tag-accent' : 'tag-neutral',
+        tagLabel: i.s === 'have' ? 'confirmed' : i.s })),
+      steps: rd.steps.map((text, i) => {
+        const done = !!checked[i];
+        return { text, num: String(i + 1), done, notDone: !done,
+          toggle: () => this.setState(s => ({ checked: { ...s.checked, [activeId]: { ...(s.checked[activeId] || {}), [i]: !done } } })),
+          rowStyle: 'all:unset;box-sizing:border-box;display:flex;gap:14px;align-items:flex-start;width:100%;padding:12px 4px;border-bottom:1px solid var(--color-divider);cursor:pointer;min-height:52px',
+          numStyle: `display:grid;place-items:center;width:28px;height:28px;flex:none;font-family:var(--font-heading);font-weight:800;font-size:13px;border:2px solid ${done ? 'var(--color-accent)' : 'var(--color-divider)'};background:${done ? 'var(--color-accent)' : 'transparent'};color:${done ? 'var(--color-bg)' : 'inherit'}`,
+          textStyle: `font-size:15px;line-height:1.5;padding-top:3px;${done ? 'opacity:.45;text-decoration:line-through' : ''}` };
+      }),
+    };
+
+    const recipeTabs = selectedIds.map((id, i) => ({
+      name: (recipes[id] || {}).name || id,
+      pick: () => this.setState({ activeTab: i }),
+      style: `all:unset;box-sizing:border-box;padding:12px 18px;font-family:var(--font-heading);font-weight:800;font-size:13px;white-space:nowrap;cursor:pointer;min-height:44px;display:inline-flex;align-items:center;${i === Math.min(st.activeTab, selectedIds.length - 1) ? 'background:var(--color-accent);color:var(--color-bg)' : 'border-right:1px solid var(--color-divider)'}`,
+    }));
+
+    const plan = st.jobPlan || {};
+    const isConfirm = st.step === 'confirm', isOptions = st.step === 'options';
+    const barDisabled = isConfirm ? confirmedCount === 0 : selectedIds.length === 0;
+    const prefsBits = [st.prefs.diet, 'serves ' + st.prefs.servings, '≤ ' + st.prefs.time, st.prefs.count + ' ideas'];
+
+    return {
+      zero: 0,
+      isUpload: st.step === 'upload', isJob: st.step === 'job', isConfirm, isOptions, isRecipes: st.step === 'recipes',
+      isDark: dark, isLight: !dark, themeTitle: 'Theme: ' + this.themeChoice() + ' — tap to switch',
+      toggleTheme: () => this.setTheme(dark ? 'light' : 'dark'),
+      stepper,
+      showError: !!st.error, errorTitle: (st.error || {}).title, errorMsg: (st.error || {}).msg,
+      retryError: () => { const e = st.error; this.setState({ error: null }); e && e.retry && e.retry(); },
+      dismissError: () => this.setState({ error: null }),
+      startExtract: () => this.runJob('extract', this.jobPlans().extract, () => { this.setState({ detected: this.defaultDetected(), weak: false }); this.goStep('confirm', 1); }),
+      startWeak: () => this.runJob('extract', this.jobPlans().extract, () => { this.setState({ detected: [{ id: 'd1', name: 'Tomatoes', conf: 41 }], weak: true }); this.goStep('confirm', 1); }),
+      startManual: () => { this.setState({ detected: [], weak: false }); this.goStep('confirm', 1); },
+      jobKicker: plan.kicker, jobTitle: plan.title, jobSub: plan.sub,
+      jobLines: st.jobLines.map(l => ({ label: l.label, detail: l.detail, isAgent: l.agent, done: l.state === 'done', running: l.state === 'running', pending: l.state === 'pending', opacity: l.state === 'pending' ? 0.45 : 1 })),
+      cancelJob: () => { this.clearTimers(); this.setState({ step: st.jobKind === 'extract' ? 'upload' : st.jobKind === 'genopts' ? 'confirm' : 'options' }); },
+      failJob: () => { this.clearTimers(); const kind = st.jobKind; const back = kind === 'extract' ? 'upload' : kind === 'genopts' ? 'confirm' : 'options';
+        this.setState({ step: back, error: { title: 'That took too long', msg: 'The model timed out. Nothing was lost — your ingredients are exactly as you left them.', retry: () => { const p = kind === 'genrecipes' ? this.recipeJobPlan(selectedIds.map(id => recipes[id].name)) : this.jobPlans()[kind]; this.runJob(kind, p, () => this.goStep(p.next, kind === 'extract' ? 1 : kind === 'genopts' ? 2 : 3)); } } }); },
+      weakBanner: st.weak, noDetected: st.detected.length === 0,
+      detectedRows: mkRow(st.detected, 'detected'), addedRows: mkRow(st.added, 'added'), pantryRows,
+      newIng: st.newIng, onNewIng: (e) => this.setState({ newIng: e.target.value }),
+      addIngredient: (e) => { e.preventDefault(); const n = st.newIng.trim(); if (!n) return; this.setState(s => ({ added: [...s.added, { id: 'u' + Date.now(), name: n }], newIng: '' })); },
+      prefsOpen: st.prefsOpen, togglePrefs: () => this.setState(s => ({ prefsOpen: !s.prefsOpen })),
+      prefsSummary: prefsBits.join(' · '),
+      chevStyle: `flex:none;transition:transform .2s;transform:rotate(${st.prefsOpen ? 180 : 0}deg)`,
+      dietOpts: segRow('diet', ['None', 'Veg', 'Vegan']), servingOpts: segRow('servings', ['1', '2', '4']), timeOpts: segRow('time', ['30 min', '45 min', '60 min']), countOpts: segRow('count', ['3', '4', '6']),
+      allergens: st.allergens, onAllergens: (e) => this.setState({ allergens: e.target.value }),
+      confirmedCount,
+      optionsTitle: shownOpts.length + ' ideas from your ' + confirmedCount + ' ingredients',
+      optionCards, moreExhausted: st.moreExhausted,
+      backToConfirm: () => this.setState({ step: 'confirm' }),
+      moreOptions: () => { const total = opts.length; if (st.shownCount >= total) { this.setState({ moreExhausted: true }); return; }
+        this.runJob('genopts', { ...this.jobPlans().genopts, kicker: 'Step 3 — More ideas', title: 'A fresh batch', sub: 'Recipes you have already seen are remembered and excluded.' }, () => { this.setState(s => ({ lastBatchStart: s.shownCount, shownCount: Math.min(total, s.shownCount + (parseInt(s.prefs.count, 10) || 4)) })); this.goStep('options', 2); }); },
+      recipesTitle: selectedIds.length > 1 ? 'Your ' + selectedIds.length + ' recipes, ready' : 'Your recipe, ready',
+      hasTabs: selectedIds.length > 1, recipeTabs, r,
+      backToOptions: () => this.setState({ step: 'options' }),
+      startOver: () => { this.clearTimers(); this.setState({ step: 'upload', maxReached: 0, weak: false, detected: [], added: [], pantry: this.defaultPantry(), selected: {}, batch: 1, moreExhausted: false, shownCount: 0, lastBatchStart: 0, activeTab: 0, checked: {}, error: null }); },
+      showBar: isConfirm || isOptions,
+      barCount: isConfirm ? confirmedCount + (confirmedCount === 1 ? ' ingredient' : ' ingredients') + ' confirmed' : selectedIds.length + ' of ' + shownOpts.length + ' selected',
+      barHint: isConfirm ? (confirmedCount === 0 ? 'Add at least one ingredient to continue' : 'Detected + pantry + added by you') : (selectedIds.length === 0 ? 'Pick at least one dish' : 'Each recipe is written by its own agent, in parallel'),
+      barMore: isOptions, barDisabled,
+      barLabel: isConfirm ? 'Generate recipe ideas' : ('Create ' + (selectedIds.length || '') + (selectedIds.length === 1 ? ' recipe' : ' recipes')).replace('  ', ' '),
+      barAction: () => {
+        if (barDisabled) return;
+        if (isConfirm) this.runJob('genopts', this.jobPlans().genopts, () => { this.setState({ shownCount: Math.min(parseInt(st.prefs.count, 10) || 4, opts.length), lastBatchStart: 0, moreExhausted: false }); this.goStep('options', 2); });
+        else this.runJob('genrecipes', this.recipeJobPlan(selectedIds.map(id => recipes[id].name)), () => { this.setState({ activeTab: 0 }); this.goStep('recipes', 3); });
+      },
+    };
+  }
+}
+
+</script>
+</body>
+</html>

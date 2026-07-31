@@ -56,13 +56,13 @@
       "type": "string"
     },
     {
-      "key": "option_ids_json",
+      "key": "available_option_ids_json",
       "value": "[]",
       "type": "string"
     },
     {
-      "key": "selected_option_count",
-      "value": "2",
+      "key": "selected_option_ids_json",
+      "value": "[]",
       "type": "string"
     },
     {
@@ -387,19 +387,17 @@
                   "  pm.expect(pm.response.json().recipe_options.length).to.be.above(0);",
                   "});",
                   "const body = pm.response.json();",
-                  "const requestedCount = Number(pm.collectionVariables.get('selected_option_count') || 2);",
-                  "const selectedIds = body.recipe_options",
-                  "  .slice(0, Math.max(1, Math.min(requestedCount, 6)))",
-                  "  .map(function (option) { return option.id; });",
-                  "pm.collectionVariables.set('option_id', selectedIds[0]);",
-                  "pm.collectionVariables.set('option_ids_json', JSON.stringify(selectedIds));",
+                  "const availableIds = body.recipe_options.map(function (option) { return option.id; });",
+                  "pm.collectionVariables.set('option_id', availableIds[0]);",
+                  "pm.collectionVariables.set('available_option_ids_json', JSON.stringify(availableIds));",
                   "const firstPreview = body.recipe_options.find(function (option) {",
                   "  return option.preview && option.preview.artifact_id;",
                   "});",
                   "if (firstPreview) {",
                   "  pm.collectionVariables.set('artifact_id', firstPreview.preview.artifact_id);",
                   "}",
-                  "console.log('Selected recipe option IDs:', selectedIds);"
+                  "console.table(body.recipe_options.map(function (option) { return { id: option.id, name: option.name }; }));",
+                  "console.warn('Before request 15, copy only the IDs you want into selected_option_ids_json.');"
                 ]
               }
             }
@@ -407,7 +405,7 @@
           "request": {
             "method": "GET",
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}",
-            "description": "Captures recipe option IDs for complete-recipe generation and the first available preview artifact ID."
+            "description": "Lists every generated option and captures their IDs in `available_option_ids_json`. In the collection variables, manually set `selected_option_ids_json` to only the one or more IDs you want to turn into complete recipes. The selection remains empty by default."
           },
           "response": []
         },
@@ -519,12 +517,11 @@
                   "  pm.expect(pm.response.json().stage).to.eql('options_ready');",
                   "});",
                   "const body = pm.response.json();",
-                  "const requestedCount = Number(pm.collectionVariables.get('selected_option_count') || 2);",
-                  "const selectedIds = body.recipe_options",
-                  "  .slice(0, Math.max(1, Math.min(requestedCount, 6)))",
-                  "  .map(function (option) { return option.id; });",
-                  "pm.collectionVariables.set('option_id', selectedIds[0]);",
-                  "pm.collectionVariables.set('option_ids_json', JSON.stringify(selectedIds));"
+                  "const availableIds = body.recipe_options.map(function (option) { return option.id; });",
+                  "pm.collectionVariables.set('option_id', availableIds[0]);",
+                  "pm.collectionVariables.set('available_option_ids_json', JSON.stringify(availableIds));",
+                  "console.table(body.recipe_options.map(function (option) { return { id: option.id, name: option.name }; }));",
+                  "console.warn('Review selected_option_ids_json before request 15; it is never auto-filled.');"
                 ]
               }
             }
@@ -532,7 +529,7 @@
           "request": {
             "method": "GET",
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}",
-            "description": "Refreshes the full option list after the optional additional batch and selects the first `selected_option_count` options."
+            "description": "Refreshes `available_option_ids_json` after the optional additional batch without changing your manual `selected_option_ids_json` selection."
           },
           "response": []
         }
@@ -545,6 +542,25 @@
         {
           "name": "15 Generate Complete Recipes",
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const selectedIds = JSON.parse(pm.collectionVariables.get('selected_option_ids_json') || '[]');",
+                  "const availableIds = JSON.parse(pm.collectionVariables.get('available_option_ids_json') || '[]');",
+                  "if (!Array.isArray(selectedIds) || selectedIds.length < 1 || selectedIds.length > 6) {",
+                  "  console.error('Set selected_option_ids_json to a JSON array containing 1-6 option IDs from request 10 or 14.');",
+                  "  pm.execution.skipRequest();",
+                  "}",
+                  "const unknownIds = selectedIds.filter(function (id) { return !availableIds.includes(id); });",
+                  "if (unknownIds.length > 0) {",
+                  "  console.error('selected_option_ids_json contains unknown IDs: ' + unknownIds.join(', '));",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -571,7 +587,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"option_ids\": {{option_ids_json}}\n}",
+              "raw": "{\n  \"option_ids\": {{selected_option_ids_json}}\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -579,7 +595,7 @@
               }
             },
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}/recipes",
-            "description": "Queues full recipe generation for the option IDs captured by request 10 or 14. Select between one and six IDs."
+            "description": "Queues full recipe generation only for IDs you manually placed in `selected_option_ids_json`. Request 10 or 14 prints every available option ID and name. Select between one and six IDs."
           },
           "response": []
         },

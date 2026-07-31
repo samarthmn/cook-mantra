@@ -68,6 +68,24 @@ def test_thinking_left_unset_defers_to_the_model(settings: Settings) -> None:
     assert model.reasoning is None
 
 
+def test_reasoning_effort_levels_are_forwarded(settings: Settings) -> None:
+    model = get_model(Agent.NUTRITION, thinking="low", settings=settings)
+
+    assert model.reasoning == "low"
+
+
+def test_generation_budgets_can_be_configured(settings: Settings) -> None:
+    model = get_model(
+        Agent.SPECIALIZED_RECIPE,
+        num_predict=4_096,
+        num_ctx=16_384,
+        settings=settings,
+    )
+
+    assert model.num_predict == 4_096
+    assert model.num_ctx == 16_384
+
+
 def test_image_agent_is_rejected_as_a_chat_model(settings: Settings) -> None:
     with pytest.raises(ValueError, match="generates images"):
         get_model(Agent.IMAGE, settings=settings)

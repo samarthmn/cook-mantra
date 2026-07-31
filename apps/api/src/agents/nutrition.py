@@ -65,7 +65,7 @@ class OllamaNutritionAgent:
         if model is None:
             model = get_model(
                 Agent.NUTRITION,
-                thinking=False,
+                thinking="low",
                 settings=self._settings,
             ).with_structured_output(NutritionModelOutput)
 

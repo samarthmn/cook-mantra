@@ -42,6 +42,9 @@ def _requests(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def test_postman_collection_is_portable_and_covers_the_public_api() -> None:
     collection = json.loads(COLLECTION_PATH.read_text())
     requests = _requests(collection["item"])
+    variables = {
+        variable["key"]: variable["value"] for variable in collection["variable"]
+    }
 
     assert collection["info"]["schema"].endswith(
         "/json/collection/v2.1.0/collection.json"
@@ -50,14 +53,17 @@ def test_postman_collection_is_portable_and_covers_the_public_api() -> None:
         (item["request"]["method"], item["request"]["url"].removeprefix("{{base_url}}"))
         for item in requests
     } == EXPECTED_REQUESTS
-    assert {variable["key"] for variable in collection["variable"]} >= {
+    assert variables.keys() >= {
         "base_url",
         "session_id",
         "job_id",
         "ingredients_payload",
-        "option_ids_json",
+        "available_option_ids_json",
+        "selected_option_ids_json",
         "artifact_id",
     }
+    assert variables["selected_option_ids_json"] == "[]"
+    assert "selected_option_count" not in variables
 
     create_session = next(
         item for item in requests if item["name"].startswith("03 Create Session")
@@ -73,3 +79,34 @@ def test_postman_collection_is_portable_and_covers_the_public_api() -> None:
             }
         ],
     }
+
+    get_options = next(
+        item for item in requests if item["name"].startswith("10 Get Options")
+    )
+    get_options_event = next(
+        event for event in get_options["event"] if event["listen"] == "test"
+    )
+    get_options_script = "\n".join(get_options_event["script"]["exec"])
+    assert "available_option_ids_json" in get_options_script
+    assert "set('selected_option_ids_json'" not in get_options_script
+
+    refresh_options = next(
+        item for item in requests if item["name"].startswith("14 Refresh Options")
+    )
+    refresh_event = next(
+        event for event in refresh_options["event"] if event["listen"] == "test"
+    )
+    refresh_script = "\n".join(refresh_event["script"]["exec"])
+    assert "set('selected_option_ids_json'" not in refresh_script
+
+    generate_recipes = next(
+        item for item in requests if item["name"].startswith("15 Generate Complete")
+    )
+    prerequest = next(
+        event for event in generate_recipes["event"] if event["listen"] == "prerequest"
+    )
+    prerequest_script = "\n".join(prerequest["script"]["exec"])
+    assert "pm.execution.skipRequest()" in prerequest_script
+    assert generate_recipes["request"]["body"]["raw"] == (
+        '{\n  "option_ids": {{selected_option_ids_json}}\n}'
+    )

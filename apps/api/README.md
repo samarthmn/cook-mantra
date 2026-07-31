@@ -4,6 +4,9 @@ Cook Mantra is a local FastAPI backend that turns an ingredient photo into
 reviewable ingredients, recipe suggestions with nutrition and generated dish
 previews, and complete recipes. Ollama is the only model provider.
 
+For a plain-language walkthrough of every implemented stage, read
+[`../../docs/what-was-built.md`](../../docs/what-was-built.md).
+
 ## Local setup
 
 Prerequisites:
@@ -61,7 +64,10 @@ The collection stores session, job, recipe-option, and preview-artifact IDs
 automatically. Model operations run as background jobs, so repeat each numbered
 **Poll** request until its response status is `succeeded` before continuing.
 Collection variables let you change how many extracted ingredients are
-confirmed and how many recipe options are selected.
+confirmed. After request **10** or **14**, copy only the recipe option IDs you
+want into the `selected_option_ids_json` collection variable. Request **15**
+generates complete recipes only for that explicit selection and refuses to run
+while the selection is empty.
 
 ## Verification and development
 

@@ -167,12 +167,12 @@ async def test_nutrition_defers_model_construction_and_forwards_injected_setting
         ollama_base_url="http://configured-ollama.test:11434",
         llm_timeout_seconds=17,
     )
-    calls: list[tuple[Agent, bool, Settings]] = []
+    calls: list[tuple[Agent, bool | str, Settings]] = []
 
     def capture_model(
         agent: Agent,
         *,
-        thinking: bool,
+        thinking: bool | str,
         settings: Settings,
     ) -> StructuredModelFactory:
         calls.append((agent, thinking, settings))
@@ -186,7 +186,7 @@ async def test_nutrition_defers_model_construction_and_forwards_injected_setting
     estimate = await nutrition_agent.estimate(recipe_option_draft, RecipePreferences())
 
     assert estimate.calories_kcal == 420
-    assert calls == [(Agent.NUTRITION, False, settings)]
+    assert calls == [(Agent.NUTRITION, "low", settings)]
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="_ds/modernist-3697d321-e48c-4021-b952-12f9a879c0e6/styles.css">
+  <script src="_ds/modernist-3697d321-e48c-4021-b952-12f9a879c0e6/_ds_bundle.js"></script>
+  <style>
+    html[data-theme="dark"]{
+      --color-bg:#1a1817; --color-surface:#242120; --color-text:#f0eeed;
+      --color-divider:color-mix(in srgb,#f0eeed 35%,transparent);
+      --color-neutral-100:#2d2b2b; --color-neutral-200:#3a3737; --color-neutral-300:#575353;
+      --color-neutral-700:#bab6b6; --color-neutral-800:#d7d3d3; --color-neutral-900:#f8f4f4;
+      --color-accent-100:#4d170e; --color-accent-200:#6f1707; --color-accent-300:#9c1a02;
+      --color-accent-600:#ff563c; --color-accent-700:#ff9783; --color-accent-800:#ffc4b8; --color-accent-900:#fff2ef;
+      --color-accent-2-100:#471d16; --color-accent-2-200:#67251c; --color-accent-2-700:#ff9784; --color-accent-2-800:#ffc4b9;
+      --shadow-sm:0 1px 2px rgba(0,0,0,.5); --shadow-md:0 3px 10px rgba(0,0,0,.55); --shadow-lg:0 12px 32px rgba(0,0,0,.65);
+    }
+    body{transition:background .25s,color .25s}
+    a{color:var(--color-accent)} a:hover{color:var(--color-accent-600)}
+  </style>
+</helmet>
+
+<div style="min-height:100vh;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body)">
+  <header class="nav" style="padding:var(--space-3) clamp(16px,4vw,48px)">
+    <div class="nav-brand" style="display:flex;align-items:center;gap:10px;margin-right:auto">
+      <span style="width:14px;height:14px;background:var(--color-accent);display:inline-block;flex:none"></span>
+      COOK MANTRA
+    </div>
+    <a href="Cook Mantra.dc.html" style="font-size:13px;color:inherit;text-decoration:none;border-bottom:1px solid var(--color-divider)">← Back to the app</a>
+    <button class="btn btn-secondary btn-icon" onClick="{{ toggleTheme }}" aria-label="Toggle dark mode" style="width:44px;height:44px">
+      <sc-if value="{{ isDark }}" hint-placeholder-val="{{ false }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></svg>
+      </sc-if>
+      <sc-if value="{{ isLight }}" hint-placeholder-val="{{ true }}">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"></path></svg>
+      </sc-if>
+    </button>
+  </header>
+
+  <main style="max-width:1080px;margin:0 auto;padding:clamp(24px,4vw,56px) clamp(16px,4vw,48px) 96px;display:flex;flex-direction:column;gap:clamp(40px,6vw,72px)">
+
+    <section data-screen-label="Guide intro">
+      <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent);font-weight:800;margin-bottom:var(--space-2)">Design guide</div>
+      <h1 style="font-size:clamp(34px,6vw,56px);max-width:18ch">Honest, structural, flush left.</h1>
+      <p class="text-muted" style="max-width:60ch;font-size:15px">Cook Mantra is built on the Modernist design system: Archivo everywhere, one red accent, zero corner radius, and visible 2px rules doing the organising. The product's own rule — <strong style="color:var(--color-text)">nothing is assumed until the user confirms it</strong> — shapes every pattern below.</p>
+    </section>
+
+    <section data-screen-label="Typography">
+      <h6 style="border-bottom:2px solid var(--color-divider);padding-bottom:var(--space-2)">01 — Typography</h6>
+      <p class="text-muted" style="font-size:13px;max-width:56ch">One family: <strong style="color:var(--color-text)">Archivo</strong>. Weight 800 for headings and labels, 400/600 for body and emphasis. Headings are tight (-0.015em), tiny labels are wide-tracked uppercase. Everything sits flush left — including button labels.</p>
+      <div style="display:flex;flex-direction:column;margin-top:var(--space-4)">
+        <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-4);border-bottom:1px solid var(--color-divider);padding:var(--space-3) 0"><span style="font-family:var(--font-heading);font-weight:800;font-size:42px;line-height:1.1">Screen title</span><span class="text-muted" style="font-size:12px">h1 · 42px / clamp on mobile · 800</span></div>
+        <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-4);border-bottom:1px solid var(--color-divider);padding:var(--space-3) 0"><span style="font-family:var(--font-heading);font-weight:800;font-size:25px">Recipe name</span><span class="text-muted" style="font-size:12px">h3 · 25px · 800</span></div>
+        <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-4);border-bottom:1px solid var(--color-divider);padding:var(--space-3) 0"><span style="font-size:15px">Body copy explains, quietly. 15px, line-height 1.55.</span><span class="text-muted" style="font-size:12px">body · 15px · 400</span></div>
+        <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-4);border-bottom:1px solid var(--color-divider);padding:var(--space-3) 0"><span style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent);font-weight:800">Step 2 — Confirm</span><span class="text-muted" style="font-size:12px">kicker · 11px · uppercase · accent</span></div>
+      </div>
+    </section>
+
+    <section data-screen-label="Color">
+      <h6 style="border-bottom:2px solid var(--color-divider);padding-bottom:var(--space-2)">02 — Color, light and dark</h6>
+      <p class="text-muted" style="font-size:13px;max-width:56ch">Mostly ink on ground; one red accent (#ec3013) reserved for the current step, the primary action, selection, and honesty markers (missing ingredients, warnings). Dark mode keeps the same tokens — the ramps flip, the red stays. Toggle the theme (top right) to see this page switch.</p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:var(--space-3);margin-top:var(--space-4)">
+        <sc-for list="{{ swatches }}" as="sw" hint-placeholder-count="6">
+          <div style="border:1px solid var(--color-divider)">
+            <div style="{{ sw.chip }}"></div>
+            <div style="padding:8px 10px">
+              <div style="font-family:var(--font-heading);font-weight:800;font-size:12px">{{ sw.name }}</div>
+              <div class="text-muted" style="font-size:11px">{{ sw.role }}</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <p class="text-muted" style="font-size:12px;margin-top:var(--space-3)">Dark theme is a token override: <code style="font-size:11px">html[data-theme="dark"]</code> re-declares the same CSS variables — components never change.</p>
+    </section>
+
+    <section data-screen-label="Icons">
+      <h6 style="border-bottom:2px solid var(--color-divider);padding-bottom:var(--space-2)">03 — Icons</h6>
+      <p class="text-muted" style="font-size:13px;max-width:56ch"><strong style="color:var(--color-text)">Lucide</strong>, inline SVG on currentColor, stroke 2 (1.5 above 32px). Icons never carry meaning alone — always paired with a label. The working set:</p>
+      <div style="display:flex;flex-wrap:wrap;gap:var(--space-3);margin-top:var(--space-4)">
+        <sc-for list="{{ icons }}" as="ic" hint-placeholder-count="8">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:8px;border:1px solid var(--color-divider);padding:var(--space-3);min-width:96px">
+            <span dangerouslySetInnerHTML="{{ ic.svg }}" style="display:block;height:22px"></span>
+            <span class="text-muted" style="font-size:11px">{{ ic.name }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <section data-screen-label="Product patterns">
+      <h6 style="border-bottom:2px solid var(--color-divider);padding-bottom:var(--space-2)">04 — Product patterns</h6>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:var(--space-6);margin-top:var(--space-4)">
+        <div>
+          <div style="font-family:var(--font-heading);font-weight:800;font-size:15px;margin-bottom:var(--space-2)">Every ingredient shows its source</div>
+          <p class="text-muted" style="font-size:13px">Three tags, never dropped. Only confirmed ingredients reach the recipe agents.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:8px"><span class="tag tag-neutral">92% — detected</span><span class="tag tag-neutral">pantry</span><span class="tag tag-accent">added by you</span><span class="tag tag-outline">check this</span></div>
+        </div>
+        <div>
+          <div style="font-family:var(--font-heading);font-weight:800;font-size:15px;margin-bottom:var(--space-2)">Honesty markers</div>
+          <p class="text-muted" style="font-size:13px">Missing ingredients are stated in accent, never hidden. Images say "AI illustration". Nutrition says "estimate".</p>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="font-size:12px;color:var(--color-accent-700)"><strong>Missing:</strong> soy sauce, cornflour</div>
+            <span class="tag tag-neutral" style="width:fit-content;font-size:9px;letter-spacing:.08em;text-transform:uppercase">AI illustration</span>
+            <span class="text-muted" style="font-size:11px">Estimates only — not medical advice.</span>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:var(--font-heading);font-weight:800;font-size:15px;margin-bottom:var(--space-2)">Agents are visible</div>
+          <p class="text-muted" style="font-size:13px">Waiting screens list each agent as a checklist row — pending square, spinning ring, filled check. Parallel work runs its rows simultaneously.</p>
+          <div style="display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--color-divider);padding:10px 0">
+            <span style="width:22px;height:22px;flex:none;background:var(--color-accent);display:grid;place-items:center"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--color-bg)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg></span>
+            <span style="font-size:14px;font-weight:600;flex:1">Master Chef Agent</span><span class="tag tag-neutral">agent</span>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:var(--font-heading);font-weight:800;font-size:15px;margin-bottom:var(--space-2)">Buttons and actions</div>
+          <p class="text-muted" style="font-size:13px">One primary per screen, in the sticky action bar on mobile. Labels flush left. Min height 44–48px everywhere.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <button class="btn btn-primary" style="min-height:48px;padding-inline:20px">Generate recipe ideas</button>
+            <button class="btn btn-secondary" style="min-height:48px">More ideas</button>
+            <button class="btn btn-ghost" style="min-height:48px">← Back</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section data-screen-label="Layout rules">
+      <h6 style="border-bottom:2px solid var(--color-divider);padding-bottom:var(--space-2)">05 — Layout &amp; responsiveness</h6>
+      <div style="display:flex;flex-direction:column;margin-top:var(--space-2)">
+        <sc-for list="{{ rules }}" as="rule" hint-placeholder-count="6">
+          <div style="display:flex;gap:var(--space-3);border-bottom:1px solid var(--color-divider);padding:var(--space-3) 0">
+            <span style="font-family:var(--font-heading);font-weight:800;font-size:12px;color:var(--color-accent);min-width:28px;flex:none">{{ rule.n }}</span>
+            <span style="font-size:14px;max-width:70ch">{{ rule.text }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+  </main>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { themeChoice: null };
+  componentDidMount() {
+    const stored = (() => { try { return localStorage.getItem('cm-theme'); } catch (e) { return null; } })();
+    this._mq = window.matchMedia('(prefers-color-scheme: dark)');
+    this._mqFn = () => { if ((this.state.themeChoice || 'system') === 'system') this.apply(); };
+    this._mq.addEventListener('change', this._mqFn);
+    this.setState({ themeChoice: stored || 'system' }, () => this.apply());
+  }
+  componentWillUnmount() { this._mq && this._mq.removeEventListener('change', this._mqFn); }
+  dark() { const c = this.state.themeChoice || 'system'; return c === 'dark' || (c === 'system' && this._mq && this._mq.matches); }
+  apply() { document.documentElement.dataset.theme = this.dark() ? 'dark' : 'light'; this.forceUpdate(); }
+  renderVals() {
+    const icon = (paths) => ({ __html: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + paths + '</svg>' });
+    const chip = (v) => `height:64px;background:${v}`;
+    return {
+      isDark: this.dark(), isLight: !this.dark(),
+      toggleTheme: () => { const c = this.dark() ? 'light' : 'dark'; try { localStorage.setItem('cm-theme', c); } catch (e) {} this.setState({ themeChoice: c }, () => this.apply()); },
+      swatches: [
+        { name: 'Ground', role: '--color-bg', chip: chip('var(--color-bg)') + ';border-bottom:1px solid var(--color-divider)' },
+        { name: 'Surface', role: '--color-surface · cards, inputs', chip: chip('var(--color-surface)') },
+        { name: 'Ink', role: '--color-text', chip: chip('var(--color-text)') },
+        { name: 'Accent', role: '--color-accent · #ec3013', chip: chip('var(--color-accent)') },
+        { name: 'Accent 700', role: 'accent text on tints / warnings', chip: chip('var(--color-accent-700)') },
+        { name: 'Divider', role: '--color-divider · 2px rules', chip: chip('var(--color-divider)') },
+      ],
+      icons: [
+        { name: 'camera', svg: icon('<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>') },
+        { name: 'gallery', svg: icon('<rect x="3" y="3" width="18" height="18"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>') },
+        { name: 'check', svg: icon('<path d="M20 6 9 17l-5-5"/>') },
+        { name: 'x / remove', svg: icon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>') },
+        { name: 'plus / add', svg: icon('<path d="M5 12h14"/><path d="M12 5v14"/>') },
+        { name: 'clock / time', svg: icon('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>') },
+        { name: 'flame / kcal', svg: icon('<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>') },
+        { name: 'users / serves', svg: icon('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>') },
+        { name: 'refresh / more', svg: icon('<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>') },
+        { name: 'alert / warning', svg: icon('<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><path d="M12 9v4"/><path d="M12 17h.01"/>') },
+        { name: 'utensils / dish', svg: icon('<path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/>') },
+        { name: 'sun & moon / theme', svg: icon('<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/>') },
+      ],
+      rules: [
+        { n: '5.1', text: 'Mobile first. Content is a single column; panels become side-by-side via auto-fit grids (minmax 340px) — no breakpoint CSS, layout adapts intrinsically.' },
+        { n: '5.2', text: 'Page gutter is clamp(16px, 4vw, 48px); content maxes at 1160px, flush left inside.' },
+        { n: '5.3', text: 'The primary action lives in a sticky bottom bar with a 2px top rule — thumb-reachable on phones, persistent on desktop.' },
+        { n: '5.4', text: 'The 4-step wizard header scrolls horizontally on narrow screens; completed steps are tappable, future steps are locked.' },
+        { n: '5.5', text: 'Touch targets never drop below 44px: list rows are 52px, steps 52px, buttons 44–48px.' },
+        { n: '5.6', text: 'Rhythm comes from rules, not boxes: 2px section rules, 1px row rules, zero radius, no decorative shadows — elevation only on selection (shadow-md).' },
+        { n: '5.7', text: 'Motion is functional only: the 0.8s spinner ring, a 0.2s chevron rotation, a 0.25s theme cross-fade. Nothing else moves.' },
+      ],
+    };
+  }
+}
+
+</script>
+</body>
+</html>

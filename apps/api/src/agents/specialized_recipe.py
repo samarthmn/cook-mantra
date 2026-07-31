@@ -5,11 +5,19 @@ from typing import Protocol
 from unicodedata import normalize as normalize_unicode
 
 from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core import Agent, Settings
 from core.errors import AppError, ErrorCode
 from domain.recipe_options import RecipeOption, RecipePreferences
-from domain.recipes import CompleteRecipe, IngredientAvailability
+from domain.recipes import (
+    ALLERGEN_NOTICE,
+    NUTRITION_NOTICE,
+    CompleteRecipe,
+    IngredientAvailability,
+    RecipeIngredient,
+    RecipeStep,
+)
 from services.llm import get_model
 from services.structured_output import StructuredModel, invoke_structured
 from services.tracing import RunnableConfig, TracingService
@@ -27,12 +35,36 @@ class SpecializedRecipeAgent(Protocol):
         raise NotImplementedError
 
 
+class RecipeModelOutput(BaseModel):
+    """Recipe fields owned by the model rather than trusted session state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_minutes: int = Field(ge=1, le=1_440, strict=True)
+    ingredients: tuple[RecipeIngredient, ...] = Field(min_length=1)
+    steps: tuple[RecipeStep, ...] = Field(min_length=1)
+    tips: tuple[str, ...] = ()
+    substitutions: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_step_numbers(self) -> "RecipeModelOutput":
+        """Keep model-owned steps consecutive inside the shared retry boundary."""
+        expected_numbers = list(range(1, len(self.steps) + 1))
+        if [step.number for step in self.steps] != expected_numbers:
+            raise ValueError(
+                "Recipe step numbers must be consecutive and start at one."
+            )
+        return self
+
+
 class OllamaSpecializedRecipeAgent:
     """Generate complete recipes with the configured specialized Ollama model."""
 
     def __init__(
         self,
-        model: StructuredModel[CompleteRecipe] | None = None,
+        model: StructuredModel[RecipeModelOutput] | None = None,
         settings: Settings | None = None,
         tracing: TracingService | None = None,
     ) -> None:
@@ -51,8 +83,11 @@ class OllamaSpecializedRecipeAgent:
         if model is None:
             model = get_model(
                 Agent.SPECIALIZED_RECIPE,
+                thinking=True,
+                num_predict=8_192,
+                num_ctx=16_384,
                 settings=self._settings,
-            ).with_structured_output(CompleteRecipe)
+            ).with_structured_output(RecipeModelOutput)
 
         normalized_confirmed = _normalize_confirmed_names(confirmed_ingredients)
         messages = [
@@ -61,7 +96,7 @@ class OllamaSpecializedRecipeAgent:
             )
         ]
 
-        async def invoke(config: RunnableConfig) -> CompleteRecipe:
+        async def invoke(config: RunnableConfig) -> RecipeModelOutput:
             return await invoke_structured(model, messages, config=config)
 
         if self._tracing is None:
@@ -72,6 +107,11 @@ class OllamaSpecializedRecipeAgent:
                 invoke,
             )
         recipe = _revalidate_model_recipe(model_result)
+        recipe = _derive_ingredient_availability(
+            recipe,
+            option,
+            normalized_confirmed,
+        )
         recipe = _merge_server_owned_fields(recipe, option, preferences)
         _validate_ingredient_availability(recipe, option, normalized_confirmed)
         return recipe
@@ -120,8 +160,8 @@ preferences, and allergens.
 Keep the total cooking time consistent with the selected option and within the
 preferred maximum when one is supplied.
 
-Include useful tips, substitutions, assumptions, and warnings. Keep nutrition_notice
-and allergen_notice explicit and appropriately cautious. Retain every known missing
+Include useful tips, substitutions, assumptions, and warnings. Reproduce every used
+ingredient name exactly as written in Selected option JSON. Retain every known missing
 and optional ingredient from the selected option in the complete ingredient list.
 
 Availability is a strict user-confirmation boundary. Only exact confirmed ingredient
@@ -140,23 +180,20 @@ def _render_json(value: object) -> str:
     )
 
 
-def _revalidate_model_recipe(model_result: object) -> CompleteRecipe:
-    if not isinstance(model_result, CompleteRecipe):
-        raise _invalid_model_output_error()
-
+def _revalidate_model_recipe(model_result: object) -> RecipeModelOutput:
     try:
         payload = model_result.model_dump(
             mode="python",
             round_trip=True,
             warnings="error",
         )
-        return CompleteRecipe.model_validate(payload)
+        return RecipeModelOutput.model_validate(payload)
     except (AttributeError, TypeError, ValueError):
         raise _invalid_model_output_error() from None
 
 
 def _merge_server_owned_fields(
-    recipe: CompleteRecipe,
+    recipe: RecipeModelOutput,
     option: RecipeOption,
     preferences: RecipePreferences,
 ) -> CompleteRecipe:
@@ -172,9 +209,46 @@ def _merge_server_owned_fields(
                 "name": option.name,
                 "cuisine": option.cuisine,
                 "servings": preferences.servings,
+                "nutrition_notice": NUTRITION_NOTICE,
+                "allergen_notice": ALLERGEN_NOTICE,
             }
         )
         return CompleteRecipe.model_validate(payload)
+    except (AttributeError, TypeError, ValueError):
+        raise _invalid_model_output_error() from None
+
+
+def _derive_ingredient_availability(
+    recipe: RecipeModelOutput,
+    option: RecipeOption,
+    confirmed_ingredients: list[str],
+) -> RecipeModelOutput:
+    """Apply the trusted confirmation boundary instead of model-provided labels."""
+    confirmed_keys = {
+        _normalize_name(ingredient).casefold() for ingredient in confirmed_ingredients
+    }
+    optional_keys = {
+        _normalize_name(requirement.name).casefold()
+        for requirement in option.optional_ingredients
+    }
+    ingredients = []
+    for ingredient in recipe.ingredients:
+        key = _normalize_name(ingredient.name).casefold()
+        if key in confirmed_keys:
+            availability = IngredientAvailability.AVAILABLE
+        elif key in optional_keys:
+            availability = IngredientAvailability.OPTIONAL
+        else:
+            availability = IngredientAvailability.MISSING
+        ingredients.append(ingredient.model_copy(update={"availability": availability}))
+    try:
+        payload = recipe.model_dump(
+            mode="python",
+            round_trip=True,
+            warnings="error",
+        )
+        payload["ingredients"] = tuple(ingredients)
+        return RecipeModelOutput.model_validate(payload)
     except (AttributeError, TypeError, ValueError):
         raise _invalid_model_output_error() from None
 
@@ -195,7 +269,13 @@ def _validate_ingredient_availability(
         availability_by_name[key] = ingredient.availability
         is_confirmed = key in confirmed_keys
         is_available = ingredient.availability is IngredientAvailability.AVAILABLE
+        # Defense in depth: derived availability must still honor confirmation.
         if is_confirmed != is_available:
+            raise _invalid_availability_error()
+
+    for used_ingredient in option.used_ingredients:
+        key = _normalize_name(used_ingredient).casefold()
+        if key not in availability_by_name:
             raise _invalid_availability_error()
 
     for requirement in option.missing_ingredients:

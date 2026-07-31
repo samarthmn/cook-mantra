@@ -7,6 +7,7 @@ structured output every agent depends on.
 """
 
 from enum import StrEnum
+from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_ollama import ChatOllama
@@ -19,7 +20,9 @@ def get_model(
     *,
     model: Model | str | None = None,
     temperature: float = 0.0,
-    thinking: bool | None = None,
+    thinking: bool | Literal["low", "medium", "high"] | None = None,
+    num_predict: int | None = None,
+    num_ctx: int | None = None,
     timeout: float | None = None,
     settings: Settings | None = None,
 ) -> BaseChatModel:
@@ -32,6 +35,8 @@ def get_model(
             this app produces structured output rather than prose.
         thinking: Enable or disable reasoning traces. None leaves the model's
             own default in place.
+        num_predict: Maximum generated tokens. None leaves the model default.
+        num_ctx: Context window size. None leaves the model default.
         timeout: Request timeout in seconds.
         settings: Override configuration, primarily for tests.
 
@@ -58,6 +63,8 @@ def get_model(
         base_url=str(settings.ollama_base_url).rstrip("/"),
         temperature=temperature,
         reasoning=thinking,
+        num_predict=num_predict,
+        num_ctx=num_ctx,
         client_kwargs={"timeout": resolved_timeout},
     )
 
