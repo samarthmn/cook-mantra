@@ -1,3 +1,4 @@
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,6 +6,13 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from core.config import PROJECT_ROOT
+
+
+@pytest.fixture(autouse=True)
+def provide_test_ollama_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supply required Ollama configuration without overriding live-test input."""
+    if "OLLAMA_BASE_URL" not in os.environ:
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama.test:11434")
 
 
 @pytest.fixture

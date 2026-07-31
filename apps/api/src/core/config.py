@@ -55,7 +55,7 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
-    ollama_base_url: AnyHttpUrl = AnyHttpUrl("http://127.0.0.1:11434")
+    ollama_base_url: AnyHttpUrl
     llm_timeout_seconds: float = 300.0
     max_concurrent_jobs: int = Field(default=2, gt=0)
     max_queued_jobs: int = Field(default=4, ge=0)

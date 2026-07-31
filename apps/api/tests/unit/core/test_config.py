@@ -4,6 +4,25 @@ from pydantic import ValidationError
 from core.config import PROJECT_ROOT, Settings
 
 
+def test_settings_require_ollama_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+
+    with pytest.raises(ValidationError, match="ollama_base_url"):
+        Settings(_env_file=None)
+
+
+def test_settings_read_ollama_base_url_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://configured-ollama.test:11434")
+
+    settings = Settings(_env_file=None)
+
+    assert str(settings.ollama_base_url).rstrip("/") == (
+        "http://configured-ollama.test:11434"
+    )
+
+
 def test_settings_have_safe_local_defaults() -> None:
     settings = Settings(_env_file=None)
 
