@@ -1,29 +1,18 @@
 "use client";
 
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Bookmark,
-  BookmarkCheck,
-  Download,
-  RefreshCw,
-} from "lucide-react";
+import { AlertTriangle, ArrowLeft, Bookmark, Download, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
+import { captureDishPhotoThumbnail } from "../model/dish-photo";
 import { downloadRecipeMarkdown } from "../model/recipe-markdown";
-import {
-  isRecipeSaved,
-  removeSavedRecipe,
-  saveRecipe,
-  type SavedRecipeEntry,
-} from "../model/saved-recipes";
+import { saveRecipe, type SavedRecipeEntry } from "../model/saved-recipes";
 import type {
   CompleteRecipeView,
   IngredientView,
   RecipeFailureView,
   RecipeOptionView,
 } from "../model/cook-session-state";
-import { RecipeDetail } from "./RecipeDetail";
+import { captureIngredientSources, RecipeDetail } from "./RecipeDetail";
 import { ScreenHeader } from "./ScreenHeader";
 
 interface RecipesScreenProps {
@@ -33,7 +22,7 @@ interface RecipesScreenProps {
   confirmedIngredients: IngredientView[];
   activeRecipeId: string | null;
   completedSteps: Record<string, number[]>;
-  savedRecipes: SavedRecipeEntry[];
+  previewUrl: (artifactId: string) => string;
   onSetActiveRecipe: (optionId: string) => void;
   onToggleStep: (optionId: string, stepNumber: number) => void;
   onRetryFailed: () => void;
@@ -53,7 +42,7 @@ export function RecipesScreen({
   confirmedIngredients,
   activeRecipeId,
   completedSteps,
-  savedRecipes,
+  previewUrl,
   onSetActiveRecipe,
   onToggleStep,
   onRetryFailed,
@@ -61,11 +50,18 @@ export function RecipesScreen({
   onReset,
   onSavedRecipesChange,
 }: RecipesScreenProps) {
+  const [ingredientsExpanded, setIngredientsExpanded] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [saveNotice, setSaveNotice] = useState<{
     optionId: string;
     message: string;
+    kind: "pending" | "success" | "error";
   } | null>(null);
+  const [savingOptionId, setSavingOptionId] = useState<string | null>(null);
+  const captureAbortControllerRef = useRef<AbortController | null>(null);
+  const saveInFlightRef = useRef(false);
+  const mountedRef = useRef(true);
+  const saveConfirmationTimeoutRef = useRef<number | null>(null);
   const startOverButtonRef = useRef<HTMLButtonElement>(null);
   const cancelResetButtonRef = useRef<HTMLButtonElement>(null);
   const confirmResetButtonRef = useRef<HTMLButtonElement>(null);
@@ -106,6 +102,19 @@ export function RecipesScreen({
     return () => document.removeEventListener("keydown", handleDialogKeyDown);
   }, [resetDialogOpen]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+      captureAbortControllerRef.current?.abort();
+      captureAbortControllerRef.current = null;
+      if (saveConfirmationTimeoutRef.current !== null) {
+        window.clearTimeout(saveConfirmationTimeoutRef.current);
+      }
+    };
+  }, []);
+
   function cancelReset() {
     setResetDialogOpen(false);
     startOverButtonRef.current?.focus({ preventScroll: true });
@@ -142,23 +151,87 @@ export function RecipesScreen({
       ? activeRecipe
       : { ...activeRecipe, nutrition: activeNutrition };
   const completeSteps = completedSteps[activeRecipe.optionId] ?? [];
-  const activeRecipeIsSaved = isRecipeSaved(savedRecipes, displayedRecipe);
 
-  function toggleSavedRecipe() {
-    const result = activeRecipeIsSaved
-      ? removeSavedRecipe(displayedRecipe)
-      : saveRecipe(displayedRecipe);
-    onSavedRecipesChange(result.entries);
-    setSaveNotice(
-      result.ok
-        ? null
-        : {
-            optionId: activeRecipe.optionId,
-            message: activeRecipeIsSaved
-              ? "Couldn’t remove this saved recipe. Check browser storage and try again."
-              : "Couldn’t save this recipe. Check browser storage and try again.",
-          },
+  async function saveSnapshot() {
+    if (saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+
+    const snapshotRecipe = displayedRecipe;
+    const snapshotProgress = {
+      doneStepNumbers: [...completeSteps],
+      ingredientsExpanded,
+    };
+    const snapshotIngredientSources = captureIngredientSources(
+      snapshotRecipe.ingredients,
+      confirmedIngredients,
     );
+    const previewArtifactId = activeOption?.previewArtifactId ?? null;
+    if (saveConfirmationTimeoutRef.current !== null) {
+      window.clearTimeout(saveConfirmationTimeoutRef.current);
+      saveConfirmationTimeoutRef.current = null;
+    }
+    setSaveNotice({
+      optionId: snapshotRecipe.optionId,
+      kind: "pending",
+      message: "Saving recipe…",
+    });
+    setSavingOptionId(snapshotRecipe.optionId);
+
+    let captureController: AbortController | null = null;
+    let photo: string | null = null;
+    try {
+      if (previewArtifactId) {
+        captureController = new AbortController();
+        captureAbortControllerRef.current = captureController;
+        try {
+          photo = await captureDishPhotoThumbnail(
+            previewUrl(previewArtifactId),
+            captureController.signal,
+          );
+        } catch {
+          photo = null;
+        }
+
+        if (captureController.signal.aborted || !mountedRef.current) return;
+      }
+
+      const result = saveRecipe(snapshotRecipe, {
+        photo,
+        progress: snapshotProgress,
+        ingredientSources: snapshotIngredientSources,
+      });
+      if (!mountedRef.current) return;
+      onSavedRecipesChange(result.entries);
+
+      if (!result.ok) {
+        setSaveNotice({
+          optionId: snapshotRecipe.optionId,
+          kind: "error",
+          message: "Couldn’t save this recipe. Check browser storage and try again.",
+        });
+        return;
+      }
+
+      setSaveNotice({
+        optionId: snapshotRecipe.optionId,
+        kind: "success",
+        message: "Saved",
+      });
+      saveConfirmationTimeoutRef.current = window.setTimeout(() => {
+        setSaveNotice((current) =>
+          current?.optionId === snapshotRecipe.optionId && current.kind === "success"
+            ? null
+            : current,
+        );
+        saveConfirmationTimeoutRef.current = null;
+      }, 2500);
+    } finally {
+      if (captureAbortControllerRef.current === captureController) {
+        captureAbortControllerRef.current = null;
+      }
+      saveInFlightRef.current = false;
+      if (mountedRef.current) setSavingOptionId(null);
+    }
   }
 
   function downloadActiveRecipe() {
@@ -169,6 +242,7 @@ export function RecipesScreen({
 
     setSaveNotice({
       optionId: activeRecipe.optionId,
+      kind: "error",
       message: "Couldn’t download this recipe. Try again in a browser window.",
     });
   }
@@ -244,6 +318,7 @@ export function RecipesScreen({
           recipe={displayedRecipe}
           confirmedIngredients={confirmedIngredients}
           completedSteps={completeSteps}
+          onIngredientsExpandedChange={setIngredientsExpanded}
           onToggleStep={(stepNumber) => onToggleStep(activeRecipe.optionId, stepNumber)}
           actions={
             <>
@@ -253,17 +328,14 @@ export function RecipesScreen({
                 aria-label={`${activeRecipe.name} actions`}
               >
                 <button
-                  className={`btn btn-secondary${activeRecipeIsSaved ? " is-saved" : ""}`}
+                  className={`btn btn-secondary${savingOptionId !== null ? " is-pending" : ""}`}
                   type="button"
-                  aria-pressed={activeRecipeIsSaved}
-                  onClick={toggleSavedRecipe}
+                  aria-busy={savingOptionId !== null}
+                  disabled={savingOptionId !== null}
+                  onClick={() => void saveSnapshot()}
                 >
-                  {activeRecipeIsSaved ? (
-                    <BookmarkCheck aria-hidden="true" size={16} />
-                  ) : (
-                    <Bookmark aria-hidden="true" size={16} />
-                  )}
-                  {activeRecipeIsSaved ? "Saved" : "Save recipe"}
+                  <Bookmark aria-hidden="true" size={16} />
+                  {savingOptionId !== null ? "Saving…" : "Save recipe"}
                 </button>
                 <button
                   className="btn btn-secondary"
@@ -275,7 +347,11 @@ export function RecipesScreen({
                 </button>
               </div>
               {saveNotice?.optionId === activeRecipe.optionId ? (
-                <p className="recipe-action-notice" role="status">
+                <p
+                  className={`recipe-action-notice${saveNotice.kind === "success" ? " is-success" : ""}`}
+                  role={saveNotice.kind === "error" ? "alert" : "status"}
+                  aria-live={saveNotice.kind === "error" ? undefined : "polite"}
+                >
                   {saveNotice.message}
                 </p>
               ) : null}

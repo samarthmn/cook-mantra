@@ -8,7 +8,7 @@ import {
   Download,
   Trash2,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { downloadRecipeMarkdown } from "../model/recipe-markdown";
 import { removeSavedRecipe, type SavedRecipeEntry } from "../model/saved-recipes";
@@ -21,11 +21,13 @@ export interface SavedRecipesScreenProps {
   onBack: () => void;
 }
 
-const savedDateFormatter = new Intl.DateTimeFormat("en", {
+const savedDateFormatter = new Intl.DateTimeFormat(undefined, {
   day: "numeric",
   month: "short",
   year: "numeric",
-  timeZone: "UTC",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
 });
 
 type FocusTarget =
@@ -45,6 +47,18 @@ export function SavedRecipesScreen({
   const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const confirmButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const focusTargetRef = useRef<FocusTarget | null>(null);
+  const orderedEntries = useMemo(
+    () =>
+      entries
+        .map((entry, index) => ({ entry, index }))
+        .sort((first, second) => {
+          const timeDifference =
+            Date.parse(second.entry.savedAt) - Date.parse(first.entry.savedAt);
+          return timeDifference || second.index - first.index;
+        })
+        .map(({ entry }) => entry),
+    [entries],
+  );
 
   const setHeadingTitleRef = useCallback((node: HTMLSpanElement | null) => {
     headingRef.current = node?.closest("h1") ?? null;
@@ -100,9 +114,11 @@ export function SavedRecipesScreen({
       return;
     }
 
-    const removedIndex = entries.findIndex((candidate) => candidate.id === entry.id);
+    const removedIndex = orderedEntries.findIndex(
+      (candidate) => candidate.id === entry.id,
+    );
     const nextEntry =
-      result.entries[removedIndex] ?? result.entries[removedIndex - 1] ?? null;
+      orderedEntries[removedIndex + 1] ?? orderedEntries[removedIndex - 1] ?? null;
     focusTargetRef.current = nextEntry
       ? { kind: "remove", entryId: nextEntry.id }
       : { kind: "heading" };
@@ -152,7 +168,7 @@ export function SavedRecipesScreen({
         </div>
       ) : (
         <div className="saved-recipes-list">
-          {entries.map((entry) => (
+          {orderedEntries.map((entry) => (
             <SavedRecipeCard
               entry={entry}
               expanded={expandedEntryId === entry.id}
@@ -212,6 +228,8 @@ function SavedRecipeCard({
   const generatedId = useId().replaceAll(":", "");
   const detailId = `saved-recipe-detail-${generatedId}`;
   const { recipe } = entry;
+  const formattedSavedAt = savedDateFormatter.format(new Date(entry.savedAt));
+  const snapshotLabel = `${recipe.name}, saved ${formattedSavedAt}`;
   const setRemoveButtonRef = useCallback(
     (node: HTMLButtonElement | null) => registerRemoveButton(entry.id, node),
     [entry.id, registerRemoveButton],
@@ -222,33 +240,52 @@ function SavedRecipeCard({
   );
 
   return (
-    <article className="saved-recipe-card" aria-labelledby={`${detailId}-title`}>
+    <article className="saved-recipe-card" aria-label={snapshotLabel}>
       <div className="saved-recipe-summary">
-        <div>
-          <h2 className="saved-recipe-heading" id={`${detailId}-title`}>
-            {recipe.name}
-          </h2>
-          <div className="saved-recipe-meta">
-            <span className="tag tag-accent">{recipe.cuisine}</span>
-            <span className="meta-with-icon">
-              <Clock3 aria-hidden="true" size={15} />
-              {recipe.totalMinutes} min
-            </span>
-            <span className="text-muted">
-              {recipe.servings} {recipe.servings === 1 ? "serving" : "servings"}
-            </span>
-            <span className="saved-recipe-saved-at">
-              Saved{" "}
-              <time dateTime={entry.savedAt}>
-                {savedDateFormatter.format(new Date(entry.savedAt))}
-              </time>
-            </span>
-            {recipe.nutrition ? (
-              <span className="text-muted">
-                {recipe.nutrition.caloriesKcal} kcal · {recipe.nutrition.proteinG}g
-                protein
+        <div className="saved-recipe-summary-main">
+          {entry.photo ? (
+            <figure className="saved-recipe-photo">
+              {/* Snapshot data URLs cannot use Next image optimization. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                className="saved-recipe-thumbnail"
+                src={entry.photo}
+                alt={`${recipe.name}, AI-generated image`}
+                decoding="async"
+                loading="lazy"
+              />
+              <figcaption className="saved-recipe-photo-label">AI image</figcaption>
+            </figure>
+          ) : null}
+          <div>
+            <h2 className="saved-recipe-heading" id={`${detailId}-title`}>
+              {recipe.name}
+            </h2>
+            <div className="saved-recipe-meta">
+              <span className="tag tag-accent">{recipe.cuisine}</span>
+              <span className="meta-with-icon">
+                <Clock3 aria-hidden="true" size={15} />
+                {recipe.totalMinutes} min
               </span>
-            ) : null}
+              <span className="text-muted">
+                {recipe.servings} {recipe.servings === 1 ? "serving" : "servings"}
+              </span>
+              <span className="saved-recipe-saved-at">
+                Saved <time dateTime={entry.savedAt}>{formattedSavedAt}</time>
+              </span>
+              {recipe.nutrition ? (
+                <span className="text-muted">
+                  {recipe.nutrition.caloriesKcal} kcal · {recipe.nutrition.proteinG}g
+                  protein
+                </span>
+              ) : null}
+              {entry.progress ? (
+                <span className="saved-recipe-progress">
+                  {entry.progress.doneStepNumbers.length} of {recipe.steps.length} steps
+                  done
+                </span>
+              ) : null}
+            </div>
           </div>
         </div>
         <div className="saved-recipe-actions">
@@ -257,7 +294,7 @@ function SavedRecipeCard({
             type="button"
             aria-controls={detailId}
             aria-expanded={expanded}
-            aria-label={`${expanded ? "Close" : "Open"} full recipe: ${recipe.name}`}
+            aria-label={`${expanded ? "Close" : "Open"} full recipe: ${snapshotLabel}`}
             onClick={onToggleExpanded}
           >
             {expanded ? (
@@ -270,7 +307,7 @@ function SavedRecipeCard({
           <button
             className="btn btn-secondary"
             type="button"
-            aria-label={`Download ${recipe.name}`}
+            aria-label={`Download ${snapshotLabel}`}
             onClick={onDownload}
           >
             <Download aria-hidden="true" size={16} />
@@ -280,7 +317,7 @@ function SavedRecipeCard({
             <button
               className="btn btn-ghost"
               type="button"
-              aria-label={`Remove ${recipe.name}`}
+              aria-label={`Remove ${snapshotLabel}`}
               onClick={onRequestRemove}
               ref={setRemoveButtonRef}
             >
@@ -295,7 +332,7 @@ function SavedRecipeCard({
         <div
           className="saved-recipe-remove-confirm"
           role="group"
-          aria-label={`Confirm removal of ${recipe.name}`}
+          aria-label={`Confirm removal of ${snapshotLabel}`}
         >
           <p className="saved-recipe-remove-copy">
             Remove {recipe.name} from your saved recipes?
@@ -306,7 +343,7 @@ function SavedRecipeCard({
           <button
             className="btn btn-primary"
             type="button"
-            aria-label={`Confirm remove ${recipe.name}`}
+            aria-label={`Confirm remove ${snapshotLabel}`}
             onClick={onConfirmRemove}
             ref={setConfirmButtonRef}
           >
@@ -322,7 +359,14 @@ function SavedRecipeCard({
           role="region"
           aria-label={`Full recipe: ${recipe.name}`}
         >
-          <RecipeDetail recipe={recipe} idPrefix={detailId} showHeader={false} />
+          <RecipeDetail
+            recipe={recipe}
+            completedSteps={entry.progress?.doneStepNumbers}
+            idPrefix={detailId}
+            ingredientSources={entry.ingredientSources}
+            initialIngredientsExpanded={entry.progress?.ingredientsExpanded ?? false}
+            showHeader={false}
+          />
         </div>
       ) : null}
     </article>

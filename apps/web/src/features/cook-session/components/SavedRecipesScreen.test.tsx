@@ -4,7 +4,10 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CompleteRecipeView } from "../model/cook-session-state";
-import { saveRecipe, type SavedRecipeEntry } from "../model/saved-recipes";
+import {
+  SAVED_RECIPES_STORAGE_KEY,
+  type SavedRecipeEntry,
+} from "../model/saved-recipes";
 import { SavedRecipesScreen } from "./SavedRecipesScreen";
 
 const downloadCapture = vi.hoisted(() => ({ markdown: "" }));
@@ -45,6 +48,11 @@ const recipe: CompleteRecipeView = {
       doneWhen: "the seasoning tastes balanced",
       heatLevel: "low",
     },
+    {
+      number: 2,
+      instruction: "Serve while hot.",
+      durationMinutes: null,
+    },
   ],
   tips: ["Taste before serving."],
   substitutions: [],
@@ -71,18 +79,65 @@ const secondRecipe: CompleteRecipeView = {
   totalMinutes: 25,
 };
 
+const thirdRecipe: CompleteRecipeView = {
+  ...recipe,
+  optionId: "option-3",
+  name: "Lemon Rice",
+  cuisine: "South Indian",
+  totalMinutes: 30,
+};
+
+const photo = "data:image/jpeg;base64,c25hcHNob3Q=";
+
+const savedAtFormatOptions: Intl.DateTimeFormatOptions = {
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+};
+
+function formatSavedAt(savedAt: string) {
+  return new Intl.DateTimeFormat(undefined, savedAtFormatOptions).format(
+    new Date(savedAt),
+  );
+}
+
+function snapshotLabel(entry: SavedRecipeEntry) {
+  return `${entry.recipe.name}, saved ${formatSavedAt(entry.savedAt)}`;
+}
+
 const entries: SavedRecipeEntry[] = [
   {
     id: "saved-option-1",
     savedAt: "2026-01-02T12:00:00.000Z",
     recipe,
+    photo,
+    progress: {
+      doneStepNumbers: [1],
+      ingredientsExpanded: true,
+    },
+    ingredientSources: { salt: "user_added" },
   },
   {
     id: "saved-option-2",
     savedAt: "2026-01-03T12:00:00.000Z",
     recipe: secondRecipe,
+    photo: null,
+    progress: null,
+    ingredientSources: null,
   },
 ];
+
+const thirdEntry: SavedRecipeEntry = {
+  id: "saved-option-3",
+  savedAt: "2026-01-04T12:00:00.000Z",
+  recipe: thirdRecipe,
+  photo: null,
+  progress: null,
+  ingredientSources: null,
+};
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -96,21 +151,11 @@ afterEach(() => {
 });
 
 function RemovalHarness({
-  initialRecipes = [recipe, secondRecipe],
+  initialEntries = entries,
 }: {
-  initialRecipes?: CompleteRecipeView[];
+  initialEntries?: SavedRecipeEntry[];
 }) {
-  const [savedEntries, setSavedEntries] = useState<SavedRecipeEntry[]>(() => {
-    let nextEntries: SavedRecipeEntry[] = [];
-
-    for (const recipeView of initialRecipes) {
-      const result = saveRecipe(recipeView);
-      if (!result.ok) return [];
-      nextEntries = result.entries;
-    }
-
-    return nextEntries;
-  });
+  const [savedEntries, setSavedEntries] = useState<SavedRecipeEntry[]>(initialEntries);
 
   return (
     <SavedRecipesScreen
@@ -121,8 +166,16 @@ function RemovalHarness({
   );
 }
 
+function renderRemovalHarness(initialEntries = entries) {
+  window.localStorage.setItem(
+    SAVED_RECIPES_STORAGE_KEY,
+    JSON.stringify({ version: 2, entries: initialEntries }),
+  );
+  return render(<RemovalHarness initialEntries={initialEntries} />);
+}
+
 describe("SavedRecipesScreen", () => {
-  it("renders saved recipe summaries with date and nutrition", () => {
+  it("renders saved recipe summaries with time, servings, and nutrition", () => {
     render(
       <SavedRecipesScreen
         entries={entries}
@@ -138,9 +191,104 @@ describe("SavedRecipesScreen", () => {
     expect(
       screen.getByRole("heading", { name: "Tomato Rasam", level: 2 }),
     ).toBeVisible();
-    expect(screen.getByText("Jan 2, 2026")).toBeVisible();
+    expect(screen.getByText(formatSavedAt(entries[0].savedAt))).toBeVisible();
     expect(screen.getAllByText("2 servings")).toHaveLength(2);
     expect(screen.getAllByText("420 kcal · 12g protein")).toHaveLength(2);
+  });
+
+  it("renders entries newest-first without changing the input array", () => {
+    const input = [...entries];
+
+    render(
+      <SavedRecipesScreen entries={input} onBack={vi.fn()} onEntriesChange={vi.fn()} />,
+    );
+
+    const displayedNames = screen
+      .getAllByRole("article")
+      .map((card) => within(card).getByRole("heading", { level: 2 }).textContent);
+    expect(displayedNames).toEqual(["Tomato Rasam", "Test Curry"]);
+    expect(input).toEqual(entries);
+  });
+
+  it("uses append order as the newest-first tie-breaker", () => {
+    const sameMomentEntries = [
+      entries[0],
+      { ...entries[1], savedAt: entries[0].savedAt },
+    ];
+
+    render(
+      <SavedRecipesScreen
+        entries={sameMomentEntries}
+        onBack={vi.fn()}
+        onEntriesChange={vi.fn()}
+      />,
+    );
+
+    const displayedNames = screen
+      .getAllByRole("article")
+      .map((card) => within(card).getByRole("heading", { level: 2 }).textContent);
+    expect(displayedNames).toEqual(["Tomato Rasam", "Test Curry"]);
+  });
+
+  it("renders a saved thumbnail, its AI label, and captured progress", () => {
+    render(
+      <SavedRecipesScreen
+        entries={[entries[0]]}
+        onBack={vi.fn()}
+        onEntriesChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("img", { name: "Test Curry, AI-generated image" }),
+    ).toHaveAttribute("src", photo);
+    expect(screen.getByText("AI image")).toBeVisible();
+    expect(screen.getByText("1 of 2 steps done")).toBeVisible();
+  });
+
+  it("keeps separate snapshots of the same recipe distinguishable by time", () => {
+    const firstSnapshot = entries[0];
+    const secondSnapshot: SavedRecipeEntry = {
+      ...firstSnapshot,
+      id: "saved-option-1-later",
+      savedAt: "2026-01-02T18:30:00.000Z",
+      photo: null,
+    };
+
+    render(
+      <SavedRecipesScreen
+        entries={[firstSnapshot, secondSnapshot]}
+        onBack={vi.fn()}
+        onEntriesChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getAllByRole("heading", { name: "Test Curry", level: 2 }),
+    ).toHaveLength(2);
+    expect(screen.getByText(formatSavedAt(secondSnapshot.savedAt))).toBeVisible();
+    expect(screen.getByText(formatSavedAt(firstSnapshot.savedAt))).toBeVisible();
+    expect(
+      screen.getByRole("article", { name: snapshotLabel(firstSnapshot) }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("article", { name: snapshotLabel(secondSnapshot) }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: `Open full recipe: ${snapshotLabel(firstSnapshot)}`,
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: `Download ${snapshotLabel(secondSnapshot)}`,
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(firstSnapshot)}`,
+      }),
+    ).toBeVisible();
   });
 
   it("renders a friendly empty state", () => {
@@ -154,7 +302,7 @@ describe("SavedRecipesScreen", () => {
     ).toBeVisible();
   });
 
-  it("expands a saved recipe into the shared full detail", async () => {
+  it("restores captured ingredient and read-only step state in full detail", async () => {
     const user = userEvent.setup();
     render(
       <SavedRecipesScreen
@@ -165,39 +313,65 @@ describe("SavedRecipesScreen", () => {
     );
 
     await user.click(
-      screen.getByRole("button", { name: "Open full recipe: Test Curry" }),
+      screen.getByRole("button", {
+        name: `Open full recipe: ${snapshotLabel(entries[0])}`,
+      }),
     );
 
     const detail = screen.getByRole("region", { name: "Full recipe: Test Curry" });
-    await user.click(within(detail).getByRole("button", { name: "Ingredients (1)" }));
-    expect(within(detail).getByText("salt")).toBeVisible();
-    expect(within(detail).getByText("Season the curry.")).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Close full recipe: Test Curry" }),
+      within(detail).getByRole("button", { name: "Ingredients (1)" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(within(detail).getByText("salt")).toBeVisible();
+    expect(within(detail).getByText("added by you")).toBeVisible();
+    const completedStep = within(detail)
+      .getByText("Season the curry.")
+      .closest(".method-step");
+    const remainingStep = within(detail)
+      .getByText("Serve while hot.")
+      .closest(".method-step");
+    expect(completedStep).toHaveClass("method-step-readonly", "is-done");
+    expect(completedStep?.querySelector(".method-step-number svg")).not.toBeNull();
+    expect(
+      within(completedStep as HTMLElement).getByText("Completed step."),
+    ).toHaveClass("visually-hidden");
+    expect(remainingStep).toHaveClass("method-step-readonly");
+    expect(remainingStep).not.toHaveClass("is-done");
+    expect(
+      within(detail).queryByRole("button", { name: /Season the curry/ }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: `Close full recipe: ${snapshotLabel(entries[0])}`,
+      }),
     ).toHaveAttribute("aria-expanded", "true");
   });
 
   it("removes an entry only after inline confirmation", async () => {
     const user = userEvent.setup();
-    render(<RemovalHarness />);
+    renderRemovalHarness();
 
-    await user.click(screen.getByRole("button", { name: "Remove Test Curry" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(entries[0])}`,
+      }),
+    );
     const confirmation = screen.getByRole("group", {
-      name: "Confirm removal of Test Curry",
+      name: `Confirm removal of ${snapshotLabel(entries[0])}`,
     });
     expect(
       within(confirmation).getByText(/Remove Test Curry from your saved recipes/),
     ).toBeVisible();
     expect(
       within(confirmation).getByRole("button", {
-        name: "Confirm remove Test Curry",
+        name: `Confirm remove ${snapshotLabel(entries[0])}`,
       }),
     ).toHaveFocus();
     expect(screen.getByRole("heading", { name: "Test Curry", level: 2 })).toBeVisible();
 
     await user.click(
       within(confirmation).getByRole("button", {
-        name: "Confirm remove Test Curry",
+        name: `Confirm remove ${snapshotLabel(entries[0])}`,
       }),
     );
 
@@ -205,33 +379,75 @@ describe("SavedRecipesScreen", () => {
     expect(
       screen.getByRole("heading", { name: "Tomato Rasam", level: 2 }),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Remove Tomato Rasam" })).toHaveFocus();
+    expect(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(entries[1])}`,
+      }),
+    ).toHaveFocus();
   });
 
   it("returns focus to the remove button after cancellation", async () => {
     const user = userEvent.setup();
-    render(<RemovalHarness />);
+    renderRemovalHarness();
 
-    await user.click(screen.getByRole("button", { name: "Remove Test Curry" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(entries[0])}`,
+      }),
+    );
     const confirmation = screen.getByRole("group", {
-      name: "Confirm removal of Test Curry",
+      name: `Confirm removal of ${snapshotLabel(entries[0])}`,
     });
 
     await user.click(within(confirmation).getByRole("button", { name: "Keep it" }));
 
-    expect(screen.getByRole("button", { name: "Remove Test Curry" })).toHaveFocus();
+    expect(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(entries[0])}`,
+      }),
+    ).toHaveFocus();
   });
 
   it("moves focus to the saved recipes heading after removing the final entry", async () => {
     const user = userEvent.setup();
-    render(<RemovalHarness initialRecipes={[recipe]} />);
+    renderRemovalHarness([entries[0]]);
 
-    await user.click(screen.getByRole("button", { name: "Remove Test Curry" }));
-    await user.click(screen.getByRole("button", { name: "Confirm remove Test Curry" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(entries[0])}`,
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: `Confirm remove ${snapshotLabel(entries[0])}`,
+      }),
+    );
 
     expect(screen.getByText("No recipes saved yet.")).toBeVisible();
     expect(
       screen.getByRole("heading", { name: "Saved recipes", level: 1 }),
+    ).toHaveFocus();
+  });
+
+  it("moves focus to the next card in newest-first visual order", async () => {
+    const user = userEvent.setup();
+    renderRemovalHarness([...entries, thirdEntry]);
+
+    await user.click(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(entries[1])}`,
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: `Confirm remove ${snapshotLabel(entries[1])}`,
+      }),
+    );
+
+    expect(
+      screen.getByRole("button", {
+        name: `Remove ${snapshotLabel(entries[0])}`,
+      }),
     ).toHaveFocus();
   });
 
@@ -245,7 +461,11 @@ describe("SavedRecipesScreen", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Download Test Curry" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: `Download ${snapshotLabel(entries[0])}`,
+      }),
+    );
 
     expect(downloadCapture.markdown).toContain("# Test Curry");
     expect(downloadCapture.markdown).toContain("## Ingredients");

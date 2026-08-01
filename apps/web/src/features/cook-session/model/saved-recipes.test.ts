@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CompleteRecipeView } from "./cook-session-state";
+import type { CompleteRecipeView, IngredientSource } from "./cook-session-state";
 import {
-  isRecipeSaved,
   loadSavedRecipes,
   removeSavedRecipe,
   SAVED_RECIPES_STORAGE_KEY,
   saveRecipe,
+  type SaveRecipeSnapshot,
 } from "./saved-recipes";
 
 const recipe: CompleteRecipeView = {
@@ -55,21 +55,37 @@ const recipe: CompleteRecipeView = {
   warnings: ["Contains dairy."],
 };
 
+const photo = "data:image/jpeg;base64,c25hcHNob3Q=";
+const legacyStorageKey = "cook-mantra:saved-recipes:v1";
+const ingredientSources = {
+  Tomato: "detected",
+  Paneer: "user_added",
+} satisfies Record<string, IngredientSource>;
+const snapshot: SaveRecipeSnapshot = {
+  photo,
+  progress: {
+    doneStepNumbers: [1],
+    ingredientsExpanded: true,
+  },
+  ingredientSources,
+};
+
 beforeEach(() => {
   window.localStorage.clear();
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("saved recipes", () => {
-  it("round-trips a recipe and removes it by entry id", () => {
+  it("round-trips a snapshot and removes it by entry id", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-01T10:30:00.000Z"));
 
-    const saved = saveRecipe(recipe);
+    const saved = saveRecipe(recipe, snapshot);
 
     expect(saved).toEqual({
       ok: true,
@@ -78,84 +94,123 @@ describe("saved recipes", () => {
           id: "option-1",
           savedAt: "2026-08-01T10:30:00.000Z",
           recipe,
+          photo,
+          progress: snapshot.progress,
+          ingredientSources,
         },
       ],
     });
     expect(loadSavedRecipes()).toEqual(saved.entries);
-    expect(isRecipeSaved(saved.entries, recipe)).toBe(true);
 
     const removed = removeSavedRecipe(saved.entries[0].id);
 
     expect(removed).toEqual({ ok: true, entries: [] });
     expect(loadSavedRecipes()).toEqual([]);
-    expect(isRecipeSaved(removed.entries, recipe)).toBe(false);
   });
 
-  it("updates a saved recipe with the same option id", () => {
+  it("appends a new version every time the same recipe is saved", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-01T10:30:00.000Z"));
-    const first = saveRecipe(recipe);
+    const first = saveRecipe(recipe, {
+      photo: null,
+      progress: {
+        doneStepNumbers: [],
+        ingredientsExpanded: false,
+      },
+      ingredientSources: null,
+    });
 
     vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
-    const updatedByOptionId = saveRecipe({
-      ...recipe,
-      totalMinutes: 25,
-    });
+    const newestRecipe = { ...recipe, totalMinutes: 25 };
+    const second = saveRecipe(newestRecipe, snapshot);
 
     expect(first.ok).toBe(true);
-    expect(updatedByOptionId).toEqual({
-      ok: true,
-      entries: [
-        {
-          id: "option-1",
-          savedAt: "2026-08-02T12:00:00.000Z",
-          recipe: { ...recipe, totalMinutes: 25 },
-        },
-      ],
-    });
-  });
-
-  it("keeps recipes with different option ids even when their names match", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-01T10:30:00.000Z"));
-    saveRecipe(recipe);
-
-    vi.setSystemTime(new Date("2026-08-03T14:00:00.000Z"));
-    const sameName = {
-      ...recipe,
-      optionId: "option-2",
-      name: "  TEST   CURRY ",
-      totalMinutes: 20,
-    };
-    const saved = saveRecipe(sameName);
-
-    expect(saved).toEqual({
+    expect(second).toEqual({
       ok: true,
       entries: [
         {
           id: "option-1",
           savedAt: "2026-08-01T10:30:00.000Z",
           recipe,
+          photo: null,
+          progress: {
+            doneStepNumbers: [],
+            ingredientsExpanded: false,
+          },
+          ingredientSources: null,
         },
         {
-          id: "option-2",
-          savedAt: "2026-08-03T14:00:00.000Z",
-          recipe: sameName,
+          id: "option-1-2",
+          savedAt: "2026-08-02T12:00:00.000Z",
+          recipe: newestRecipe,
+          photo,
+          progress: snapshot.progress,
+          ingredientSources,
         },
       ],
     });
-    expect(isRecipeSaved(saved.entries, sameName)).toBe(true);
-    expect(
-      isRecipeSaved(saved.entries, {
-        ...sameName,
-        optionId: "another-option-id",
-      }),
-    ).toBe(false);
+    expect(loadSavedRecipes()).toEqual(second.entries);
+  });
 
-    expect(removeSavedRecipe(sameName)).toEqual({
-      ok: true,
-      entries: [saved.entries[0]],
+  it("migrates entries from the legacy key and removes it after writing v2", () => {
+    const legacyEntry = {
+      id: "option-1",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe,
+    };
+    window.localStorage.setItem(
+      legacyStorageKey,
+      JSON.stringify({ version: 1, entries: [legacyEntry] }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([
+      {
+        ...legacyEntry,
+        photo: null,
+        progress: null,
+        ingredientSources: null,
+      },
+    ]);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
+    const saved = saveRecipe(recipe, snapshot);
+
+    expect(saved.ok).toBe(true);
+    expect(JSON.parse(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)!)).toEqual(
+      {
+        version: 2,
+        entries: saved.entries,
+      },
+    );
+    expect(window.localStorage.getItem(legacyStorageKey)).toBeNull();
+  });
+
+  it("preserves snapshots previously written as v2 under the legacy key", () => {
+    const previousSnapshot = {
+      id: "option-1",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe,
+      photo,
+      progress: snapshot.progress,
+    };
+    window.localStorage.setItem(
+      legacyStorageKey,
+      JSON.stringify({ version: 2, entries: [previousSnapshot] }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([
+      { ...previousSnapshot, ingredientSources: null },
+    ]);
+
+    const saved = saveRecipe(recipe, snapshot);
+
+    expect(saved.ok).toBe(true);
+    expect(saved.entries[0]).toEqual({
+      ...previousSnapshot,
+      ingredientSources: null,
     });
+    expect(window.localStorage.getItem(legacyStorageKey)).toBeNull();
   });
 
   it("drops corrupt payloads and malformed entries without throwing", () => {
@@ -166,11 +221,14 @@ describe("saved recipes", () => {
       id: "saved-test-curry",
       savedAt: "2026-08-01T10:30:00.000Z",
       recipe,
+      photo: null,
+      progress: null,
+      ingredientSources,
     };
     window.localStorage.setItem(
       SAVED_RECIPES_STORAGE_KEY,
       JSON.stringify({
-        version: 1,
+        version: 2,
         entries: [
           validEntry,
           { ...validEntry, savedAt: "last Tuesday" },
@@ -242,6 +300,22 @@ describe("saved recipes", () => {
           },
           {
             ...validEntry,
+            id: "bad-progress-number",
+            progress: {
+              doneStepNumbers: [1.5],
+              ingredientsExpanded: true,
+            },
+          },
+          {
+            ...validEntry,
+            id: "bad-progress-expanded",
+            progress: {
+              doneStepNumbers: [1],
+              ingredientsExpanded: "yes",
+            },
+          },
+          {
+            ...validEntry,
             id: "null-step-duration",
             recipe: {
               ...recipe,
@@ -257,6 +331,16 @@ describe("saved recipes", () => {
       validEntry,
       {
         ...validEntry,
+        id: "bad-progress-number",
+        progress: null,
+      },
+      {
+        ...validEntry,
+        id: "bad-progress-expanded",
+        progress: null,
+      },
+      {
+        ...validEntry,
         id: "null-step-duration",
         recipe: {
           ...recipe,
@@ -266,30 +350,194 @@ describe("saved recipes", () => {
     ]);
   });
 
-  it("drops a payload with the wrong version", () => {
+  it("keeps valid entries when progress is missing or invalid", () => {
+    const entry = {
+      id: "progress-entry",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe,
+      photo: null,
+      ingredientSources: null,
+    };
     window.localStorage.setItem(
       SAVED_RECIPES_STORAGE_KEY,
       JSON.stringify({
         version: 2,
         entries: [
+          entry,
           {
-            id: "saved-test-curry",
-            savedAt: "2026-08-01T10:30:00.000Z",
-            recipe,
+            ...entry,
+            id: "invalid-progress",
+            progress: {
+              doneStepNumbers: [1.5],
+              ingredientsExpanded: true,
+            },
           },
         ],
       }),
     );
 
-    expect(loadSavedRecipes()).toEqual([]);
+    expect(loadSavedRecipes()).toEqual([
+      { ...entry, progress: null },
+      { ...entry, id: "invalid-progress", progress: null },
+    ]);
   });
 
-  it("returns a failure result when localStorage rejects a save", () => {
-    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+  it("deduplicates progress and drops step numbers absent from the recipe", () => {
+    const entry = {
+      id: "progress-entry",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe,
+      photo: null,
+      ingredientSources: null,
+      progress: {
+        doneStepNumbers: [1, 4, 1, -2],
+        ingredientsExpanded: true,
+      },
+    };
+    window.localStorage.setItem(
+      SAVED_RECIPES_STORAGE_KEY,
+      JSON.stringify({ version: 2, entries: [entry] }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([
+      {
+        ...entry,
+        progress: {
+          doneStepNumbers: [1],
+          ingredientsExpanded: true,
+        },
+      },
+    ]);
+  });
+
+  it("normalizes missing or invalid ingredient provenance to null", () => {
+    const entry = {
+      id: "source-entry",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe,
+      photo: null,
+      progress: null,
+    };
+    window.localStorage.setItem(
+      SAVED_RECIPES_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        entries: [
+          entry,
+          {
+            ...entry,
+            id: "invalid-source",
+            ingredientSources: { Tomato: "somewhere" },
+          },
+          {
+            ...entry,
+            id: "valid-source",
+            ingredientSources,
+          },
+        ],
+      }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([
+      { ...entry, ingredientSources: null },
+      { ...entry, id: "invalid-source", ingredientSources: null },
+      { ...entry, id: "valid-source", ingredientSources },
+    ]);
+  });
+
+  it("keeps valid photos and drops invalid or oversized photos without dropping entries", () => {
+    const oversizedPhoto = `data:image/jpeg;base64,${"a".repeat(400 * 1024)}`;
+    const entry = {
+      id: "photo-entry",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe,
+      progress: null,
+    };
+    window.localStorage.setItem(
+      SAVED_RECIPES_STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        entries: [
+          { ...entry, id: "valid", photo },
+          { ...entry, id: "remote", photo: "https://example.com/dish.jpg" },
+          { ...entry, id: "oversized", photo: oversizedPhoto },
+        ],
+      }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([
+      { ...entry, id: "valid", photo, ingredientSources: null },
+      { ...entry, id: "remote", photo: null, ingredientSources: null },
+      { ...entry, id: "oversized", photo: null, ingredientSources: null },
+    ]);
+  });
+
+  it("reads unsupported v2 payloads as empty and refuses to mutate them", () => {
+    const unsupportedPayload = JSON.stringify({
+      version: 3,
+      entries: [
+        {
+          id: "saved-test-curry",
+          savedAt: "2026-08-01T10:30:00.000Z",
+          recipe,
+          photo: null,
+          progress: null,
+        },
+      ],
+    });
+    window.localStorage.setItem(SAVED_RECIPES_STORAGE_KEY, unsupportedPayload);
+
+    expect(loadSavedRecipes()).toEqual([]);
+    expect(saveRecipe(recipe, snapshot)).toEqual({ ok: false, entries: [] });
+    expect(removeSavedRecipe("saved-test-curry")).toEqual({
+      ok: false,
+      entries: [],
+    });
+    expect(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)).toBe(
+      unsupportedPayload,
+    );
+  });
+
+  it("retries without the new photo while preserving a non-empty cookbook", () => {
+    const existing = saveRecipe(recipe, {
+      photo: null,
+      progress: null,
+      ingredientSources: null,
+    });
+    expect(existing.ok).toBe(true);
+
+    const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+    const setItem = vi
+      .spyOn(window.localStorage, "setItem")
+      .mockImplementationOnce(() => {
+        throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+      })
+      .mockImplementation(originalSetItem);
+
+    const saved = saveRecipe(recipe, snapshot);
+
+    expect(setItem).toHaveBeenCalledTimes(2);
+    expect(saved.ok).toBe(true);
+    expect(saved.entries).toHaveLength(2);
+    expect(saved.entries[0]).toEqual(existing.entries[0]);
+    expect(saved.entries[1]).toEqual(
+      expect.objectContaining({
+        recipe,
+        photo: null,
+        progress: snapshot.progress,
+        ingredientSources,
+      }),
+    );
+    expect(loadSavedRecipes()).toEqual(saved.entries);
+  });
+
+  it("returns a failure result when localStorage rejects both save attempts", () => {
+    const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
       throw new DOMException("Storage quota exceeded", "QuotaExceededError");
     });
 
-    expect(saveRecipe(recipe)).toEqual({ ok: false, entries: [] });
+    expect(saveRecipe(recipe, snapshot)).toEqual({ ok: false, entries: [] });
+    expect(setItem).toHaveBeenCalledTimes(2);
   });
 
   it("does not access localStorage without a browser window", () => {
@@ -298,8 +546,8 @@ describe("saved recipes", () => {
     vi.stubGlobal("window", undefined);
 
     expect(loadSavedRecipes()).toEqual([]);
-    expect(saveRecipe(recipe)).toEqual({ ok: false, entries: [] });
-    expect(removeSavedRecipe(recipe)).toEqual({ ok: false, entries: [] });
+    expect(saveRecipe(recipe, snapshot)).toEqual({ ok: false, entries: [] });
+    expect(removeSavedRecipe("option-1")).toEqual({ ok: false, entries: [] });
     expect(getItem).not.toHaveBeenCalled();
     expect(setItem).not.toHaveBeenCalled();
   });

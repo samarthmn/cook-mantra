@@ -998,7 +998,7 @@ function ConnectedCookMantraApp({
               confirmedIngredients={state.ingredients}
               activeRecipeId={state.activeRecipeId}
               completedSteps={state.completedSteps}
-              savedRecipes={savedRecipes}
+              previewUrl={(artifactId) => client.artifactUrl(artifactId)}
               onSetActiveRecipe={(optionId) =>
                 dispatch({ type: "set-active-recipe", optionId })
               }

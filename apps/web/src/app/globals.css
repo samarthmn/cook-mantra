@@ -1951,9 +1951,12 @@ textarea.input {
   font-size: var(--font-size-sm);
 }
 
-.recipe-actions .btn.is-saved {
-  border-color: var(--color-accent-fill);
-  color: var(--color-accent-text);
+.recipe-action-notice.is-success {
+  color: var(--color-text-muted);
+}
+
+.recipe-actions .btn.is-pending {
+  cursor: wait;
 }
 
 .recipe-title {
@@ -2327,6 +2330,42 @@ textarea.input {
   gap: var(--space-4) var(--space-6);
 }
 
+.saved-recipe-summary-main {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.saved-recipe-summary-main > :last-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.saved-recipe-photo {
+  width: clamp(5.5rem, 12vw, 8rem);
+  flex: none;
+  margin: 0;
+}
+
+.saved-recipe-thumbnail {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border: var(--border-width) solid var(--color-divider);
+  background: var(--color-surface);
+  object-fit: cover;
+}
+
+.saved-recipe-photo-label {
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  font-weight: var(--font-emphasis-weight);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
 .saved-recipe-heading {
   margin: 0;
   font-size: var(--font-size-card-title);
@@ -2340,6 +2379,12 @@ textarea.input {
   margin-top: var(--space-2);
   color: var(--color-text-muted);
   font-size: var(--font-size-md);
+}
+
+.saved-recipe-progress {
+  flex-basis: 100%;
+  color: var(--color-accent-text);
+  font-weight: var(--font-emphasis-weight);
 }
 
 .saved-recipe-actions {
@@ -2394,6 +2439,10 @@ textarea.input {
 
   .saved-recipe-actions {
     justify-content: flex-start;
+  }
+
+  .saved-recipe-photo {
+    width: 5.5rem;
   }
 
   .saved-recipe-remove-copy {

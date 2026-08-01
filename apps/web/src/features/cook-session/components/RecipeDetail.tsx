@@ -6,6 +6,7 @@ import { useState, type ReactNode } from "react";
 import type {
   CompleteRecipeView,
   IngredientView,
+  IngredientSource,
   NutritionView,
   RecipeIngredientView,
   RecipeStepView,
@@ -14,9 +15,12 @@ import type {
 export interface RecipeDetailProps {
   recipe: CompleteRecipeView;
   confirmedIngredients?: readonly IngredientView[];
+  ingredientSources?: Readonly<Record<string, IngredientSource>> | null;
   nutrition?: NutritionView | null;
   completedSteps?: readonly number[];
   onToggleStep?: (stepNumber: number) => void;
+  initialIngredientsExpanded?: boolean;
+  onIngredientsExpandedChange?: (expanded: boolean) => void;
   actions?: ReactNode;
   idPrefix?: string;
   showHeader?: boolean;
@@ -25,14 +29,19 @@ export interface RecipeDetailProps {
 export function RecipeDetail({
   recipe,
   confirmedIngredients = [],
+  ingredientSources = null,
   nutrition = recipe.nutrition,
   completedSteps = [],
   onToggleStep,
+  initialIngredientsExpanded = false,
+  onIngredientsExpandedChange,
   actions,
   idPrefix = `recipe-${recipe.optionId}`,
   showHeader = true,
 }: RecipeDetailProps) {
-  const [ingredientsExpanded, setIngredientsExpanded] = useState(false);
+  const [ingredientsExpanded, setIngredientsExpanded] = useState(
+    initialIngredientsExpanded,
+  );
   const ingredientListId = `${idPrefix}-ingredients-list`;
   const ingredientsHeadingId = `${idPrefix}-ingredients-heading`;
   const stepsAreInteractive = onToggleStep !== undefined;
@@ -90,7 +99,11 @@ export function RecipeDetail({
               type="button"
               aria-controls={ingredientListId}
               aria-expanded={ingredientsExpanded}
-              onClick={() => setIngredientsExpanded((expanded) => !expanded)}
+              onClick={() => {
+                const nextExpanded = !ingredientsExpanded;
+                setIngredientsExpanded(nextExpanded);
+                onIngredientsExpandedChange?.(nextExpanded);
+              }}
             >
               <span>Ingredients ({recipe.ingredients.length})</span>
               <ChevronDown aria-hidden="true" size={18} />
@@ -102,7 +115,11 @@ export function RecipeDetail({
             hidden={!ingredientsExpanded}
           >
             {recipe.ingredients.map((ingredient, index) => {
-              const status = ingredientStatus(ingredient, confirmedIngredients);
+              const status = ingredientStatus(
+                ingredient,
+                confirmedIngredients,
+                ingredientSources,
+              );
               return (
                 <div
                   className="recipe-ingredient-row"
@@ -169,7 +186,13 @@ export function RecipeDetail({
                   {content}
                 </button>
               ) : (
-                <div className="method-step method-step-readonly" key={step.number}>
+                <div
+                  className={`method-step method-step-readonly${isDone ? " is-done" : ""}`}
+                  key={step.number}
+                >
+                  {isDone ? (
+                    <span className="visually-hidden">Completed step.</span>
+                  ) : null}
                   {content}
                 </div>
               );
@@ -247,6 +270,7 @@ function NutritionItem({ value, label }: { value: number | string; label: string
 function ingredientStatus(
   ingredient: RecipeIngredientView,
   confirmedIngredients: readonly IngredientView[],
+  ingredientSources: Readonly<Record<string, IngredientSource>> | null,
 ) {
   if (ingredient.availability === "optional") {
     return { label: "optional", className: "tag-accent-2" };
@@ -255,12 +279,9 @@ function ingredientStatus(
     return { label: "missing", className: "tag-outline" };
   }
 
-  const recipeName = normalizeIngredientName(ingredient.name);
-  const source = confirmedIngredients.find((confirmed) => {
-    if (!confirmed.confirmed) return false;
-    const confirmedName = normalizeIngredientName(confirmed.name);
-    return confirmedName.includes(recipeName) || recipeName.includes(confirmedName);
-  })?.source;
+  const source =
+    ingredientSources?.[ingredient.name] ??
+    matchedIngredientSource(ingredient.name, confirmedIngredients);
 
   if (source === "detected") {
     return { label: "detected", className: "tag-neutral" };
@@ -272,6 +293,30 @@ function ingredientStatus(
     return { label: "added by you", className: "tag-neutral" };
   }
   return { label: "available", className: "tag-neutral" };
+}
+
+export function captureIngredientSources(
+  recipeIngredients: readonly RecipeIngredientView[],
+  confirmedIngredients: readonly IngredientView[],
+): Record<string, IngredientSource> {
+  return Object.fromEntries(
+    recipeIngredients.flatMap((ingredient) => {
+      const source = matchedIngredientSource(ingredient.name, confirmedIngredients);
+      return source ? [[ingredient.name, source]] : [];
+    }),
+  );
+}
+
+function matchedIngredientSource(
+  ingredientName: string,
+  confirmedIngredients: readonly IngredientView[],
+): IngredientSource | undefined {
+  const recipeName = normalizeIngredientName(ingredientName);
+  return confirmedIngredients.find((confirmed) => {
+    if (!confirmed.confirmed) return false;
+    const confirmedName = normalizeIngredientName(confirmed.name);
+    return confirmedName.includes(recipeName) || recipeName.includes(confirmedName);
+  })?.source;
 }
 
 function normalizeIngredientName(name: string) {

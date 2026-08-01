@@ -1,18 +1,36 @@
 import type {
   CompleteRecipeView,
+  IngredientSource,
   NutritionView,
   RecipeIngredientView,
   RecipeStepView,
 } from "./cook-session-state";
 
-export const SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v1";
+export const SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v2";
 
-const SAVED_RECIPES_VERSION = 1;
+const LEGACY_SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v1";
+const LEGACY_SAVED_RECIPES_VERSION = 1;
+const SAVED_RECIPES_VERSION = 2;
+const MAX_PHOTO_DATA_URL_LENGTH = 400 * 1024;
+
+export interface SavedRecipeProgress {
+  doneStepNumbers: number[];
+  ingredientsExpanded: boolean;
+}
+
+export interface SaveRecipeSnapshot {
+  photo: string | null;
+  progress: SavedRecipeProgress | null;
+  ingredientSources: Record<string, IngredientSource> | null;
+}
 
 export interface SavedRecipeEntry {
   id: string;
   savedAt: string;
   recipe: CompleteRecipeView;
+  photo: string | null;
+  progress: SavedRecipeProgress | null;
+  ingredientSources: Record<string, IngredientSource> | null;
 }
 
 export type SavedRecipesMutationResult =
@@ -30,7 +48,13 @@ interface StorageReadResult {
 }
 
 const INGREDIENT_AVAILABILITIES = new Set(["available", "missing", "optional"]);
+const INGREDIENT_SOURCES = new Set<IngredientSource>([
+  "detected",
+  "pantry_suggestion",
+  "user_added",
+]);
 const HEAT_LEVELS = new Set(["low", "medium", "medium-high", "high"]);
+const DATA_IMAGE_URL_PATTERN = /^data:image\/[a-z0-9.+-]+(?:;[^,\r\n]*)?,[^\r\n]*$/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -132,7 +156,77 @@ function isIsoDate(value: unknown): value is string {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
-function isSavedRecipeEntry(value: unknown): value is SavedRecipeEntry {
+function isSavedRecipeProgress(value: unknown): value is SavedRecipeProgress {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.doneStepNumbers) &&
+    value.doneStepNumbers.every(
+      (stepNumber) => typeof stepNumber === "number" && Number.isInteger(stepNumber),
+    ) &&
+    typeof value.ingredientsExpanded === "boolean"
+  );
+}
+
+function normalizeProgress(
+  value: unknown,
+  recipe: CompleteRecipeView,
+): SavedRecipeProgress | null {
+  if (!isSavedRecipeProgress(value)) {
+    return null;
+  }
+
+  const recipeStepNumbers = new Set(recipe.steps.map((step) => step.number));
+  const seenStepNumbers = new Set<number>();
+  const doneStepNumbers = value.doneStepNumbers.filter((stepNumber) => {
+    if (!recipeStepNumbers.has(stepNumber) || seenStepNumbers.has(stepNumber)) {
+      return false;
+    }
+
+    seenStepNumbers.add(stepNumber);
+    return true;
+  });
+
+  return {
+    doneStepNumbers,
+    ingredientsExpanded: value.ingredientsExpanded,
+  };
+}
+
+function normalizeIngredientSources(
+  value: unknown,
+): Record<string, IngredientSource> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const entries = Object.entries(value);
+  if (
+    entries.some(
+      ([name, source]) =>
+        name.trim().length === 0 ||
+        typeof source !== "string" ||
+        !INGREDIENT_SOURCES.has(source as IngredientSource),
+    )
+  ) {
+    return null;
+  }
+
+  return Object.fromEntries(entries) as Record<string, IngredientSource>;
+}
+
+function normalizePhoto(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length <= MAX_PHOTO_DATA_URL_LENGTH &&
+    DATA_IMAGE_URL_PATTERN.test(value)
+    ? value
+    : null;
+}
+
+function hasValidEntryCore(value: unknown): value is Record<string, unknown> & {
+  id: string;
+  savedAt: string;
+  recipe: CompleteRecipeView;
+} {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -140,6 +234,36 @@ function isSavedRecipeEntry(value: unknown): value is SavedRecipeEntry {
     isIsoDate(value.savedAt) &&
     isCompleteRecipe(value.recipe)
   );
+}
+
+function migrateLegacyEntry(value: unknown): SavedRecipeEntry | null {
+  if (!hasValidEntryCore(value)) {
+    return null;
+  }
+
+  return {
+    id: value.id,
+    savedAt: value.savedAt,
+    recipe: value.recipe,
+    photo: null,
+    progress: null,
+    ingredientSources: null,
+  };
+}
+
+function normalizeSavedRecipeEntry(value: unknown): SavedRecipeEntry | null {
+  if (!hasValidEntryCore(value)) {
+    return null;
+  }
+
+  return {
+    id: value.id,
+    savedAt: value.savedAt,
+    recipe: value.recipe,
+    photo: normalizePhoto(value.photo),
+    progress: normalizeProgress(value.progress, value.recipe),
+    ingredientSources: normalizeIngredientSources(value.ingredientSources),
+  };
 }
 
 function browserStorage(): Storage | null {
@@ -154,18 +278,18 @@ function browserStorage(): Storage | null {
   }
 }
 
-function readSavedRecipes(storage: Storage): StorageReadResult {
-  let serialized: string | null;
+function readStorageItem(
+  storage: Storage,
+  key: string,
+): { ok: true; serialized: string | null } | { ok: false } {
   try {
-    serialized = storage.getItem(SAVED_RECIPES_STORAGE_KEY);
+    return { ok: true, serialized: storage.getItem(key) };
   } catch {
-    return { ok: false, entries: [] };
+    return { ok: false };
   }
+}
 
-  if (serialized === null) {
-    return { ok: true, entries: [] };
-  }
-
+function parseCurrentPayload(serialized: string): StorageReadResult {
   try {
     const payload: unknown = JSON.parse(serialized);
     if (
@@ -173,23 +297,75 @@ function readSavedRecipes(storage: Storage): StorageReadResult {
       payload.version !== SAVED_RECIPES_VERSION ||
       !Array.isArray(payload.entries)
     ) {
-      return { ok: true, entries: [] };
+      return { ok: false, entries: [] };
     }
 
     return {
       ok: true,
-      entries: payload.entries.filter(isSavedRecipeEntry),
+      entries: payload.entries
+        .map(normalizeSavedRecipeEntry)
+        .filter((entry): entry is SavedRecipeEntry => entry !== null),
     };
   } catch {
-    return { ok: true, entries: [] };
+    return { ok: false, entries: [] };
   }
 }
 
-function writeSavedRecipes(
-  storage: Storage,
-  entries: SavedRecipeEntry[],
-  previousEntries: SavedRecipeEntry[],
-): SavedRecipesMutationResult {
+function parseLegacyPayload(serialized: string): SavedRecipeEntry[] {
+  try {
+    const payload: unknown = JSON.parse(serialized);
+    if (!isRecord(payload) || !Array.isArray(payload.entries)) {
+      return [];
+    }
+
+    if (payload.version === LEGACY_SAVED_RECIPES_VERSION) {
+      return payload.entries
+        .map(migrateLegacyEntry)
+        .filter((entry): entry is SavedRecipeEntry => entry !== null);
+    }
+
+    if (payload.version === SAVED_RECIPES_VERSION) {
+      return payload.entries
+        .map(normalizeSavedRecipeEntry)
+        .filter((entry): entry is SavedRecipeEntry => entry !== null);
+    }
+
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+function readSavedRecipes(storage: Storage): StorageReadResult {
+  const current = readStorageItem(storage, SAVED_RECIPES_STORAGE_KEY);
+  if (!current.ok) {
+    return { ok: false, entries: [] };
+  }
+
+  if (current.serialized !== null) {
+    return parseCurrentPayload(current.serialized);
+  }
+
+  const legacy = readStorageItem(storage, LEGACY_SAVED_RECIPES_STORAGE_KEY);
+  if (!legacy.ok) {
+    return { ok: false, entries: [] };
+  }
+
+  return {
+    ok: true,
+    entries: legacy.serialized === null ? [] : parseLegacyPayload(legacy.serialized),
+  };
+}
+
+function removeLegacyPayload(storage: Storage): void {
+  try {
+    storage.removeItem(LEGACY_SAVED_RECIPES_STORAGE_KEY);
+  } catch {
+    // The v2 write already succeeded, so stale legacy data is safe to ignore.
+  }
+}
+
+function writeSavedRecipes(storage: Storage, entries: SavedRecipeEntry[]): boolean {
   const payload: SavedRecipesPayload = {
     version: SAVED_RECIPES_VERSION,
     entries,
@@ -197,20 +373,17 @@ function writeSavedRecipes(
 
   try {
     storage.setItem(SAVED_RECIPES_STORAGE_KEY, JSON.stringify(payload));
-    return { ok: true, entries };
+    removeLegacyPayload(storage);
+    return true;
   } catch {
-    return { ok: false, entries: previousEntries };
+    return false;
   }
 }
 
-function recipesHaveSameIdentity(
-  first: CompleteRecipeView,
-  second: CompleteRecipeView,
-): boolean {
-  return first.optionId === second.optionId;
-}
-
-function nextEntryId(entries: readonly SavedRecipeEntry[], recipe: CompleteRecipeView) {
+function nextEntryId(
+  entries: readonly SavedRecipeEntry[],
+  recipe: CompleteRecipeView,
+): string {
   const usedIds = new Set(entries.map((entry) => entry.id));
   const baseId = recipe.optionId.trim();
   let id = baseId;
@@ -224,6 +397,21 @@ function nextEntryId(entries: readonly SavedRecipeEntry[], recipe: CompleteRecip
   return id;
 }
 
+function normalizeSnapshot(
+  snapshot: SaveRecipeSnapshot,
+  recipe: CompleteRecipeView,
+): SaveRecipeSnapshot | null {
+  if (!isRecord(snapshot)) {
+    return null;
+  }
+
+  return {
+    photo: normalizePhoto(snapshot.photo),
+    progress: normalizeProgress(snapshot.progress, recipe),
+    ingredientSources: normalizeIngredientSources(snapshot.ingredientSources),
+  };
+}
+
 export function loadSavedRecipes(): SavedRecipeEntry[] {
   const storage = browserStorage();
   if (storage === null) {
@@ -233,46 +421,49 @@ export function loadSavedRecipes(): SavedRecipeEntry[] {
   return readSavedRecipes(storage).entries;
 }
 
-export function saveRecipe(recipe: CompleteRecipeView): SavedRecipesMutationResult {
+export function saveRecipe(
+  recipe: CompleteRecipeView,
+  snapshot: SaveRecipeSnapshot,
+): SavedRecipesMutationResult {
   const storage = browserStorage();
   if (storage === null) {
     return { ok: false, entries: [] };
   }
 
   const current = readSavedRecipes(storage);
-  if (!current.ok || !isCompleteRecipe(recipe)) {
+  const normalizedSnapshot = isCompleteRecipe(recipe)
+    ? normalizeSnapshot(snapshot, recipe)
+    : null;
+  if (!current.ok || !isCompleteRecipe(recipe) || normalizedSnapshot === null) {
     return { ok: false, entries: current.entries };
   }
 
-  const matchingIndexes = current.entries
-    .map((entry, index) => (recipesHaveSameIdentity(entry.recipe, recipe) ? index : -1))
-    .filter((index) => index >= 0);
-  const firstMatchingIndex = matchingIndexes[0];
   const entry: SavedRecipeEntry = {
-    id:
-      firstMatchingIndex === undefined
-        ? nextEntryId(current.entries, recipe)
-        : current.entries[firstMatchingIndex].id,
+    id: nextEntryId(current.entries, recipe),
     savedAt: new Date().toISOString(),
     recipe,
+    photo: normalizedSnapshot.photo,
+    progress: normalizedSnapshot.progress,
+    ingredientSources: normalizedSnapshot.ingredientSources,
   };
+  const nextEntries = [...current.entries, entry];
 
-  if (firstMatchingIndex === undefined) {
-    return writeSavedRecipes(storage, [...current.entries, entry], current.entries);
+  if (writeSavedRecipes(storage, nextEntries)) {
+    return { ok: true, entries: nextEntries };
   }
 
-  const nextEntries = current.entries.flatMap((existing, index) => {
-    if (index === firstMatchingIndex) {
-      return [entry];
+  if (entry.photo !== null) {
+    const entryWithoutPhoto = { ...entry, photo: null };
+    const entriesWithoutNewPhoto = [...current.entries, entryWithoutPhoto];
+    if (writeSavedRecipes(storage, entriesWithoutNewPhoto)) {
+      return { ok: true, entries: entriesWithoutNewPhoto };
     }
-    return matchingIndexes.includes(index) ? [] : [existing];
-  });
-  return writeSavedRecipes(storage, nextEntries, current.entries);
+  }
+
+  return { ok: false, entries: current.entries };
 }
 
-export function removeSavedRecipe(
-  idOrRecipe: string | CompleteRecipeView,
-): SavedRecipesMutationResult {
+export function removeSavedRecipe(id: string): SavedRecipesMutationResult {
   const storage = browserStorage();
   if (storage === null) {
     return { ok: false, entries: [] };
@@ -283,33 +474,13 @@ export function removeSavedRecipe(
     return { ok: false, entries: current.entries };
   }
 
-  const removeById = typeof idOrRecipe === "string";
-  if (!removeById && !isCompleteRecipe(idOrRecipe)) {
-    return { ok: false, entries: current.entries };
-  }
-
-  const nextEntries = current.entries.filter((entry) =>
-    removeById
-      ? entry.id !== idOrRecipe
-      : !recipesHaveSameIdentity(entry.recipe, idOrRecipe),
-  );
+  const nextEntries = current.entries.filter((entry) => entry.id !== id);
 
   if (nextEntries.length === current.entries.length) {
     return { ok: true, entries: current.entries };
   }
 
-  return writeSavedRecipes(storage, nextEntries, current.entries);
-}
-
-export function isRecipeSaved(
-  entries: readonly SavedRecipeEntry[],
-  recipe: CompleteRecipeView,
-): boolean {
-  return (
-    isCompleteRecipe(recipe) &&
-    entries.some(
-      (entry) =>
-        isSavedRecipeEntry(entry) && recipesHaveSameIdentity(entry.recipe, recipe),
-    )
-  );
+  return writeSavedRecipes(storage, nextEntries)
+    ? { ok: true, entries: nextEntries }
+    : { ok: false, entries: current.entries };
 }
