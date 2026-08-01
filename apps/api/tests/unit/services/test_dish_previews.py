@@ -123,7 +123,7 @@ async def test_preview_service_stores_each_supported_generated_image_with_its_ow
     finally:
         await store.shutdown()
 
-    assert preview.label == "AI-generated illustration"
+    assert preview.label == "AI-generated image"
     assert artifact.owner_session_id == "session-1"
     assert artifact.path.suffix == suffix
     assert stored_data == b"generated-image-bytes"

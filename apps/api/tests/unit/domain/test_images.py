@@ -39,10 +39,10 @@ def test_image_settings_reject_non_positive_timeout() -> None:
         Settings(_env_file=None, image_timeout_seconds=0)
 
 
-def test_preview_is_always_labeled_as_illustration() -> None:
+def test_preview_is_always_labeled_as_ai_generated_image() -> None:
     preview = DishPreview(artifact_id="artifact-1", label="Caller supplied label")
 
-    assert preview.label == "AI-generated illustration"
+    assert preview.label == "AI-generated image"
 
 
 def test_preview_label_cannot_change_after_construction() -> None:
@@ -51,7 +51,7 @@ def test_preview_label_cannot_change_after_construction() -> None:
     with pytest.raises(ValidationError):
         preview.label = "Generated image"
 
-    assert preview.label == "AI-generated illustration"
+    assert preview.label == "AI-generated image"
 
 
 @pytest.mark.parametrize(
@@ -118,7 +118,7 @@ def test_recipe_option_exposes_the_labeled_preview_in_its_public_schema() -> Non
         "nutrition": None,
         "preview": {
             "artifact_id": "artifact-1",
-            "label": "AI-generated illustration",
+            "label": "AI-generated image",
         },
         "warnings": [],
     }

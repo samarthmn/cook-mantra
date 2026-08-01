@@ -330,7 +330,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"dietary_preferences\": [\"vegetarian\"],\n  \"allergens\": [],\n  \"preferred_cuisines\": [\"Indian\"],\n  \"max_total_minutes\": 45,\n  \"servings\": 2,\n  \"option_count\": 2\n}",
+              "raw": "{\n  \"dietary_preferences\": [\"vegetarian\"],\n  \"allergens\": [],\n  \"preferred_cuisines\": [\"Indian\"],\n  \"spice_level\": \"medium\",\n  \"special_instructions\": \"Use less oil and finish with fresh herbs.\",\n  \"max_total_minutes\": 45,\n  \"servings\": 2,\n  \"option_count\": 2\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -338,7 +338,7 @@
               }
             },
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}/recipe-options",
-            "description": "Edit the JSON preferences as needed. The accepted limits are 1-12 servings and 1-6 options."
+            "description": "Edit the JSON preferences as needed. spice_level accepts mild, medium, hot, or extra-hot; special_instructions accepts up to 500 characters. The accepted limits are 1-12 servings and 1-6 options."
           },
           "response": []
         },
@@ -461,7 +461,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"dietary_preferences\": [\"vegetarian\"],\n  \"allergens\": [],\n  \"preferred_cuisines\": [\"Indian\"],\n  \"max_total_minutes\": 45,\n  \"servings\": 2,\n  \"option_count\": 2\n}",
+              "raw": "{\n  \"dietary_preferences\": [\"vegetarian\"],\n  \"allergens\": [],\n  \"preferred_cuisines\": [\"Indian\"],\n  \"spice_level\": \"medium\",\n  \"special_instructions\": \"Use less oil and finish with fresh herbs.\",\n  \"max_total_minutes\": 45,\n  \"servings\": 2,\n  \"option_count\": 2\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -469,7 +469,7 @@
               }
             },
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}/recipe-options/more",
-            "description": "Optional. Generates another batch while excluding every recipe name already shown in this session."
+            "description": "Optional. Generates another batch while excluding every recipe name already shown in this session. Supports the same spice_level and special_instructions preferences as the initial batch."
           },
           "response": []
         },

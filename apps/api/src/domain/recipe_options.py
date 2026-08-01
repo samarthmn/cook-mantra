@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from domain.images import DishPreview
 
 NUTRITION_DISCLAIMER = "Estimated values; not medical advice."
+_SPICE_LEVELS = frozenset({"mild", "medium", "hot", "extra-hot"})
 
 
 def _normalize_preference_values(values: list[str]) -> list[str]:
@@ -47,6 +48,8 @@ class RecipePreferences(BaseModel):
                     "dietary_preferences": ["vegetarian"],
                     "allergens": ["peanut"],
                     "preferred_cuisines": ["Italian"],
+                    "spice_level": "medium",
+                    "special_instructions": "Use less oil and add extra vegetables.",
                     "max_total_minutes": 45,
                     "servings": 2,
                     "option_count": 4,
@@ -58,6 +61,8 @@ class RecipePreferences(BaseModel):
     dietary_preferences: list[str] = Field(default_factory=list, max_length=20)
     allergens: list[str] = Field(default_factory=list, max_length=20)
     preferred_cuisines: list[str] = Field(default_factory=list, max_length=20)
+    spice_level: str | None = None
+    special_instructions: str = Field(default="", max_length=500)
     max_total_minutes: int | None = Field(default=None, ge=1, le=1_440)
     servings: int = Field(default=2, ge=1, le=12)
     option_count: int = Field(default=4, ge=1, le=6)
@@ -69,6 +74,29 @@ class RecipePreferences(BaseModel):
     def normalize_preference_values(cls, values: list[str]) -> list[str]:
         """Keep each preference list meaningful and unambiguous."""
         return _normalize_preference_values(values)
+
+    @field_validator("spice_level", mode="before")
+    @classmethod
+    def normalize_spice_level(cls, value: object) -> str | None:
+        """Canonicalize supported spice levels while treating blanks as unset."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Spice level must be a string or null.")
+        normalized_value = value.strip().casefold()
+        if not normalized_value:
+            return None
+        if normalized_value not in _SPICE_LEVELS:
+            raise ValueError("Spice level must be mild, medium, hot, or extra-hot.")
+        return normalized_value
+
+    @field_validator("special_instructions", mode="before")
+    @classmethod
+    def normalize_special_instructions(cls, value: object) -> object:
+        """Keep user cooking notes compact and on one predictable line."""
+        if isinstance(value, str):
+            return " ".join(value.split())
+        return value
 
 
 class NutritionEstimate(BaseModel):

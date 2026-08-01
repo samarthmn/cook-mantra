@@ -3,11 +3,15 @@
 from domain.recipe_options import RecipeOptionDraft
 
 _MAX_PROMPT_LENGTH = 2_000
-_INTRODUCTION = "Realistic food photography of "
+_INTRODUCTION = (
+    "Vibrant color food photography of the finished, fully cooked and plated "
+)
 _NAME_TO_CUISINE = ", a "
-_CUISINE_TO_INGREDIENTS = " dish. Main used ingredients: "
+_CUISINE_TO_INGREDIENTS = " dish, prepared with these main ingredients: "
 _FINISH = (
-    ". Natural light, plated serving, no text, no logos, no people, "
+    ". Served ready to eat with rich, appetizing natural colors, warm natural light, "
+    "and shallow depth of field. No text, no logos, no people, no raw ingredients, "
+    "no sketches or illustrations, no black-and-white or monochrome rendering, and "
     "no utensils obscuring the dish."
 )
 

@@ -68,6 +68,8 @@ def preferences() -> RecipePreferences:
         allergens=["Peanut\ntraces"],
         preferred_cuisines=["Gujarati"],
         max_total_minutes=40,
+        spice_level="hot",
+        special_instructions="Use less oil and serve warm.",
         servings=3,
         option_count=2,
     )
@@ -337,6 +339,7 @@ async def test_prompt_contains_every_input_fact_and_complete_recipe_constraint()
     assert prompt_json(first_prompt, "Preferences JSON") == user_preferences.model_dump(
         mode="json"
     )
+    assert first_prompt.count(user_preferences.special_instructions) == 1
 
     prompt_lower = " ".join(first_prompt.lower().split())
     assert "cuisine-appropriate technique" in prompt_lower
@@ -344,6 +347,10 @@ async def test_prompt_contains_every_input_fact_and_complete_recipe_constraint()
     assert "step numbers exactly 1 through n" in prompt_lower
     assert "duration_minutes for every step" in prompt_lower
     assert "requested servings" in prompt_lower
+    assert "preferences.spice_level and preferences.special_instructions" in (
+        prompt_lower
+    )
+    assert "quantities, technique, and steps" in prompt_lower
     assert "total cooking time" in prompt_lower
     assert "tips" in prompt_lower
     assert "substitutions" in prompt_lower

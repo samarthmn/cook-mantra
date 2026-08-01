@@ -99,6 +99,17 @@ def test_postman_collection_is_portable_and_covers_the_public_api() -> None:
     refresh_script = "\n".join(refresh_event["script"]["exec"])
     assert "set('selected_option_ids_json'" not in refresh_script
 
+    option_requests = [
+        item
+        for item in requests
+        if item["name"].startswith(("08 Generate Recipe", "12 Generate More"))
+    ]
+    assert len(option_requests) == 2
+    for option_request in option_requests:
+        preferences = json.loads(option_request["request"]["body"]["raw"])
+        assert preferences["spice_level"] == "medium"
+        assert preferences["special_instructions"]
+
     generate_recipes = next(
         item for item in requests if item["name"].startswith("15 Generate Complete")
     )

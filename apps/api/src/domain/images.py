@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-ILLUSTRATION_LABEL = "AI-generated illustration"
+PREVIEW_LABEL = "AI-generated image"
 
 
 class ImageGenerationRequest(BaseModel):
@@ -27,7 +27,7 @@ class GeneratedImage:
 
 
 class DishPreview(BaseModel):
-    """A stored reference to a generated dish illustration."""
+    """A stored reference to a generated dish image."""
 
     model_config = ConfigDict(
         frozen=True,
@@ -35,17 +35,17 @@ class DishPreview(BaseModel):
             "examples": [
                 {
                     "artifact_id": "artifact-preview-123",
-                    "label": ILLUSTRATION_LABEL,
+                    "label": PREVIEW_LABEL,
                 }
             ]
         },
     )
 
     artifact_id: str
-    label: str = ILLUSTRATION_LABEL
+    label: str = PREVIEW_LABEL
 
     @field_validator("label", mode="before")
     @classmethod
-    def set_illustration_label(cls, _: object) -> str:
+    def set_preview_label(cls, _: object) -> str:
         """Keep the public label fixed regardless of model or caller input."""
-        return ILLUSTRATION_LABEL
+        return PREVIEW_LABEL

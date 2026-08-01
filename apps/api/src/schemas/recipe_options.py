@@ -38,7 +38,7 @@ RECIPE_OPTION_EXAMPLE = {
     },
     "preview": {
         "artifact_id": "artifact-preview-123",
-        "label": "AI-generated illustration",
+        "label": "AI-generated image",
     },
     "warnings": [],
 }

@@ -357,7 +357,13 @@ def test_first_option_request_returns_job_and_persists_generating_state(
 ) -> None:
     response = client.post(
         f"/api/v1/sessions/{confirmed_session.id}/recipe-options",
-        json={"servings": 2, "option_count": 4},
+        json={
+            "spice_level": " HoT ",
+            "special_instructions": "  Use\tless oil.\nServe   warm.  ",
+            "max_total_minutes": None,
+            "servings": 2,
+            "option_count": 4,
+        },
     )
 
     assert response.status_code == 202
@@ -379,7 +385,13 @@ def test_first_option_request_returns_job_and_persists_generating_state(
 
     assert job.operation is JobOperation.GENERATE_OPTIONS
     assert saved.stage is SessionStage.GENERATING_OPTIONS
-    assert saved.preferences == RecipePreferences(servings=2, option_count=4)
+    assert saved.preferences == RecipePreferences(
+        spice_level="hot",
+        special_instructions="Use less oil. Serve warm.",
+        max_total_minutes=None,
+        servings=2,
+        option_count=4,
+    )
     assert saved.option_generation_id is not None
     assert len(graph_spy.calls) == 1
     session_id, preferences, more, context = graph_spy.calls[0]

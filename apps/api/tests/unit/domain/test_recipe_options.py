@@ -27,6 +27,8 @@ def test_preferences_have_product_defaults() -> None:
     assert preferences.option_count == 4
     assert preferences.dietary_preferences == []
     assert preferences.allergens == []
+    assert preferences.spice_level is None
+    assert preferences.special_instructions == ""
 
 
 def test_preferences_reject_unknown_request_fields() -> None:
@@ -73,6 +75,76 @@ def test_preferences_trim_preference_values() -> None:
 def test_preferences_limit_each_preference_list_to_twenty_values() -> None:
     with pytest.raises(ValidationError):
         RecipePreferences(allergens=[f"allergen-{index}" for index in range(21)])
+
+
+def test_preferences_accept_spice_level_and_special_instructions() -> None:
+    preferences = RecipePreferences(
+        spice_level="hot",
+        special_instructions="Use less oil.",
+    )
+
+    assert preferences.spice_level == "hot"
+    assert preferences.special_instructions == "Use less oil."
+
+
+@pytest.mark.parametrize(
+    ("raw_spice_level", "normalized_spice_level"),
+    [
+        (" Mild ", "mild"),
+        ("MEDIUM", "medium"),
+        ("hOt", "hot"),
+        (" ExTrA-HoT\t", "extra-hot"),
+    ],
+)
+def test_preferences_normalize_spice_level_case_and_whitespace(
+    raw_spice_level: str,
+    normalized_spice_level: str,
+) -> None:
+    preferences = RecipePreferences(spice_level=raw_spice_level)
+
+    assert preferences.spice_level == normalized_spice_level
+
+
+@pytest.mark.parametrize("raw_spice_level", ["", "   ", "\t\n"])
+def test_preferences_treat_blank_spice_level_as_unset(raw_spice_level: str) -> None:
+    preferences = RecipePreferences(spice_level=raw_spice_level)
+
+    assert preferences.spice_level is None
+
+
+@pytest.mark.parametrize(
+    "spice_level",
+    ["very hot", "extra_hot", "cold", 1, True, ["hot"], b"hot"],
+)
+def test_preferences_reject_unsupported_spice_level(spice_level: object) -> None:
+    with pytest.raises(ValidationError):
+        RecipePreferences(spice_level=spice_level)
+
+
+def test_preferences_normalize_special_instruction_whitespace() -> None:
+    preferences = RecipePreferences(
+        special_instructions="  Use\tless oil.\n Add   extra vegetables.  "
+    )
+
+    assert preferences.special_instructions == "Use less oil. Add extra vegetables."
+
+
+def test_preferences_apply_special_instruction_limit_after_normalization() -> None:
+    preferences = RecipePreferences(special_instructions=f"{' ' * 600}Serve warm")
+    maximum_length = RecipePreferences(special_instructions="x" * 500)
+
+    assert preferences.special_instructions == "Serve warm"
+    assert len(maximum_length.special_instructions) == 500
+
+    with pytest.raises(ValidationError):
+        RecipePreferences(special_instructions="x" * 501)
+
+
+def test_preferences_schema_example_documents_cooking_preferences() -> None:
+    example = RecipePreferences.model_json_schema()["examples"][0]
+
+    assert example["spice_level"] == "medium"
+    assert example["special_instructions"]
 
 
 def test_recipe_draft_requires_a_used_ingredient() -> None:
