@@ -1,6 +1,7 @@
 import { normalizePantryStaples, PANTRY_STAPLES } from "./pantry-staples";
 
-export type AppView = "upload" | "job" | "confirm" | "options" | "recipes";
+export type AppView = "upload" | "job" | "confirm" | "options" | "recipes" | "saved";
+export type CookSessionView = Exclude<AppView, "saved">;
 export type SessionMode = "demo" | "api";
 export type IngredientSource = "detected" | "pantry_suggestion" | "user_added";
 export type DietPreference = "vegetarian" | "non-vegetarian";
@@ -110,13 +111,13 @@ export interface AppErrorView {
 
 export interface JobView {
   kind: "extraction" | "ideas" | "more-ideas" | "recipes";
-  returnView: Exclude<AppView, "job">;
+  returnView: Exclude<CookSessionView, "job">;
   progress: number;
   selectedNames: string[];
 }
 
 export interface CookSessionState {
-  view: AppView;
+  view: CookSessionView;
   maxReached: 1 | 2 | 3 | 4;
   mode: SessionMode;
   sessionId: string | null;
@@ -175,7 +176,7 @@ export type CookSessionAction =
       failures: Record<string, RecipeFailureView>;
       merge: boolean;
     }
-  | { type: "navigate"; view: Exclude<AppView, "job"> }
+  | { type: "navigate"; view: Exclude<CookSessionView, "job"> }
   | { type: "add-ingredient"; name: string }
   | { type: "rename-ingredient"; id: string; name: string }
   | { type: "remove-ingredient"; id: string }
@@ -714,7 +715,7 @@ export function cookSessionReducer(
 
     case "navigate": {
       if (state.view === "job") return state;
-      const ranks: Record<Exclude<AppView, "job">, number> = {
+      const ranks: Record<Exclude<CookSessionView, "job">, number> = {
         upload: 1,
         confirm: 2,
         options: 3,

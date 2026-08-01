@@ -46,16 +46,12 @@ describe("CookMantraApp", () => {
 
   it("does not show the failure simulator by default", async () => {
     const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
-    vi.spyOn(client, "createSession").mockImplementation(
-      () => new Promise(() => {}),
-    );
+    vi.spyOn(client, "createSession").mockImplementation(() => new Promise(() => {}));
     const user = userEvent.setup();
     const { container } = render(<CookMantraApp apiClient={client} />);
 
     await user.upload(
-      container.querySelector<HTMLInputElement>(
-        'input[type="file"]:not([capture])',
-      )!,
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
       new File(["verified-image-bytes"], "ingredients.jpg", {
         type: "image/jpeg",
       }),
@@ -118,6 +114,30 @@ describe("CookMantraApp", () => {
     await user.click(firstStep);
     expect(firstStep).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("1 / 7 done")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save recipe" }));
+    expect(
+      screen.getByRole("button", { name: "Saved recipes, 1 saved" }),
+    ).toBeVisible();
+  });
+
+  it("opens saved recipes and returns to the untouched session view", async () => {
+    const user = userEvent.setup();
+    render(<CookMantraApp demoJobDurationMs={0} />);
+
+    await user.click(screen.getByRole("button", { name: "Type ingredients instead" }));
+    const instructions = screen.getByRole("textbox", {
+      name: "Special instructions",
+    });
+    await user.type(instructions, "Keep the pan on low heat");
+
+    await user.click(screen.getByRole("button", { name: "Saved recipes" }));
+    expect(screen.getByRole("heading", { name: "Saved recipes" })).toBeVisible();
+    expect(instructions).not.toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByRole("heading", { name: "Check what we found" })).toBeVisible();
+    expect(instructions).toHaveValue("Keep the pan on low heat");
   });
 
   it("shows the weak-detection recovery state without assuming pantry staples", async () => {

@@ -1,13 +1,31 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { loadSavedRecipes, type SavedRecipeEntry } from "../model/saved-recipes";
 import type {
   CompleteRecipeView,
   IngredientView,
   RecipeOptionView,
 } from "../model/cook-session-state";
 import { RecipesScreen } from "./RecipesScreen";
+
+const downloadCapture = vi.hoisted(() => ({ markdown: "" }));
+
+vi.mock("../model/recipe-markdown", async () => {
+  const actual = await vi.importActual<typeof import("../model/recipe-markdown")>(
+    "../model/recipe-markdown",
+  );
+
+  return {
+    ...actual,
+    downloadRecipeMarkdown: vi.fn((recipeView: CompleteRecipeView) => {
+      downloadCapture.markdown = actual.recipeToMarkdown(recipeView);
+      return true;
+    }),
+  };
+});
 
 const recipe: CompleteRecipeView = {
   optionId: "option-1",
@@ -64,7 +82,12 @@ function optionWithNutrition(
   };
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  downloadCapture.markdown = "";
+  window.localStorage.clear();
+  vi.restoreAllMocks();
+});
 
 function renderRecipe(
   recipeView: CompleteRecipeView,
@@ -81,16 +104,130 @@ function renderRecipe(
       confirmedIngredients={ingredients}
       activeRecipeId={recipeView.optionId}
       completedSteps={{}}
+      savedRecipes={[]}
       onSetActiveRecipe={vi.fn()}
       onToggleStep={vi.fn()}
       onRetryFailed={vi.fn()}
       onBack={vi.fn()}
       onReset={vi.fn()}
+      onSavedRecipesChange={vi.fn()}
     />,
   );
 }
 
+function SavedRecipeHarness() {
+  const [savedRecipes, setSavedRecipes] = useState<SavedRecipeEntry[]>([]);
+
+  return (
+    <RecipesScreen
+      recipes={{ [recipe.optionId]: recipe }}
+      failures={{}}
+      options={[]}
+      confirmedIngredients={confirmedIngredients}
+      activeRecipeId={recipe.optionId}
+      completedSteps={{}}
+      savedRecipes={savedRecipes}
+      onSetActiveRecipe={vi.fn()}
+      onToggleStep={vi.fn()}
+      onRetryFailed={vi.fn()}
+      onBack={vi.fn()}
+      onReset={vi.fn()}
+      onSavedRecipesChange={setSavedRecipes}
+    />
+  );
+}
+
 describe("RecipesScreen", () => {
+  it("toggles the active recipe in and out of saved recipes", async () => {
+    const user = userEvent.setup();
+    render(<SavedRecipeHarness />);
+
+    const saveButton = screen.getByRole("button", { name: "Save recipe" });
+    expect(saveButton).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(saveButton);
+    const savedButton = screen.getByRole("button", { name: "Saved" });
+    expect(savedButton).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(savedButton);
+    expect(screen.getByRole("button", { name: "Save recipe" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("shows an inline notice when browser storage rejects a save", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+    render(<SavedRecipeHarness />);
+
+    await user.click(screen.getByRole("button", { name: "Save recipe" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Couldn’t save this recipe. Check browser storage and try again.",
+    );
+    expect(screen.getByRole("button", { name: "Save recipe" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("downloads the active recipe as Markdown", async () => {
+    const user = userEvent.setup();
+    renderRecipe(recipe);
+
+    await user.click(screen.getByRole("button", { name: "Download" }));
+
+    expect(downloadCapture.markdown).toContain("# Test Curry");
+    expect(downloadCapture.markdown).toContain("## Ingredients");
+    expect(downloadCapture.markdown).toContain("salt");
+  });
+
+  it("saves and downloads the fallback nutrition shown on screen", async () => {
+    const user = userEvent.setup();
+    const fallbackNutrition = {
+      caloriesKcal: 420,
+      proteinG: 12,
+      carbohydratesG: 54,
+      fatG: 16,
+      dietTags: ["Vegetarian"],
+      allergenWarnings: [],
+      disclaimer: "Estimated values; not medical advice.",
+    };
+    const option = optionWithNutrition(fallbackNutrition);
+    render(
+      <RecipesScreen
+        recipes={{ [recipe.optionId]: recipe }}
+        failures={{}}
+        options={[option]}
+        confirmedIngredients={confirmedIngredients}
+        activeRecipeId={recipe.optionId}
+        completedSteps={{}}
+        savedRecipes={[]}
+        onSetActiveRecipe={vi.fn()}
+        onToggleStep={vi.fn()}
+        onRetryFailed={vi.fn()}
+        onBack={vi.fn()}
+        onReset={vi.fn()}
+        onSavedRecipesChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("420")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Save recipe" }));
+
+    const savedEntries = loadSavedRecipes();
+    expect(savedEntries[0]?.recipe.nutrition).toEqual(fallbackNutrition);
+
+    await user.click(screen.getByRole("button", { name: "Download" }));
+
+    expect(downloadCapture.markdown).toContain("## Nutrition");
+    expect(downloadCapture.markdown).toContain("**Calories:** 420 kcal");
+    expect(downloadCapture.markdown).toContain("**Protein:** 12 g");
+  });
+
   it("keeps a confirmed pantry ingredient visibly sourced as pantry", () => {
     renderRecipe(recipe);
 
@@ -335,11 +472,13 @@ describe("RecipesScreen", () => {
       options: [],
       confirmedIngredients,
       completedSteps: {},
+      savedRecipes: [],
       onSetActiveRecipe: vi.fn(),
       onToggleStep: vi.fn(),
       onRetryFailed: vi.fn(),
       onBack: vi.fn(),
       onReset: vi.fn(),
+      onSavedRecipesChange: vi.fn(),
     };
     const { rerender } = render(
       <RecipesScreen {...props} activeRecipeId={firstRecipe.optionId} />,
@@ -392,11 +531,13 @@ describe("RecipesScreen", () => {
         ]}
         activeRecipeId={recipe.optionId}
         completedSteps={{}}
+        savedRecipes={[]}
         onSetActiveRecipe={vi.fn()}
         onToggleStep={vi.fn()}
         onRetryFailed={vi.fn()}
         onBack={vi.fn()}
         onReset={vi.fn()}
+        onSavedRecipesChange={vi.fn()}
       />,
     );
 
@@ -447,11 +588,13 @@ describe("RecipesScreen", () => {
         confirmedIngredients={confirmedIngredients}
         activeRecipeId={recipe.optionId}
         completedSteps={{}}
+        savedRecipes={[]}
         onSetActiveRecipe={vi.fn()}
         onToggleStep={vi.fn()}
         onRetryFailed={onRetryFailed}
         onBack={vi.fn()}
         onReset={vi.fn()}
+        onSavedRecipesChange={vi.fn()}
       />,
     );
 
@@ -472,11 +615,13 @@ describe("RecipesScreen", () => {
         confirmedIngredients={confirmedIngredients}
         activeRecipeId={recipe.optionId}
         completedSteps={{ [recipe.optionId]: [1] }}
+        savedRecipes={[]}
         onSetActiveRecipe={vi.fn()}
         onToggleStep={vi.fn()}
         onRetryFailed={vi.fn()}
         onBack={vi.fn()}
         onReset={onReset}
+        onSavedRecipesChange={vi.fn()}
       />,
     );
     const trigger = screen.getByRole("button", {

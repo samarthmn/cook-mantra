@@ -257,9 +257,7 @@ export function DesignGuide() {
                 className="option-card-placeholder"
                 strokeWidth={1.5}
               />
-              <span className="tag tag-neutral option-card-ai-label">
-                AI image
-              </span>
+              <span className="tag tag-neutral option-card-ai-label">AI image</span>
             </div>
             <div className="option-card-content">
               <div className="option-card-heading">

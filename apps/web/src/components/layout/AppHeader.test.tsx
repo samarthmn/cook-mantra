@@ -1,5 +1,6 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppHeader } from "./AppHeader";
 
@@ -53,5 +54,18 @@ describe("AppHeader", () => {
     expect(
       within(header).getByRole("button", { name: "Switch to dark theme" }),
     ).toBeInTheDocument();
+  });
+
+  it("opens saved recipes and shows a non-zero count", async () => {
+    const user = userEvent.setup();
+    const onOpenSaved = vi.fn();
+    render(<AppHeader savedCount={3} onOpenSaved={onOpenSaved} />);
+
+    const saved = screen.getByRole("button", {
+      name: "Saved recipes, 3 saved",
+    });
+    await user.click(saved);
+
+    expect(onOpenSaved).toHaveBeenCalledOnce();
   });
 });

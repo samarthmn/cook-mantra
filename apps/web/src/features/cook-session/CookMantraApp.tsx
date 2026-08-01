@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { AppHeader } from "@/components/layout/AppHeader";
 import { ErrorAlert } from "@/components/layout/ErrorAlert";
@@ -18,6 +26,7 @@ import { ConfirmScreen } from "./components/ConfirmScreen";
 import { JobScreen } from "./components/JobScreen";
 import { OptionsScreen } from "./components/OptionsScreen";
 import { RecipesScreen } from "./components/RecipesScreen";
+import { SavedRecipesScreen } from "./components/SavedRecipesScreen";
 import { UploadScreen } from "./components/UploadScreen";
 import {
   ingredientsFromApi,
@@ -34,6 +43,7 @@ import {
   createInitialCookSessionState,
   type AppErrorView,
   type AppView,
+  type CookSessionView,
   type CookSessionState,
   type JobView,
   type PreferenceView,
@@ -46,9 +56,15 @@ import {
   demoPantryIngredients,
 } from "./model/demo-data";
 import { loadPantryStaples, savePantryStaples } from "./model/pantry-staples";
+import {
+  loadSavedRecipes,
+  SAVED_RECIPES_STORAGE_KEY,
+  type SavedRecipeEntry,
+} from "./model/saved-recipes";
 
 const ACCEPTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const EMPTY_SAVED_RECIPE_ENTRIES: SavedRecipeEntry[] = [];
 
 export interface CookMantraAppProps {
   demoJobDurationMs?: number;
@@ -128,6 +144,8 @@ function ConnectedCookMantraApp({
     undefined,
     createInitialCookSessionState,
   );
+  const [savedRecipes, setSavedRecipes] = useSavedRecipeEntries();
+  const [savedViewOpen, setSavedViewOpen] = useState(false);
   const stateRef = useRef(state);
   stateRef.current = state;
   const activeController = useRef<AbortController | null>(null);
@@ -137,7 +155,9 @@ function ConnectedCookMantraApp({
   const manualEntry = useRef(false);
   const photoPreviewUrl = useRef<string | null>(null);
   const lastRetry = useRef<(() => void) | null>(null);
-  const previousView = useRef(state.view);
+  const savedReturnScrollY = useRef(0);
+  const activeAppView: AppView = savedViewOpen ? "saved" : state.view;
+  const previousView = useRef<AppView>(activeAppView);
   useEffect(() => {
     dispatch({ type: "set-pantry-staples", names: loadPantryStaples() });
   }, []);
@@ -151,14 +171,21 @@ function ConnectedCookMantraApp({
   );
 
   useEffect(() => {
-    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-    if (previousView.current !== state.view) {
+    const returningFromSaved = previousView.current === "saved";
+    window.scrollTo({
+      top: returningFromSaved ? savedReturnScrollY.current : 0,
+      left: 0,
+      behavior: "auto",
+    });
+    if (previousView.current !== activeAppView) {
+      const viewSelector =
+        activeAppView === "saved" ? ".saved-view-shell" : ".cook-session-view";
       document
-        .querySelector<HTMLElement>(".page-main h1")
+        .querySelector<HTMLElement>(`${viewSelector} h1`)
         ?.focus({ preventScroll: true });
-      previousView.current = state.view;
+      previousView.current = activeAppView;
     }
-  }, [state.view]);
+  }, [activeAppView]);
 
   const beginOperation = useCallback(() => {
     activeController.current?.abort();
@@ -844,8 +871,18 @@ function ConnectedCookMantraApp({
     dispatch({ type: "reset" });
   }
 
+  function handleOpenSavedRecipes() {
+    if (savedViewOpen) return;
+    savedReturnScrollY.current = window.scrollY;
+    setSavedViewOpen(true);
+  }
+
+  function handleCloseSavedRecipes() {
+    setSavedViewOpen(false);
+  }
+
   function handleStepChange(index: number) {
-    const views: Array<Exclude<AppView, "job">> = [
+    const views: Array<Exclude<CookSessionView, "job">> = [
       "upload",
       "confirm",
       "options",
@@ -863,107 +900,126 @@ function ConnectedCookMantraApp({
 
   return (
     <div className="app-shell">
-      <AppHeader />
-      <ProgressStepper
-        currentIndex={currentStepIndex}
-        maxReachedIndex={state.maxReached - 1}
-        locked={state.view === "job"}
-        onStepChange={handleStepChange}
+      <AppHeader
+        savedActive={savedViewOpen}
+        savedCount={savedRecipes.length}
+        onOpenSaved={handleOpenSavedRecipes}
       />
+      {savedViewOpen ? null : (
+        <ProgressStepper
+          currentIndex={currentStepIndex}
+          maxReachedIndex={state.maxReached - 1}
+          locked={state.view === "job"}
+          onStepChange={handleStepChange}
+        />
+      )}
       <main className="page-main">
-        {state.error ? (
-          <ErrorAlert
-            title={state.error.title}
-            message={state.error.message}
-            onRetry={
-              state.error.retryable && lastRetry.current
-                ? () => lastRetry.current?.()
-                : undefined
-            }
-            onDismiss={() => dispatch({ type: "dismiss-error" })}
-          />
-        ) : null}
+        <div className="cook-session-view" hidden={savedViewOpen}>
+          {state.error ? (
+            <ErrorAlert
+              title={state.error.title}
+              message={state.error.message}
+              onRetry={
+                state.error.retryable && lastRetry.current
+                  ? () => lastRetry.current?.()
+                  : undefined
+              }
+              onDismiss={() => dispatch({ type: "dismiss-error" })}
+            />
+          ) : null}
 
-        {state.view === "upload" ? (
-          <UploadScreen
-            onUpload={handleUpload}
-            onManualEntry={handleManualEntry}
-            onWeakDetection={handleWeakDetection}
-            showWeakDetection={devControls}
-          />
-        ) : null}
-        {state.view === "job" && state.job ? (
-          <JobScreen
-            job={state.job}
-            allowInterruption={activeJobMode.current !== "api"}
-            onCancel={handleCancelJob}
-            onSimulateFailure={handleSimulateFailure}
-            showSimulateFailure={devControls}
-          />
-        ) : null}
-        {state.view === "confirm" ? (
-          <ConfirmScreen
-            ingredients={state.ingredients}
-            ingredientNameErrors={state.ingredientNameErrors}
-            preferences={state.preferences}
-            weakDetection={state.weakDetection}
-            manualEntry={state.mode === "api" && state.photoPreviewUrl === null}
-            onAddIngredient={(name) => dispatch({ type: "add-ingredient", name })}
-            onRenameIngredient={(id, name) =>
-              dispatch({ type: "rename-ingredient", id, name })
-            }
-            onRemoveIngredient={(id) => dispatch({ type: "remove-ingredient", id })}
-            onToggleIngredient={(id) => dispatch({ type: "toggle-ingredient", id })}
-            onToggleAllPantry={(confirmed) =>
-              dispatch({ type: "toggle-all-pantry", confirmed })
-            }
-            pantryStaples={state.pantryStaples}
-            generatedContentExists={generatedContentExists}
-            onPantryStaplesChange={handlePantryStaplesChange}
-            onPreferenceChange={<Key extends keyof PreferenceView>(
-              key: Key,
-              value: PreferenceView[Key],
-            ) => dispatch({ type: "set-preference", key, value })}
-            onRetake={handleReset}
-            onGenerate={handleGenerateOptions}
-          />
-        ) : null}
-        {state.view === "options" ? (
-          <OptionsScreen
-            options={state.options}
-            selectedOptionIds={state.selectedOptionIds}
-            ingredientCount={confirmedIngredientCount(state.ingredients)}
-            ideasExhausted={state.ideasExhausted}
-            moreIdeasUnavailableReason={
-              state.mode === "api" && apiSessionStage.current !== "options_ready"
-                ? "To get more ideas, edit your ingredients — Cook Mantra will re-read your photo and start fresh. You can still create recipes from the ideas already shown."
-                : null
-            }
-            previewUrl={(artifactId) => client.artifactUrl(artifactId)}
-            onToggleOption={(id) => dispatch({ type: "toggle-option", id })}
-            onMoreIdeas={handleMoreIdeas}
-            onEditIngredients={() => dispatch({ type: "navigate", view: "confirm" })}
-            onCreateRecipes={handleCreateRecipes}
-          />
-        ) : null}
-        {state.view === "recipes" ? (
-          <RecipesScreen
-            recipes={state.completeRecipes}
-            failures={state.recipeFailures}
-            options={state.options}
-            confirmedIngredients={state.ingredients}
-            activeRecipeId={state.activeRecipeId}
-            completedSteps={state.completedSteps}
-            onSetActiveRecipe={(optionId) =>
-              dispatch({ type: "set-active-recipe", optionId })
-            }
-            onToggleStep={(optionId, stepNumber) =>
-              dispatch({ type: "toggle-recipe-step", optionId, stepNumber })
-            }
-            onRetryFailed={handleRetryFailedRecipes}
-            onBack={() => dispatch({ type: "navigate", view: "options" })}
-            onReset={handleReset}
-          />
+          {state.view === "upload" ? (
+            <UploadScreen
+              onUpload={handleUpload}
+              onManualEntry={handleManualEntry}
+              onWeakDetection={handleWeakDetection}
+              showWeakDetection={devControls}
+            />
+          ) : null}
+          {state.view === "job" && state.job ? (
+            <JobScreen
+              job={state.job}
+              allowInterruption={activeJobMode.current !== "api"}
+              onCancel={handleCancelJob}
+              onSimulateFailure={handleSimulateFailure}
+              showSimulateFailure={devControls}
+            />
+          ) : null}
+          {state.view === "confirm" ? (
+            <ConfirmScreen
+              ingredients={state.ingredients}
+              ingredientNameErrors={state.ingredientNameErrors}
+              preferences={state.preferences}
+              weakDetection={state.weakDetection}
+              manualEntry={state.mode === "api" && state.photoPreviewUrl === null}
+              onAddIngredient={(name) => dispatch({ type: "add-ingredient", name })}
+              onRenameIngredient={(id, name) =>
+                dispatch({ type: "rename-ingredient", id, name })
+              }
+              onRemoveIngredient={(id) => dispatch({ type: "remove-ingredient", id })}
+              onToggleIngredient={(id) => dispatch({ type: "toggle-ingredient", id })}
+              onToggleAllPantry={(confirmed) =>
+                dispatch({ type: "toggle-all-pantry", confirmed })
+              }
+              pantryStaples={state.pantryStaples}
+              generatedContentExists={generatedContentExists}
+              onPantryStaplesChange={handlePantryStaplesChange}
+              onPreferenceChange={<Key extends keyof PreferenceView>(
+                key: Key,
+                value: PreferenceView[Key],
+              ) => dispatch({ type: "set-preference", key, value })}
+              onRetake={handleReset}
+              onGenerate={handleGenerateOptions}
+            />
+          ) : null}
+          {state.view === "options" ? (
+            <OptionsScreen
+              options={state.options}
+              selectedOptionIds={state.selectedOptionIds}
+              ingredientCount={confirmedIngredientCount(state.ingredients)}
+              ideasExhausted={state.ideasExhausted}
+              moreIdeasUnavailableReason={
+                state.mode === "api" && apiSessionStage.current !== "options_ready"
+                  ? "To get more ideas, edit your ingredients — Cook Mantra will re-read your photo and start fresh. You can still create recipes from the ideas already shown."
+                  : null
+              }
+              previewUrl={(artifactId) => client.artifactUrl(artifactId)}
+              onToggleOption={(id) => dispatch({ type: "toggle-option", id })}
+              onMoreIdeas={handleMoreIdeas}
+              onEditIngredients={() => dispatch({ type: "navigate", view: "confirm" })}
+              onCreateRecipes={handleCreateRecipes}
+            />
+          ) : null}
+          {state.view === "recipes" ? (
+            <RecipesScreen
+              recipes={state.completeRecipes}
+              failures={state.recipeFailures}
+              options={state.options}
+              confirmedIngredients={state.ingredients}
+              activeRecipeId={state.activeRecipeId}
+              completedSteps={state.completedSteps}
+              savedRecipes={savedRecipes}
+              onSetActiveRecipe={(optionId) =>
+                dispatch({ type: "set-active-recipe", optionId })
+              }
+              onToggleStep={(optionId, stepNumber) =>
+                dispatch({ type: "toggle-recipe-step", optionId, stepNumber })
+              }
+              onRetryFailed={handleRetryFailedRecipes}
+              onSavedRecipesChange={setSavedRecipes}
+              onBack={() => dispatch({ type: "navigate", view: "options" })}
+              onReset={handleReset}
+            />
+          ) : null}
+        </div>
+        {savedViewOpen ? (
+          <div className="saved-view-shell">
+            <SavedRecipesScreen
+              entries={savedRecipes}
+              onBack={handleCloseSavedRecipes}
+              onEntriesChange={setSavedRecipes}
+            />
+          </div>
         ) : null}
       </main>
     </div>
@@ -971,26 +1027,84 @@ function ConnectedCookMantraApp({
 }
 
 function ApiConfigurationNotice() {
+  const [savedRecipes, setSavedRecipes] = useSavedRecipeEntries();
+  const [savedViewOpen, setSavedViewOpen] = useState(false);
+
   return (
     <div className="app-shell">
-      <AppHeader />
-      <main className="page-main configuration-main">
-        <section className="configuration-notice" aria-labelledby="config-title">
-          <p className="kicker">Configuration required</p>
-          <h1 className="screen-title" id="config-title" tabIndex={-1}>
-            Cook Mantra is not connected to its kitchen
-          </h1>
-          <p className="screen-intro">
-            Set <code>NEXT_PUBLIC_COOK_MANTRA_API_URL</code> to the deployed Cook Mantra
-            API URL, then rebuild and redeploy this site.
-          </p>
-        </section>
+      <AppHeader
+        savedActive={savedViewOpen}
+        savedCount={savedRecipes.length}
+        onOpenSaved={() => setSavedViewOpen(true)}
+      />
+      <main className={`page-main${savedViewOpen ? "" : " configuration-main"}`}>
+        {savedViewOpen ? (
+          <div className="saved-view-shell">
+            <SavedRecipesScreen
+              entries={savedRecipes}
+              onBack={() => setSavedViewOpen(false)}
+              onEntriesChange={setSavedRecipes}
+            />
+          </div>
+        ) : (
+          <section className="configuration-notice" aria-labelledby="config-title">
+            <p className="kicker">Configuration required</p>
+            <h1 className="screen-title" id="config-title" tabIndex={-1}>
+              Cook Mantra is not connected to its kitchen
+            </h1>
+            <p className="screen-intro">
+              Set <code>NEXT_PUBLIC_COOK_MANTRA_API_URL</code> to the deployed Cook
+              Mantra API URL, then rebuild and redeploy this site.
+            </p>
+          </section>
+        )}
       </main>
     </div>
   );
 }
 
-function viewStepIndex(view: AppView, job: JobView | null): number {
+function useSavedRecipeEntries() {
+  const snapshotRef = useRef<SavedRecipeEntry[] | null>(null);
+  const listenerRef = useRef<(() => void) | null>(null);
+  const getSnapshot = useCallback(() => {
+    snapshotRef.current ??= loadSavedRecipes();
+    return snapshotRef.current;
+  }, []);
+  const subscribe = useCallback((listener: () => void) => {
+    listenerRef.current = listener;
+
+    function handleStorage(event: StorageEvent) {
+      if (event.key !== null && event.key !== SAVED_RECIPES_STORAGE_KEY) {
+        return;
+      }
+      snapshotRef.current = loadSavedRecipes();
+      listener();
+    }
+
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      if (listenerRef.current === listener) listenerRef.current = null;
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+  const entries = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    getEmptySavedRecipeSnapshot,
+  );
+  const setEntries = useCallback((nextEntries: SavedRecipeEntry[]) => {
+    snapshotRef.current = nextEntries;
+    listenerRef.current?.();
+  }, []);
+
+  return [entries, setEntries] as const;
+}
+
+function getEmptySavedRecipeSnapshot(): SavedRecipeEntry[] {
+  return EMPTY_SAVED_RECIPE_ENTRIES;
+}
+
+function viewStepIndex(view: CookSessionView, job: JobView | null): number {
   if (view === "job") {
     if (job?.kind === "extraction") return 0;
     if (job?.kind === "recipes") return 3;

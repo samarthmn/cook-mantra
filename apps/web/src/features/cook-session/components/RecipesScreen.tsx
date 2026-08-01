@@ -3,21 +3,27 @@
 import {
   AlertTriangle,
   ArrowLeft,
-  Check,
-  ChevronDown,
-  Clock3,
+  Bookmark,
+  BookmarkCheck,
+  Download,
   RefreshCw,
-  UsersRound,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
+import { downloadRecipeMarkdown } from "../model/recipe-markdown";
+import {
+  isRecipeSaved,
+  removeSavedRecipe,
+  saveRecipe,
+  type SavedRecipeEntry,
+} from "../model/saved-recipes";
 import type {
   CompleteRecipeView,
   IngredientView,
   RecipeFailureView,
-  RecipeIngredientView,
   RecipeOptionView,
 } from "../model/cook-session-state";
+import { RecipeDetail } from "./RecipeDetail";
 import { ScreenHeader } from "./ScreenHeader";
 
 interface RecipesScreenProps {
@@ -27,11 +33,13 @@ interface RecipesScreenProps {
   confirmedIngredients: IngredientView[];
   activeRecipeId: string | null;
   completedSteps: Record<string, number[]>;
+  savedRecipes: SavedRecipeEntry[];
   onSetActiveRecipe: (optionId: string) => void;
   onToggleStep: (optionId: string, stepNumber: number) => void;
   onRetryFailed: () => void;
   onBack: () => void;
   onReset: () => void;
+  onSavedRecipesChange: (entries: SavedRecipeEntry[]) => void;
 }
 
 function plural(value: number, singular: string, pluralForm = `${singular}s`) {
@@ -45,14 +53,19 @@ export function RecipesScreen({
   confirmedIngredients,
   activeRecipeId,
   completedSteps,
+  savedRecipes,
   onSetActiveRecipe,
   onToggleStep,
   onRetryFailed,
   onBack,
   onReset,
+  onSavedRecipesChange,
 }: RecipesScreenProps) {
-  const [ingredientsExpanded, setIngredientsExpanded] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<{
+    optionId: string;
+    message: string;
+  } | null>(null);
   const startOverButtonRef = useRef<HTMLButtonElement>(null);
   const cancelResetButtonRef = useRef<HTMLButtonElement>(null);
   const confirmResetButtonRef = useRef<HTMLButtonElement>(null);
@@ -123,9 +136,42 @@ export function RecipesScreen({
   }
 
   const activeOption = options.find((option) => option.id === activeRecipe.optionId);
-  const activeNutrition = activeRecipe.nutrition ?? activeOption?.nutrition;
+  const activeNutrition = activeRecipe.nutrition ?? activeOption?.nutrition ?? null;
+  const displayedRecipe =
+    activeRecipe.nutrition === activeNutrition
+      ? activeRecipe
+      : { ...activeRecipe, nutrition: activeNutrition };
   const completeSteps = completedSteps[activeRecipe.optionId] ?? [];
-  const ingredientListId = `recipe-ingredients-list-${activeRecipe.optionId}`;
+  const activeRecipeIsSaved = isRecipeSaved(savedRecipes, displayedRecipe);
+
+  function toggleSavedRecipe() {
+    const result = activeRecipeIsSaved
+      ? removeSavedRecipe(displayedRecipe)
+      : saveRecipe(displayedRecipe);
+    onSavedRecipesChange(result.entries);
+    setSaveNotice(
+      result.ok
+        ? null
+        : {
+            optionId: activeRecipe.optionId,
+            message: activeRecipeIsSaved
+              ? "Couldn’t remove this saved recipe. Check browser storage and try again."
+              : "Couldn’t save this recipe. Check browser storage and try again.",
+          },
+    );
+  }
+
+  function downloadActiveRecipe() {
+    if (downloadRecipeMarkdown(displayedRecipe)) {
+      setSaveNotice(null);
+      return;
+    }
+
+    setSaveNotice({
+      optionId: activeRecipe.optionId,
+      message: "Couldn’t download this recipe. Try again in a browser window.",
+    });
+  }
 
   function moveRecipeTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
     let nextIndex: number | null = null;
@@ -194,183 +240,48 @@ export function RecipesScreen({
           recipeList.length > 1 ? `recipe-tab-${activeRecipe.optionId}` : undefined
         }
       >
-        <hr className="section-rule" />
-        <div className="recipe-title-row">
-          <h2 className="recipe-title">{activeRecipe.name}</h2>
-          <div className="recipe-meta">
-            <span className="tag tag-accent">{activeRecipe.cuisine}</span>
-            <span className="meta-with-icon">
-              <Clock3 aria-hidden="true" size={15} />
-              {activeRecipe.totalMinutes} min
-            </span>
-            <span className="meta-with-icon">
-              <UsersRound aria-hidden="true" size={15} />
-              serves {activeRecipe.servings}
-            </span>
-          </div>
-        </div>
-        {activeRecipe.assumptions.length ? (
-          <p className="recipe-assumptions">
-            Assumes: {activeRecipe.assumptions.join("; ")}
-          </p>
-        ) : null}
-        {activeRecipe.warnings.length ? (
-          <div
-            aria-label="Recipe warnings"
-            className="notice notice-accent recipe-warnings"
-            role="status"
-          >
-            <AlertTriangle className="notice-icon" aria-hidden="true" />
-            <div className="recipe-warning-body">
-              <strong className="recipe-warning-title">Before you cook</strong>
-              <ul className="recipe-warning-list">
-                {activeRecipe.warnings.map((warning, index) => (
-                  <li key={`${index}-${warning}`}>{warning}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        ) : null}
-
-        <div className="recipe-layout">
-          <aside className="recipe-ingredients" aria-labelledby="ingredients-heading">
-            <h3
-              className="panel-heading recipe-ingredients-heading"
-              id="ingredients-heading"
-            >
-              <span className="recipe-ingredients-heading-static">Ingredients</span>
-              <button
-                className="recipe-ingredients-disclosure"
-                type="button"
-                aria-controls={ingredientListId}
-                aria-expanded={ingredientsExpanded}
-                onClick={() => setIngredientsExpanded((expanded) => !expanded)}
+        <RecipeDetail
+          recipe={displayedRecipe}
+          confirmedIngredients={confirmedIngredients}
+          completedSteps={completeSteps}
+          onToggleStep={(stepNumber) => onToggleStep(activeRecipe.optionId, stepNumber)}
+          actions={
+            <>
+              <div
+                className="recipe-actions"
+                role="group"
+                aria-label={`${activeRecipe.name} actions`}
               >
-                <span>Ingredients ({activeRecipe.ingredients.length})</span>
-                <ChevronDown aria-hidden="true" size={18} />
-              </button>
-            </h3>
-            <div
-              className="recipe-ingredient-list"
-              id={ingredientListId}
-              hidden={!ingredientsExpanded}
-            >
-              {activeRecipe.ingredients.map((ingredient, index) => {
-                const status = ingredientStatus(ingredient, confirmedIngredients);
-                return (
-                  <div
-                    className="recipe-ingredient-row"
-                    key={`${ingredient.name}-${index}`}
-                  >
-                    <span className="recipe-ingredient-quantity">
-                      {ingredient.quantity}
-                    </span>
-                    <span className="recipe-ingredient-copy">
-                      <span className="recipe-ingredient-name">{ingredient.name}</span>
-                      {ingredient.substitution ? (
-                        <span className="recipe-ingredient-substitution">
-                          Substitute: {ingredient.substitution}
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className={`tag ${status.className}`}>{status.label}</span>
-                  </div>
-                );
-              })}
-            </div>
-
-            {activeNutrition ? (
-              <div className="recipe-nutrition">
-                <h3 className="panel-heading">Per serving — estimate</h3>
-                <div className="nutrition-strip">
-                  <NutritionItem value={activeNutrition.caloriesKcal} label="kcal" />
-                  <NutritionItem
-                    value={`${activeNutrition.proteinG}g`}
-                    label="protein"
-                  />
-                  <NutritionItem
-                    value={`${activeNutrition.carbohydratesG}g`}
-                    label="carbs"
-                  />
-                  <NutritionItem value={`${activeNutrition.fatG}g`} label="fat" />
-                </div>
+                <button
+                  className={`btn btn-secondary${activeRecipeIsSaved ? " is-saved" : ""}`}
+                  type="button"
+                  aria-pressed={activeRecipeIsSaved}
+                  onClick={toggleSavedRecipe}
+                >
+                  {activeRecipeIsSaved ? (
+                    <BookmarkCheck aria-hidden="true" size={16} />
+                  ) : (
+                    <Bookmark aria-hidden="true" size={16} />
+                  )}
+                  {activeRecipeIsSaved ? "Saved" : "Save recipe"}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  type="button"
+                  onClick={downloadActiveRecipe}
+                >
+                  <Download aria-hidden="true" size={16} />
+                  Download
+                </button>
               </div>
-            ) : null}
-            <div className="recipe-notices">
-              <p className="nutrition-warning">{activeRecipe.allergenNotice}</p>
-              <p className="nutrition-disclaimer">{activeRecipe.nutritionNotice}</p>
-            </div>
-          </aside>
-
-          <div className="recipe-method">
-            <div className="method-heading">
-              <h3 className="panel-heading">Method — tap a step when done</h3>
-              <span className="tag tag-accent">
-                {completeSteps.length} / {activeRecipe.steps.length} done
-              </span>
-            </div>
-            <div className="method-list">
-              {activeRecipe.steps.map((step) => {
-                const isDone = completeSteps.includes(step.number);
-                return (
-                  <button
-                    className="method-step"
-                    type="button"
-                    aria-pressed={isDone}
-                    onClick={() => onToggleStep(activeRecipe.optionId, step.number)}
-                    key={step.number}
-                  >
-                    <span className="method-step-number" aria-hidden="true">
-                      {isDone ? <Check size={15} /> : step.number}
-                    </span>
-                    <span className="method-step-copy">
-                      <span className="method-step-text">{step.instruction}</span>
-                      {step.doneWhen ? (
-                        <span className="method-step-done-when">
-                          Done when — {step.doneWhen}
-                        </span>
-                      ) : null}
-                      {step.durationMinutes || step.heatLevel ? (
-                        <span className="method-step-meta">
-                          {step.durationMinutes ? (
-                            <span className="method-step-duration">
-                              <Clock3 aria-hidden="true" size={13} />
-                              {step.durationMinutes} min
-                            </span>
-                          ) : null}
-                          {step.heatLevel ? (
-                            <span className="method-step-heat">
-                              {step.heatLevel} heat
-                            </span>
-                          ) : null}
-                        </span>
-                      ) : null}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="recipe-notes-grid">
-              {activeRecipe.tips.length ? (
-                <div className="recipe-note recipe-note-accent">
-                  <h3 className="panel-heading">Tips</h3>
-                  {activeRecipe.tips.map((tip, index) => (
-                    <p key={`${index}-${tip}`}>{tip}</p>
-                  ))}
-                </div>
+              {saveNotice?.optionId === activeRecipe.optionId ? (
+                <p className="recipe-action-notice" role="status">
+                  {saveNotice.message}
+                </p>
               ) : null}
-              {activeRecipe.substitutions.length ? (
-                <div className="recipe-note">
-                  <h3 className="panel-heading">Substitutions</h3>
-                  {activeRecipe.substitutions.map((substitution, index) => (
-                    <p key={`${index}-${substitution}`}>{substitution}</p>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
+            </>
+          }
+        />
       </div>
 
       <div className="recipe-footer">
@@ -436,15 +347,6 @@ export function RecipesScreen({
   );
 }
 
-function NutritionItem({ value, label }: { value: number | string; label: string }) {
-  return (
-    <span>
-      <span className="nutrition-value">{value}</span>
-      <span className="nutrition-label">{label}</span>
-    </span>
-  );
-}
-
 function RecipeFailuresNotice({
   completedCount,
   failures,
@@ -492,42 +394,4 @@ function safeFailureMessage(message: string): string {
   const normalized = message.replaceAll(/\p{C}/gu, " ").trim().replaceAll(/\s+/g, " ");
   if (!normalized) return "The recipe agent did not return a usable recipe.";
   return normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
-}
-
-function ingredientStatus(
-  ingredient: RecipeIngredientView,
-  confirmedIngredients: IngredientView[],
-) {
-  if (ingredient.availability === "optional") {
-    return { label: "optional", className: "tag-accent-2" };
-  }
-  if (ingredient.availability === "missing") {
-    return { label: "missing", className: "tag-outline" };
-  }
-
-  const recipeName = normalizeIngredientName(ingredient.name);
-  const source = confirmedIngredients.find((confirmed) => {
-    if (!confirmed.confirmed) return false;
-    const confirmedName = normalizeIngredientName(confirmed.name);
-    return confirmedName.includes(recipeName) || recipeName.includes(confirmedName);
-  })?.source;
-
-  if (source === "detected") {
-    return { label: "detected", className: "tag-neutral" };
-  }
-  if (source === "pantry_suggestion") {
-    return { label: "pantry", className: "tag-neutral" };
-  }
-  if (source === "user_added") {
-    return { label: "added by you", className: "tag-neutral" };
-  }
-  return { label: "available", className: "tag-neutral" };
-}
-
-function normalizeIngredientName(name: string) {
-  return name
-    .toLocaleLowerCase()
-    .split(",")[0]
-    .replaceAll(/[^a-z ]/g, "")
-    .trim();
 }
