@@ -6,6 +6,12 @@ Use the root `tmp/` directory for generated logs, downloads, screenshots, and ot
 
 ## Build, Test, and Development Commands
 
+- `pnpm api:dev` — FastAPI on `127.0.0.1:8000`.
+- `pnpm web:dev` — Next.js dev server on `localhost:3000`.
+
+Tests and checks: `pnpm web:test` / `web:typecheck` / `web:lint`, and
+`cd apps/api && uv run pytest -m "not live" && uv run ruff check .`.
+
 ## Coding Rules, Style & Naming Conventions
 
 Go through the `docs/` and read the necessary files which are required for the coding rules.

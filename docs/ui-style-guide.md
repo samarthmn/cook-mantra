@@ -382,6 +382,12 @@ Use `.recipe-title-row`, `.recipe-meta`, and `.recipe-assumptions` above
 `.recipe-ingredient-name`. Keep the estimate and disclaimer together in
 `.recipe-nutrition`.
 
+When `.recipe-layout` stacks at 40rem or below, replace the static Ingredients
+label with a native disclosure button showing the ingredient count. Set
+`aria-expanded` and `aria-controls`, default the list to collapsed, and keep the
+nutrition estimate and notices visible outside the controlled list. Above that
+threshold, hide the disclosure control and always present the ingredient rail.
+
 Method rows use `.method-list`, `.method-step`, `.method-step-number`, and
 `.method-step-text`. Set `aria-pressed` on every step. Completed steps receive a
 red check plus struck-through text so the state does not depend on color.
