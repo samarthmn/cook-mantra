@@ -21,7 +21,7 @@ from tests.unit.orchestration.graphs.test_recipe_options import (
     stored_option,
 )
 
-from core.config import Model, Settings
+from core.config import Settings
 from core.errors import AppError, ErrorCode
 from domain.artifacts import ArtifactKind
 from domain.images import DishPreview, GeneratedImage, ImageGenerationRequest
@@ -36,7 +36,7 @@ from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
-from services.image_generation import OllamaImageGenerator
+from services.image_generation import BeastImageGenerator
 
 
 class RecordingDishPreviewService(FakeDishPreviewService):
@@ -374,7 +374,14 @@ async def test_image_failure_preserves_option_with_only_image_warning() -> None:
         FakeMasterChef([[draft("Tomato Curry")]]),
         FakeNutritionAgent({"Tomato Curry": estimate(321)}),
         previews=RecordingDishPreviewService(
-            {"Tomato Curry": RuntimeError("image unavailable")}
+            {
+                "Tomato Curry": AppError(
+                    code=ErrorCode.IMAGE_PROVIDER_UNAVAILABLE,
+                    message="The image generation provider is unavailable.",
+                    status_code=503,
+                    retryable=True,
+                )
+            }
         ),
     )
 
@@ -423,11 +430,11 @@ async def test_enrichment_failures_log_structured_app_error_context(
     )
     nutrition_failure.__cause__ = ConnectionError("nutrition transport failed")
     preview_failure = AppError(
-        code=ErrorCode.ARTIFACT_FAILURE,
-        message="Preview generation misconfigured.",
-        status_code=500,
-        retryable=False,
-        details={"provider": "ollama"},
+        code=ErrorCode.IMAGE_PROVIDER_UNAVAILABLE,
+        message="The image generation provider is unavailable.",
+        status_code=503,
+        retryable=True,
+        details={"provider": "beast"},
     )
     preview_failure.__cause__ = RuntimeError("preview model initialization failed")
     fixture = await make_generation(option_count=1)
@@ -468,13 +475,15 @@ async def test_enrichment_failures_log_structured_app_error_context(
     assert preview_record.option_index == 0
     assert preview_record.option_name == "Tomato Curry"
     assert preview_record.exception_type == "AppError"
-    assert preview_record.error_code == ErrorCode.ARTIFACT_FAILURE.value
-    assert preview_record.error_message == "Preview generation misconfigured."
-    assert preview_record.status_code == 500
-    assert preview_record.retryable is False
-    assert preview_record.error_details == {"provider": "ollama"}
+    assert preview_record.error_code == ErrorCode.IMAGE_PROVIDER_UNAVAILABLE.value
+    assert (
+        preview_record.error_message == "The image generation provider is unavailable."
+    )
+    assert preview_record.status_code == 503
+    assert preview_record.retryable is True
+    assert preview_record.error_details == {"provider": "beast"}
     assert preview_record.cause_chain == [
-        "AppError: Preview generation misconfigured.",
+        "AppError: The image generation provider is unavailable.",
         "RuntimeError: preview model initialization failed",
     ]
 
@@ -993,6 +1002,8 @@ async def test_configured_factory_starts_store_before_real_preview_persistence(
     settings = Settings(
         _env_file=None,
         artifact_root=project_tmp_path / "configured-development-runtime",
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
     )
     option_graph.get_development_recipe_options_runtime.cache_clear()
     monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
@@ -1044,6 +1055,8 @@ async def test_configured_langgraph_factory_reference_counts_overlapping_context
     settings = Settings(
         _env_file=None,
         artifact_root=project_tmp_path / "overlapping-development-runtime",
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
     )
     option_graph.get_development_recipe_options_runtime.cache_clear()
     monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
@@ -1078,6 +1091,8 @@ def test_configured_factory_replaces_lifecycle_lock_between_event_loops(
     settings = Settings(
         _env_file=None,
         artifact_root=project_tmp_path / "cross-loop-development-runtime",
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
     )
     option_graph.get_development_recipe_options_runtime.cache_clear()
     monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
@@ -1113,6 +1128,8 @@ async def test_configured_langgraph_factory_exit_drains_repeated_cancellation(
     settings = Settings(
         _env_file=None,
         artifact_root=project_tmp_path / "cancelled-configured-runtime",
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
     )
     option_graph.get_development_recipe_options_runtime.cache_clear()
     monkeypatch.setattr(option_graph, "Settings", lambda **_: settings)
@@ -1158,6 +1175,8 @@ async def test_development_runtime_owns_real_image_resources_without_server_call
         _env_file=None,
         artifact_root=project_tmp_path / "development-preview-runtime",
         dish_previews_enabled=False,
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
     )
     runtime = option_graph.DevelopmentRecipeOptionsRuntime(settings)
     preview_service = runtime.dependencies.dish_previews
@@ -1165,10 +1184,10 @@ async def test_development_runtime_owns_real_image_resources_without_server_call
     artifact_store = preview_service._artifact_store
 
     assert isinstance(preview_service, DishPreviewService)
-    assert isinstance(image_generator, OllamaImageGenerator)
+    assert isinstance(image_generator, BeastImageGenerator)
     assert isinstance(artifact_store, ArtifactStore)
     assert preview_service._settings is settings
-    assert image_generator._model == Model.Z_IMAGE
+    assert image_generator._model == settings.beast_image_model
     assert runtime.dependencies.master_chef._settings is settings
     assert runtime.dependencies.nutrition_agent._settings is settings
     assert runtime.dependencies.dish_previews_enabled is settings.dish_previews_enabled
@@ -1190,6 +1209,8 @@ async def test_development_runtime_shutdown_drains_after_repeated_cancellation(
     settings = Settings(
         _env_file=None,
         artifact_root=project_tmp_path / "cancelled-development-runtime",
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
     )
     runtime = option_graph.DevelopmentRecipeOptionsRuntime(settings)
     preview_service = runtime.dependencies.dish_previews

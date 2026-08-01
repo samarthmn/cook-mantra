@@ -4,15 +4,15 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from core.config import Model, Settings
+from core.config import Settings
 from domain.images import ImageGenerationRequest
-from services.image_generation import OllamaImageGenerator
+from services.image_generation import BeastImageGenerator
 
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(
         os.getenv("COOK_MANTRA_RUN_LIVE") != "1",
-        reason="Set COOK_MANTRA_RUN_LIVE=1 to run real Ollama image generation.",
+        reason="Set COOK_MANTRA_RUN_LIVE=1 to run real Beast image generation.",
     ),
 ]
 
@@ -22,15 +22,21 @@ async def test_real_image_generator_returns_a_verified_256_square_image(
     project_tmp_path: Path,
 ) -> None:
     settings = Settings(_env_file=None)
+    if settings.beast_base_url is None or settings.beast_api_key is None:
+        pytest.fail("BEAST_BASE_URL and BEAST_API_KEY are required for this live test")
     progress_values: list[int] = []
 
     async def record_progress(value: int) -> None:
         progress_values.append(value)
 
-    async with OllamaImageGenerator(
-        base_url=str(settings.ollama_base_url),
-        model=Model.Z_IMAGE,
+    # Requires the Beast host to report the image model as available; otherwise
+    # the job terminates as failed and this test raises image_provider_unavailable.
+    async with BeastImageGenerator(
+        base_url=str(settings.beast_base_url),
+        api_key=settings.beast_api_key.get_secret_value(),
+        model=settings.beast_image_model,
         timeout_seconds=settings.image_timeout_seconds,
+        poll_interval_seconds=settings.beast_poll_interval_seconds,
     ) as generator:
         generated = await generator.generate(
             ImageGenerationRequest(

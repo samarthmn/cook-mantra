@@ -106,11 +106,6 @@ def test_generation_budgets_can_be_configured(settings: Settings) -> None:
     assert model.num_ctx == 16_384
 
 
-def test_image_agent_is_rejected_as_a_chat_model(settings: Settings) -> None:
-    with pytest.raises(ValueError, match="generates images"):
-        get_model(Agent.IMAGE, settings=settings)
-
-
 def test_unknown_agent_is_rejected(settings: Settings) -> None:
     with pytest.raises(ValueError, match="Unknown agent 'sous_chef'"):
         get_model("sous_chef", settings=settings)

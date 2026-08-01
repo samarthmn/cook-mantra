@@ -43,8 +43,7 @@ def get_model(
         settings: Override configuration, primarily for tests.
 
     Raises:
-        ValueError: If the agent or model is unknown, or the resolved model
-            generates images rather than text.
+        ValueError: If the agent or model is unknown.
     """
     settings = settings or get_settings()
     resolved_model = (
@@ -54,12 +53,6 @@ def get_model(
     )
     resolved_timeout = timeout if timeout is not None else settings.llm_timeout_seconds
     resolved_num_ctx = num_ctx if num_ctx is not None else settings.llm_num_ctx
-
-    if resolved_model is Model.Z_IMAGE:
-        raise ValueError(
-            f"Model {resolved_model.value!r} generates images and cannot be used "
-            f"as a chat model. Use the image generation service instead."
-        )
 
     return ChatOllama(
         model=resolved_model.value,

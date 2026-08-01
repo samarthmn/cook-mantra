@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from api.app import create_app
-from core.config import Model, Settings
+from core.config import Settings
 from domain.artifacts import Artifact, ArtifactKind
 from domain.images import DishPreview, GeneratedImage, ImageGenerationRequest
 
@@ -78,7 +78,12 @@ class PausingCloseClient:
 
 
 def settings_for(artifact_root: Path) -> Settings:
-    return Settings(_env_file=None, artifact_root=artifact_root)
+    return Settings(
+        _env_file=None,
+        artifact_root=artifact_root,
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
+    )
 
 
 def png_bytes() -> bytes:
@@ -430,7 +435,12 @@ async def test_caller_injected_image_client_remains_caller_owned(
         )
 
     image_client = httpx.AsyncClient(transport=httpx.MockTransport(reject_network))
-    settings = settings_for(project_tmp_path / "injected-image-client")
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path / "injected-image-client",
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
+    )
     app = create_app(
         settings=settings,
         ollama_health=ReadyOllama(),
@@ -441,7 +451,17 @@ async def test_caller_injected_image_client_remains_caller_owned(
         async with app.router.lifespan_context(app):
             assert app.state.settings is settings
             assert app.state.dish_preview_service._settings is settings
-            assert app.state.image_generator._model == Model.Z_IMAGE
+            assert app.state.image_generator._model == settings.beast_image_model
+            assert app.state.image_generator._base_url == "http://beast.test:4900"
+            assert app.state.image_generator._timeout_seconds == (
+                settings.image_timeout_seconds
+            )
+            assert app.state.image_generator._poll_interval_seconds == (
+                settings.beast_poll_interval_seconds
+            )
+            assert app.state.image_generator._headers == {
+                "Authorization": "Bearer test-key"
+            }
 
         assert image_client.is_closed is False
         assert requests == []
@@ -453,7 +473,12 @@ def test_startup_failure_releases_every_application_owned_resource(
     project_tmp_path: Path,
 ) -> None:
     app = create_app(
-        settings=settings_for(project_tmp_path / "failed-startup"),
+        settings=Settings(
+            _env_file=None,
+            artifact_root=project_tmp_path / "failed-startup",
+            beast_base_url="http://beast.test:4900",
+            beast_api_key="test-key",
+        ),
         ollama_health=ReadyOllama(),
     )
     cleanup = FailingStartupCleanup()

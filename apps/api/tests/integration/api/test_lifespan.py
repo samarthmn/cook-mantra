@@ -22,6 +22,8 @@ async def test_lifespan_uses_configured_cleanup_and_drains_blocked_work(
             cleanup_interval_seconds=17,
             max_concurrent_jobs=1,
             max_queued_jobs=0,
+            beast_base_url="http://beast.test:4900",
+            beast_api_key="test-key",
         )
     )
     started = asyncio.Event()
@@ -65,6 +67,8 @@ async def test_client_close_failure_still_shuts_down_artifact_storage(
         settings=Settings(
             _env_file=None,
             artifact_root=project_tmp_path / "close-failure",
+            beast_base_url="http://beast.test:4900",
+            beast_api_key="test-key",
         )
     )
     events: list[str] = []
@@ -103,6 +107,8 @@ async def test_artifact_shutdown_failure_propagates_after_earlier_resources_drai
         settings=Settings(
             _env_file=None,
             artifact_root=project_tmp_path / "artifact-close-failure",
+            beast_base_url="http://beast.test:4900",
+            beast_api_key="test-key",
         )
     )
     artifact_store = app.state.artifact_store

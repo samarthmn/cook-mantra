@@ -11,9 +11,10 @@ Cook Mantra now provides a local HTTP API that turns an ingredient photo into:
 2. Recipe options with nutrition estimates and optional dish previews.
 3. Complete recipes for only the options the user selects.
 
-FastAPI exposes the API, LangGraph coordinates the AI workflows, and Ollama runs
-all models. Long operations run as background jobs so clients can poll for
-progress instead of holding one request open.
+FastAPI exposes the API, LangGraph coordinates the AI workflows, Ollama runs
+the text agents, and the Beast API generates dish previews. Long operations run
+as background jobs so clients can poll for progress instead of holding one
+request open.
 
 ## What each stage added
 
@@ -57,16 +58,20 @@ progress instead of holding one request open.
 
 ### Stage 5: Dish previews
 
-- A dedicated Ollama image-generation service.
+- A dedicated Beast API image-generation service.
 - Generated images stored as temporary artifacts and returned through an
   artifact endpoint.
-- Graceful fallback to `preview: null` when the image model or Ollama host
-  cannot generate an image.
+- Graceful fallback to `preview: null` when Beast cannot return a valid image.
 
-The current remote Linux Ollama host cannot run `x/z-image-turbo:fp8` because
-that experimental model requires the MLX image-generation runtime. Recipe
-options still succeed and report `Dish preview unavailable.` This is an Ollama
-host limitation, not a broken artifact URL.
+Cook Mantra submits asynchronous jobs to Beast, polls their progress, and
+downloads the first completed output. It verifies the declared byte length,
+SHA-256 digest, and decoded image before storing the artifact. Beast's
+authenticated `GET /v1/jobs/{job_id}/outputs/{index}` route is pending
+server-side implementation, so current live generation fails safely and recipe
+options report `Dish preview unavailable.` without discarding the recipe.
+When previews are enabled, readiness also calls Beast's public `/health` route.
+It reports the returned status verbatim, accepts `degraded` as ready, and fails
+readiness only when Beast is unreachable or returns invalid health data.
 
 ### Stage 6: Complete recipes
 
@@ -88,7 +93,7 @@ host limitation, not a broken artifact URL.
 ### Stage 7: Hardening and verification
 
 - Deterministic unit, integration, workflow, and end-to-end tests.
-- Optional live Ollama and LangSmith checks.
+- Optional live Ollama, Beast, and LangSmith checks.
 - Queue limits, timeouts, cleanup, request correlation IDs, redaction, and
   rollback to the last valid session state after a failed job.
 - OpenAPI generation and three valid LangGraph development graphs.
@@ -96,15 +101,16 @@ host limitation, not a broken artifact URL.
 
 ## Model assignments
 
-| Task | Ollama model |
+| Task | Provider and model |
 | --- | --- |
 | Ingredient extraction | `qwen3.5:9b` |
 | Recipe options | `qwen3.5:27b` |
 | Nutrition estimates | `gpt-oss:20b` |
-| Dish previews | `x/z-image-turbo:fp8` |
+| Dish previews | Beast API `z-image-turbo` |
 | Complete recipes | `gemma4:26b` |
 
-These assignments live in `apps/api/src/core/config.py`, not in `.env`.
+The Ollama assignments and Beast model default live in
+`apps/api/src/core/config.py`, not in `.env`.
 
 ## Run the API
 
@@ -116,7 +122,8 @@ cp ../../example.env ../../.env
 ```
 
 Set `OLLAMA_BASE_URL` in the repository-root `.env` to the Ollama server that
-the API should use. Then start the API:
+the API should use. When previews are enabled, also set `BEAST_BASE_URL` and
+`BEAST_API_KEY`. Then start the API:
 
 ```bash
 uv run uvicorn main:app --host 127.0.0.1 --port 8000
@@ -125,7 +132,7 @@ uv run uvicorn main:app --host 127.0.0.1 --port 8000
 Useful checks:
 
 - API health: `http://127.0.0.1:8000/api/v1/health`
-- Ollama and model readiness: `http://127.0.0.1:8000/api/v1/ready`
+- Ollama, model, and Beast readiness: `http://127.0.0.1:8000/api/v1/ready`
 - Interactive API documentation: `http://127.0.0.1:8000/docs`
 
 Restart Uvicorn after changing Python code or configuration. Sessions and jobs
@@ -179,8 +186,8 @@ The fixes address the specific causes:
   boundary.
 - Successful output no longer pays for avoidable invalid attempts.
 
-Inference time still depends on the Ollama host, model size, and current model
-queue.
+Text inference time still depends on the Ollama host, model size, and current
+model queue. Preview time also depends on Beast's job queue.
 
 ## Verification performed
 
@@ -190,8 +197,8 @@ queue.
 - A live nutrition probe succeeds with GPT-OSS.
 - A live complete-recipe probe for the previously failing session succeeds for
   the selected option, producing 17 ingredients and 7 numbered steps.
-- The remote image request reproduces the Ollama MLX/Linux limitation and the
-  API handles it as a non-fatal warning.
+- Beast preview failures remain non-fatal and produce `preview: null` plus a
+  warning.
 - Claude CLI reviewed the complete change set. Its actionable findings were
   fixed, followed by a final independent code and test review.
 
@@ -203,6 +210,5 @@ queue.
   ignored `tmp/cook-mantra-api` area.
 - The backend has no user accounts, frontend, cloud deployment, or persistent
   recipe library.
-- Live model tests are opt-in because they require the configured Ollama server
-  and can take several minutes.
-
+- Live model tests are opt-in because they require the configured Ollama and
+  Beast services and can take several minutes.

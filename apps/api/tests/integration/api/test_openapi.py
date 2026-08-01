@@ -132,6 +132,7 @@ def test_openapi_documents_error_envelopes_examples_and_binary_artifacts(
         "ErrorDetail",
         "ErrorResponse",
         "HealthResponse",
+        "BeastStatus",
         "OllamaStatus",
         "ReadinessResponse",
         "JobErrorResponse",

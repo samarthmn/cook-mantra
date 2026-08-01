@@ -2,7 +2,8 @@
 
 Cook Mantra is a local FastAPI backend that turns an ingredient photo into
 reviewable ingredients, recipe suggestions with nutrition and generated dish
-previews, and complete recipes. Ollama is the only model provider.
+previews, and complete recipes. Ollama runs text agents, and the Beast API
+generates dish previews.
 
 For a plain-language walkthrough of every implemented stage, read
 [`../../docs/what-was-built.md`](../../docs/what-was-built.md).
@@ -13,7 +14,8 @@ Prerequisites:
 
 - Python 3.13 or newer
 - [`uv`](https://docs.astral.sh/uv/)
-- [Ollama](https://ollama.com/) running locally
+- [Ollama](https://ollama.com/) available to the API
+- Beast API access when dish previews are enabled
 
 From `apps/api`, install the locked dependencies and create local configuration:
 
@@ -25,16 +27,38 @@ cp ../../example.env ../../.env
 `OLLAMA_BASE_URL` is required. The API reads it from the environment or the
 repository-root `.env` file and refuses to start when it is missing or invalid.
 
-The five configured Ollama models are fixed in `src/core/config.py`. Pull all of
-them before starting the API:
+Dish previews use the Beast API described at
+`http://192.168.29.16:4900/guide`. When `DISH_PREVIEWS_ENABLED=true`, both
+`BEAST_BASE_URL` and `BEAST_API_KEY` are required. The API submits an image job,
+polls it to completion, downloads the first output, and verifies its size,
+SHA-256 digest, and image data before storing it as a temporary artifact.
+
+The four configured Ollama text models are fixed in `src/core/config.py`. Pull
+them on the `OLLAMA_BASE_URL` host before starting the API:
 
 ```bash
 ollama pull qwen3.5:27b
 ollama pull qwen3.5:9b
 ollama pull gemma4:26b
 ollama pull gpt-oss:20b
-ollama pull x/z-image-turbo:fp8
 ```
+
+### Beast output-download route
+
+Completed jobs are downloaded through this contract, which the Beast server
+implements; the Cook Mantra client keeps its route construction in one method
+so the path can be changed in one line if the server ever moves it:
+
+```text
+GET {base}/v1/jobs/{job_id}/outputs/{index}
+Authorization: Bearer <key>
+→ 200, Content-Type: <mime_type>, body = raw image bytes
+→ 404 for unknown job or index
+```
+
+When Beast cannot generate (for example the image model is unavailable on its
+host), preview generation fails cleanly and recipe options keep
+`preview: null` with a `Dish preview unavailable.` warning.
 
 Start the API on the loopback interface:
 
@@ -45,7 +69,7 @@ uv run uvicorn main:app --host 127.0.0.1 --port 8000
 Useful local URLs:
 
 - Process health: `http://127.0.0.1:8000/api/v1/health`
-- Ollama/model readiness: `http://127.0.0.1:8000/api/v1/ready`
+- External-service readiness: `http://127.0.0.1:8000/api/v1/ready`
 - Interactive OpenAPI docs: `http://127.0.0.1:8000/docs`
 - OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
 
@@ -100,15 +124,16 @@ public API and owns runtime state.
 
 ## Opt-in live checks
 
-Live checks are skipped by default. They call the Ollama URL configured in the
-process environment:
+Live checks are skipped by default. They call the configured Ollama and Beast
+services:
 
 ```bash
 COOK_MANTRA_RUN_LIVE=1 uv run pytest -m live tests/live -q
 ```
 
 This includes the full live API journey. It can take several minutes because
-image generation and multiple structured model calls are involved.
+image generation and multiple structured model calls are involved. The Beast
+image test needs the Beast host to report the image model as available.
 
 LangSmith has a separate opt-in smoke check:
 
@@ -144,20 +169,25 @@ credentials.
 
 ## Troubleshooting
 
-- **Ollama unavailable:** start Ollama and check `OLLAMA_BASE_URL`, then open
+- **Ollama unavailable:** start Ollama, check `OLLAMA_BASE_URL`, and then open
   `/api/v1/ready`.
+- **Beast unavailable:** when previews are enabled, check `BEAST_BASE_URL`,
+  confirm Beast's public `/health` route is reachable, and verify
+  `BEAST_API_KEY`. Readiness reports Beast's public `status` string verbatim;
+  `degraded` remains ready, while an unreachable service fails readiness.
 - **Missing model:** `/api/v1/ready` lists missing model names. Run the matching
   `ollama pull` command above exactly.
 - **Operation timed out:** local inference exceeded `LLM_TIMEOUT_SECONDS` or
-  `IMAGE_TIMEOUT_SECONDS`. Confirm Ollama is responsive before increasing the
-  relevant bounded timeout.
-- **Image generation unsupported:** the installed Ollama build or image model
-  does not support the expected generation response. Update Ollama, verify
-  `x/z-image-turbo:fp8`, and run the focused image live test.
+  `IMAGE_TIMEOUT_SECONDS`. Confirm the corresponding provider is responsive
+  before increasing the relevant bounded timeout.
+- **Dish preview unavailable:** inspect the terminal Beast job's `error`. A
+  `model_unavailable` code (and a `degraded` `/health` status) means the image
+  model cannot run on the Beast host — check `./beast status` there. Recipe
+  generation still succeeds with `preview: null`.
 - **Port already in use:** stop the conflicting process or pass a different
   `--port` to `uvicorn`.
 - **`service_busy`:** wait for active jobs to finish or carefully adjust the
   bounded job settings for the machine's available memory.
 - **Live test skipped:** set the exact opt-in flag shown above. LangSmith's
-  smoke additionally needs tracing enabled and credentials; normal live Ollama
-  checks use `COOK_MANTRA_RUN_LIVE=1`.
+  smoke additionally needs tracing enabled and credentials; normal live
+  Ollama and Beast checks use `COOK_MANTRA_RUN_LIVE=1`.

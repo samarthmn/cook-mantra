@@ -21,7 +21,7 @@ from api.middleware import (
     UnexpectedErrorMiddleware,
 )
 from api.routes import artifacts, health, jobs, recipe_options, recipes, sessions
-from core.config import Model, Settings, get_settings
+from core.config import Settings, get_settings
 from core.errors import install_error_handlers
 from core.logging import configure_logging
 from orchestration.graphs.complete_recipes import (
@@ -43,7 +43,11 @@ from services.artifacts import ArtifactStore
 from services.cleanup import CleanupSupervisor
 from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
-from services.image_generation import ImageGenerator, OllamaImageGenerator
+from services.image_generation import (
+    BeastImageGenerator,
+    ImageGenerator,
+    UnavailableImageGenerator,
+)
 from services.ollama_health import OllamaHealthService
 from services.tracing import TracingService
 from services.uploads import ImageUploadValidator
@@ -165,16 +169,26 @@ def create_app(
         )
     )
     resolved_image_generator = image_generator
-    owned_image_generator: OllamaImageGenerator | None = None
+    owned_image_generator: BeastImageGenerator | None = None
     if dish_previews is None:
         if resolved_image_generator is None:
-            owned_image_generator = OllamaImageGenerator(
-                base_url=str(resolved_settings.image_base_url()),
-                model=Model.Z_IMAGE,
-                client=image_client,
-                timeout_seconds=resolved_settings.image_timeout_seconds,
-            )
-            resolved_image_generator = owned_image_generator
+            if (
+                resolved_settings.beast_base_url is not None
+                and resolved_settings.beast_api_key is not None
+            ):
+                owned_image_generator = BeastImageGenerator(
+                    base_url=str(resolved_settings.beast_base_url),
+                    api_key=resolved_settings.beast_api_key.get_secret_value(),
+                    model=resolved_settings.beast_image_model,
+                    client=image_client,
+                    timeout_seconds=resolved_settings.image_timeout_seconds,
+                    poll_interval_seconds=(
+                        resolved_settings.beast_poll_interval_seconds
+                    ),
+                )
+                resolved_image_generator = owned_image_generator
+            else:
+                resolved_image_generator = UnavailableImageGenerator()
         resolved_dish_previews = DishPreviewService(
             resolved_image_generator,
             artifact_store,
@@ -211,8 +225,13 @@ def create_app(
     )
     resolved_ollama_health = ollama_health or OllamaHealthService(
         str(resolved_settings.ollama_base_url),
-        image_base_url=str(resolved_settings.image_base_url()),
         timeout_seconds=resolved_settings.llm_timeout_seconds,
+        beast_base_url=(
+            str(resolved_settings.beast_base_url)
+            if resolved_settings.dish_previews_enabled
+            and resolved_settings.beast_base_url is not None
+            else None
+        ),
     )
 
     app = FastAPI(

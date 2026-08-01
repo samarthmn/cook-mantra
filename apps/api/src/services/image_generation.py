@@ -1,8 +1,7 @@
-"""Experimental Ollama HTTP adapter for generated dish preview images."""
+"""Beast API adapter for generated dish preview images."""
 
 import asyncio
-import base64
-import json
+import hashlib
 import math
 from collections.abc import Awaitable, Callable
 from io import BytesIO
@@ -22,6 +21,7 @@ _MEDIA_TYPES = {
     "PNG": "image/png",
     "WEBP": "image/webp",
 }
+_TERMINAL_FAILURE_STATES = {"cancelled", "failed"}
 
 
 class ImageGenerator(Protocol):
@@ -35,16 +35,18 @@ class ImageGenerator(Protocol):
         raise NotImplementedError
 
 
-class OllamaImageGenerator:
-    """Call Ollama's experimental streaming image-generation endpoint."""
+class BeastImageGenerator:
+    """Submit, poll, download, and verify one Beast API image job."""
 
     def __init__(
         self,
         *,
         base_url: str,
+        api_key: str,
         model: str,
         client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 600.0,
+        poll_interval_seconds: float = 2.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if client is not None and transport is not None:
@@ -53,6 +55,8 @@ class OllamaImageGenerator:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._poll_interval_seconds = poll_interval_seconds
+        self._headers = {"Authorization": f"Bearer {api_key}"}
         self._owns_client = client is None
         self._client = (
             client
@@ -69,7 +73,7 @@ class OllamaImageGenerator:
         request: ImageGenerationRequest,
         progress: ProgressCallback,
     ) -> GeneratedImage:
-        """Generate and verify one supported image from streamed NDJSON."""
+        """Generate and verify one image within a single overall timeout."""
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 return await self._generate(request, progress)
@@ -81,7 +85,7 @@ class OllamaImageGenerator:
                 retryable=True,
             ) from error
         except (httpx.HTTPStatusError, httpx.RequestError) as error:
-            raise _ollama_unavailable() from error
+            raise _provider_unavailable() from error
 
     async def _generate(
         self,
@@ -91,52 +95,98 @@ class OllamaImageGenerator:
         payload: dict[str, object] = {
             "model": self._model,
             "prompt": request.prompt,
-            "stream": True,
             "width": request.width,
             "height": request.height,
+            "output_format": "png",
         }
         if request.steps is not None:
-            payload["steps"] = request.steps
+            payload["model_options"] = {"steps": request.steps}
 
-        final_image: str | None = None
-        last_progress = -1
-        async with self._client.stream(
-            "POST",
-            f"{self._base_url}/api/generate",
+        response = await self._client.post(
+            f"{self._base_url}/v1/images/generations",
             json=payload,
-        ) as response:
+            headers=self._headers,
+        )
+        response.raise_for_status()
+        if response.status_code != 202:
+            raise _provider_unavailable()
+
+        job = _job_resource(response)
+        last_progress = -1
+        while True:
+            next_progress = _job_progress(job)
+            if next_progress is not None and next_progress > last_progress:
+                await progress(next_progress)
+                last_progress = next_progress
+
+            state = job.get("state")
+            if state == "completed":
+                break
+            if state in _TERMINAL_FAILURE_STATES:
+                raise _provider_unavailable()
+            if state not in {"queued", "loading", "running"}:
+                raise _provider_unavailable()
+
+            job_id = job.get("id")
+            if not isinstance(job_id, str) or not job_id:
+                raise _provider_unavailable()
+            await asyncio.sleep(self._poll_interval_seconds)
+            response = await self._client.get(
+                f"{self._base_url}/v1/jobs/{job_id}",
+                headers=self._headers,
+            )
             response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line.strip():
-                    continue
+            if response.status_code != 200:
+                raise _provider_unavailable()
+            job = _job_resource(response)
 
-                event = _parse_event(line)
-                if event is None:
-                    raise _artifact_failure()
-                if _has_provider_error(event):
-                    raise _ollama_unavailable()
-
-                next_progress = _event_progress(event)
-                if next_progress is not None and next_progress > last_progress:
-                    await progress(next_progress)
-                    last_progress = next_progress
-
-                if event.get("done") is True:
-                    image_value = event.get("image")
-                    if not isinstance(image_value, str) or not image_value:
-                        raise _artifact_failure()
-                    final_image = image_value
-                    break
-
-        if final_image is None:
+        job_id = job.get("id")
+        outputs = job.get("outputs")
+        if (
+            not isinstance(job_id, str)
+            or not job_id
+            or not isinstance(outputs, list)
+            or not outputs
+            or not isinstance(outputs[0], dict)
+        ):
             raise _artifact_failure()
 
-        generated_image = _decode_and_verify(final_image)
+        output = outputs[0]
+        expected_size = output.get("size_bytes")
+        expected_sha256 = output.get("sha256")
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size <= 0
+            or not isinstance(expected_sha256, str)
+            or not expected_sha256
+        ):
+            raise _artifact_failure()
+
+        response = await self._client.get(
+            self._output_url(job_id, 0),
+            headers=self._headers,
+        )
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise _provider_unavailable()
+        image_bytes = response.content
+
+        if len(image_bytes) != expected_size:
+            raise _artifact_failure()
+        if hashlib.sha256(image_bytes).hexdigest() != expected_sha256:
+            raise _artifact_failure()
+
+        generated_image = _decode_and_verify(image_bytes)
         if generated_image is None:
             raise _artifact_failure()
 
         await progress(100)
         return generated_image
+
+    def _output_url(self, job_id: str, index: int) -> str:
+        """Build the pending Beast output-download route in one place."""
+        return f"{self._base_url}/v1/jobs/{job_id}/outputs/{index}"
 
     async def aclose(self) -> None:
         """Close only the HTTP client created by this adapter."""
@@ -156,43 +206,42 @@ class OllamaImageGenerator:
         await self.aclose()
 
 
-def _parse_event(line: str) -> dict[str, object] | None:
+class UnavailableImageGenerator:
+    """Fail safely if preview generation is invoked without Beast settings."""
+
+    async def generate(
+        self,
+        request: ImageGenerationRequest,
+        progress: ProgressCallback,
+    ) -> GeneratedImage:
+        raise _provider_unavailable()
+
+
+def _job_resource(response: httpx.Response) -> dict[str, object]:
     try:
-        event = json.loads(line)
+        payload = response.json()
     except (ValueError, UnicodeError):
+        raise _provider_unavailable() from None
+    if not isinstance(payload, dict):
+        raise _provider_unavailable()
+    return payload
+
+
+def _job_progress(job: dict[str, object]) -> int | None:
+    value = job.get("progress")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return event if isinstance(event, dict) else None
-
-
-def _has_provider_error(event: dict[str, object]) -> bool:
-    return bool(event.get("error"))
-
-
-def _event_progress(event: dict[str, object]) -> int | None:
-    completed = event.get("completed")
-    total = event.get("total")
-    if (
-        isinstance(completed, bool)
-        or isinstance(total, bool)
-        or not isinstance(completed, (int, float))
-        or not isinstance(total, (int, float))
-    ):
-        return None
-
     try:
-        if not math.isfinite(completed) or not math.isfinite(total) or total <= 0:
+        if not math.isfinite(value):
             return None
-        percent = completed / total * 100
-        if not math.isfinite(percent):
-            return None
+        percent = value * 100 if value <= 1 else value
         return int(max(0, min(percent, 99)))
     except OverflowError:
-        raise _artifact_failure() from None
+        return None
 
 
-def _decode_and_verify(encoded_image: str) -> GeneratedImage | None:
+def _decode_and_verify(image_bytes: bytes) -> GeneratedImage | None:
     try:
-        image_bytes = base64.b64decode(encoded_image, validate=True)
         with Image.open(BytesIO(image_bytes)) as image:
             image_format = image.format
             width, height = image.size
@@ -222,10 +271,10 @@ def _artifact_failure() -> AppError:
     )
 
 
-def _ollama_unavailable() -> AppError:
+def _provider_unavailable() -> AppError:
     return AppError(
-        code=ErrorCode.OLLAMA_UNAVAILABLE,
-        message="Ollama is unavailable.",
+        code=ErrorCode.IMAGE_PROVIDER_UNAVAILABLE,
+        message="The image generation provider is unavailable.",
         status_code=503,
         retryable=True,
     )

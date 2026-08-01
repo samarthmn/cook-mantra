@@ -1,11 +1,11 @@
-"""Application and Ollama model configuration."""
+"""Application and external model configuration."""
 
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -18,7 +18,6 @@ class Model(StrEnum):
     QWEN_SMALL = "qwen3.5:9b"
     GEMMA_LARGE = "gemma4:26b"
     GPT_OSS = "gpt-oss:20b"
-    Z_IMAGE = "x/z-image-turbo:fp8"
 
 
 class Agent(StrEnum):
@@ -27,7 +26,6 @@ class Agent(StrEnum):
     INGREDIENT_EXTRACTION = "ingredient_extraction"
     MASTER_CHEF = "master_chef"
     NUTRITION = "nutrition"
-    IMAGE = "image"
     SPECIALIZED_RECIPE = "specialized_recipe"
 
 
@@ -37,7 +35,6 @@ AGENT_MODELS: dict[Agent, Model] = {
     Agent.INGREDIENT_EXTRACTION: Model.QWEN_SMALL,
     Agent.MASTER_CHEF: Model.GPT_OSS,
     Agent.NUTRITION: Model.GPT_OSS,
-    Agent.IMAGE: Model.Z_IMAGE,
     Agent.SPECIALIZED_RECIPE: Model.GPT_OSS,
 }
 
@@ -63,6 +60,8 @@ IMAGE_WIDTH = 768
 IMAGE_HEIGHT = 768
 IMAGE_STEPS: int | None = None  # None defers to the image model's own default.
 IMAGE_TIMEOUT_SECONDS = 600.0
+BEAST_IMAGE_MODEL = "z-image-turbo"
+BEAST_POLL_INTERVAL_SECONDS = 2.0
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 SESSION_TTL_SECONDS = 21_600
@@ -79,13 +78,9 @@ class Settings(BaseSettings):
     # --- Environment-specific: these are the values a .env should carry -----
     # Where the text agents run. Required because there is no sane default.
     ollama_base_url: AnyHttpUrl
-    # Image generation may need a separate Apple Silicon host, because the
-    # image model is MLX-only. Falls back to ollama_base_url when unset.
-    ollama_image_base_url: AnyHttpUrl | None = None
-    # Previews need a host that can actually run the MLX-only image model,
-    # which rules out Linux hosts. Off by default so generation is skipped
-    # entirely instead of failing once per recipe; point
-    # OLLAMA_IMAGE_BASE_URL at an Apple Silicon host and turn this on.
+    # Dish previews use the separate Beast API and remain opt-in.
+    beast_base_url: AnyHttpUrl | None = None
+    beast_api_key: SecretStr | None = None
     dish_previews_enabled: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     cors_origins: list[str] = [
@@ -94,7 +89,7 @@ class Settings(BaseSettings):
     ]
     artifact_root: Path = PROJECT_ROOT / "tmp" / "cook-mantra-api"
 
-    # --- LangSmith: opt-in, and the only setting that carries a secret ------
+    # --- LangSmith: opt-in --------------------------------------------------
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str = "cook-mantra"
@@ -110,6 +105,11 @@ class Settings(BaseSettings):
     image_height: int = Field(default=IMAGE_HEIGHT, ge=256, le=2_048)
     image_steps: int | None = Field(default=IMAGE_STEPS, ge=1, le=100)
     image_timeout_seconds: float = Field(default=IMAGE_TIMEOUT_SECONDS, gt=0)
+    beast_image_model: str = BEAST_IMAGE_MODEL
+    beast_poll_interval_seconds: float = Field(
+        default=BEAST_POLL_INTERVAL_SECONDS,
+        gt=0,
+    )
     max_upload_bytes: int = Field(
         default=MAX_UPLOAD_BYTES,
         gt=0,
@@ -121,9 +121,16 @@ class Settings(BaseSettings):
         """Return the Ollama model configured for an agent."""
         return AGENT_MODELS[agent]
 
-    def image_base_url(self) -> AnyHttpUrl:
-        """Return the Ollama host that serves image generation."""
-        return self.ollama_image_base_url or self.ollama_base_url
+    @model_validator(mode="after")
+    def validate_beast_preview_configuration(self) -> "Settings":
+        """Require the Beast endpoint and credential when previews are enabled."""
+        if self.dish_previews_enabled and (
+            self.beast_base_url is None or self.beast_api_key is None
+        ):
+            raise ValueError(
+                "dish previews require both beast_base_url and beast_api_key"
+            )
+        return self
 
     @field_validator("artifact_root")
     @classmethod

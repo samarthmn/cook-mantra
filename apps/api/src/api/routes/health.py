@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, status
 from api.dependencies import get_ollama_health
 from core.errors import AppError, ErrorCode
 from schemas.errors import ErrorResponse
-from schemas.health import HealthResponse, OllamaStatus, ReadinessResponse
+from schemas.health import BeastStatus, HealthResponse, OllamaStatus, ReadinessResponse
 from services.ollama_health import OllamaHealthService
 
 router = APIRouter(tags=["health"])
@@ -27,20 +27,24 @@ async def health() -> HealthResponse:
 @router.get(
     "/ready",
     response_model=ReadinessResponse,
+    response_model_exclude_none=True,
     operation_id="getReadiness",
     summary="Check local model readiness",
     responses={
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "model": ErrorResponse,
-            "description": "Ollama is unavailable or a required model is missing.",
+            "description": (
+                "Ollama or Beast is unavailable, or a required text model is missing."
+            ),
         }
     },
 )
 async def ready(
     ollama_health: Annotated[OllamaHealthService, Depends(get_ollama_health)],
 ) -> ReadinessResponse:
-    """Report Ollama connectivity and required model availability."""
-    inspection = OllamaStatus.model_validate(await ollama_health.inspect())
+    """Report text-model readiness and optional Beast API health."""
+    raw_inspection = await ollama_health.inspect()
+    inspection = OllamaStatus.model_validate(raw_inspection)
     if inspection.missing:
         raise AppError(
             code=ErrorCode.MODEL_NOT_FOUND,
@@ -49,4 +53,14 @@ async def ready(
             retryable=False,
             details={"missing_models": inspection.missing},
         )
-    return ReadinessResponse(status="ok", ollama=inspection)
+    raw_beast = raw_inspection.get("beast")
+    beast = BeastStatus.model_validate(raw_beast) if raw_beast is not None else None
+    if beast is not None and not beast.reachable:
+        raise AppError(
+            code=ErrorCode.IMAGE_PROVIDER_UNAVAILABLE,
+            message="The image generation provider is unavailable.",
+            status_code=503,
+            retryable=True,
+            details={"beast": beast.model_dump()},
+        )
+    return ReadinessResponse(status="ok", ollama=inspection, beast=beast)

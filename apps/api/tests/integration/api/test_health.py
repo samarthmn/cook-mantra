@@ -10,6 +10,7 @@ from agents.nutrition import OllamaNutritionAgent
 from agents.specialized_recipe import OllamaSpecializedRecipeAgent
 from api.app import create_app
 from core.config import Settings
+from services.image_generation import UnavailableImageGenerator
 from services.ollama_health import OllamaHealthService
 from tests.tracing_support import enabled_tracing
 
@@ -20,6 +21,22 @@ class ReadyOllama:
             "reachable": True,
             "available_models": ["qwen3.5:9b"],
             "missing": [],
+        }
+
+
+class ReadyOllamaWithDegradedBeast(ReadyOllama):
+    async def inspect(self) -> dict[str, object]:
+        return {
+            **(await super().inspect()),
+            "beast": {"reachable": True, "status": "degraded"},
+        }
+
+
+class ReadyOllamaWithUnreachableBeast(ReadyOllama):
+    async def inspect(self) -> dict[str, object]:
+        return {
+            **(await super().inspect()),
+            "beast": {"reachable": False, "status": None},
         }
 
 
@@ -113,6 +130,26 @@ def test_health_is_process_only(project_tmp_path: Path) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_app_starts_with_previews_disabled_and_no_beast_configuration(
+    project_tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path,
+        dish_previews_enabled=False,
+        beast_base_url=None,
+        beast_api_key=None,
+    )
+    app = create_app(settings=settings, ollama_health=ReadyOllama())
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert isinstance(app.state.image_generator, UnavailableImageGenerator)
+    assert app.state.owned_image_generator is None
+
+
 def test_app_shares_one_tracing_service_across_all_real_agents(
     project_tmp_path: Path,
 ) -> None:
@@ -176,6 +213,64 @@ def test_ready_reports_model_inventory(project_tmp_path: Path) -> None:
             "available_models": ["qwen3.5:9b"],
             "missing": [],
         },
+    }
+
+
+def test_ready_reports_degraded_beast_without_failing(project_tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path,
+        dish_previews_enabled=True,
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
+    )
+    app = create_app(
+        settings=settings,
+        ollama_health=ReadyOllamaWithDegradedBeast(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["beast"] == {
+        "reachable": True,
+        "status": "degraded",
+    }
+
+
+def test_ready_maps_unreachable_beast_to_provider_error(
+    project_tmp_path: Path,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        artifact_root=project_tmp_path,
+        dish_previews_enabled=True,
+        beast_base_url="http://beast.test:4900",
+        beast_api_key="test-key",
+    )
+    app = create_app(
+        settings=settings,
+        ollama_health=ReadyOllamaWithUnreachableBeast(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/ready",
+            headers={"X-Request-ID": "req-beast-down"},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "image_provider_unavailable",
+            "message": "The image generation provider is unavailable.",
+            "details": {"beast": {"reachable": False, "status": None}},
+            "retryable": True,
+            "request_id": "req-beast-down",
+            "session_id": None,
+            "job_id": None,
+        }
     }
 
 

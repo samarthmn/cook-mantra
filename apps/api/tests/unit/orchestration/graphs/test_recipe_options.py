@@ -785,6 +785,8 @@ async def test_development_factory_is_stable_and_uses_one_settings_object(
     # point it at a private one. Sharing the default root would make this test
     # fail whenever a local API process is running.
     monkeypatch.setenv("ARTIFACT_ROOT", str(project_tmp_path / "development"))
+    monkeypatch.setenv("BEAST_BASE_URL", "http://beast.test:4900")
+    monkeypatch.setenv("BEAST_API_KEY", "test-key")
     option_graph.get_development_recipe_options_runtime.cache_clear()
 
     runtime = option_graph.get_development_recipe_options_runtime()

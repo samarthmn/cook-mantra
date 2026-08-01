@@ -1,128 +1,53 @@
-import asyncio
-import base64
+import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import Awaitable, Callable
 from io import BytesIO
-from typing import Any
 
 import httpx
 import pytest
 from PIL import Image
 
-from core.config import Model
 from core.errors import AppError, ErrorCode
 from domain.images import ImageGenerationRequest
-from services.image_generation import OllamaImageGenerator
+from services.image_generation import BeastImageGenerator
 
 
-class StreamingByteStream(httpx.AsyncByteStream):
-    def __init__(
-        self,
-        chunks: list[bytes],
-        *,
-        stream_error: Exception | None = None,
-        chunk_delay_seconds: float = 0,
-    ) -> None:
-        self._chunks = chunks
-        self._stream_error = stream_error
-        self._chunk_delay_seconds = chunk_delay_seconds
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        for chunk in self._chunks:
-            if self._chunk_delay_seconds:
-                await asyncio.sleep(self._chunk_delay_seconds)
-            yield chunk
-        if self._stream_error is not None:
-            raise self._stream_error
-
-
-class StreamingJsonTransport(httpx.AsyncBaseTransport):
-    def __init__(
-        self,
-        chunks: list[bytes] | None = None,
-        *,
-        status_code: int = 200,
-        request_error: Exception | None = None,
-        stream_error: Exception | None = None,
-        chunk_delay_seconds: float = 0,
-    ) -> None:
-        self._chunks = chunks or []
-        self._status_code = status_code
-        self._request_error = request_error
-        self._stream_error = stream_error
-        self._chunk_delay_seconds = chunk_delay_seconds
-        self.requests: list[httpx.Request] = []
-        self.close_calls = 0
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if self._request_error is not None:
-            raise self._request_error
-        return httpx.Response(
-            self._status_code,
-            stream=StreamingByteStream(
-                self._chunks,
-                stream_error=self._stream_error,
-                chunk_delay_seconds=self._chunk_delay_seconds,
-            ),
-            request=request,
-        )
-
-    async def aclose(self) -> None:
-        self.close_calls += 1
-
-
-def image_base64(
+def image_bytes(
     image_format: str = "PNG",
     *,
     size: tuple[int, int] = (320, 288),
-) -> str:
+) -> bytes:
     buffer = BytesIO()
     Image.new("RGB", size, "orange").save(buffer, format=image_format)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    return buffer.getvalue()
 
 
-def png_with_bad_checksum_base64() -> str:
-    image_bytes = bytearray(base64.b64decode(image_base64()))
-    chunk_type_at = image_bytes.index(b"IDAT")
-    chunk_length = int.from_bytes(
-        image_bytes[chunk_type_at - 4 : chunk_type_at],
-        byteorder="big",
-    )
-    checksum_at = chunk_type_at + 4 + chunk_length
-    image_bytes[checksum_at] ^= 1
-    return base64.b64encode(image_bytes).decode("ascii")
-
-
-def png_with_invalid_base64_character() -> str:
-    encoded = image_base64()
-    return f"{encoded[:40]}${encoded[40:]}"
-
-
-def verify_only_truncated_jpeg_base64() -> str:
-    image_bytes = base64.b64decode(image_base64("JPEG"))
-    return base64.b64encode(image_bytes[:-1]).decode("ascii")
-
-
-def verify_only_corrupt_webp_base64() -> str:
-    image_bytes = bytearray(base64.b64decode(image_base64("WEBP")))
-    image_bytes[30] ^= 0xFF
-    return base64.b64encode(image_bytes).decode("ascii")
-
-
-def final_line(
+def job(
+    state: str,
     *,
-    image: str | None = None,
-    done: bool = True,
-) -> bytes:
-    payload: dict[str, Any] = {"done": done, "done_reason": "stop"}
-    if image is not None:
-        payload["image"] = image
-    return json.dumps(payload, separators=(",", ":")).encode() + b"\n"
+    progress: int | float = 0,
+    outputs: list[dict[str, object]] | None = None,
+    error: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": "job-123",
+        "model_id": "z-image-turbo",
+        "generation_type": "image",
+        "state": state,
+        "progress": progress,
+        "outputs": outputs or [],
+        "error": error,
+    }
 
 
-async def no_progress(_: int) -> None:
-    pass
+def output_for(data: bytes, *, sha256: str | None = None) -> dict[str, object]:
+    return {
+        "path": "jobs/job-123/output.png",
+        "mime_type": "image/png",
+        "size_bytes": len(data),
+        "sha256": sha256 or hashlib.sha256(data).hexdigest(),
+    }
 
 
 class ProgressRecorder:
@@ -133,609 +58,384 @@ class ProgressRecorder:
         self.values.append(value)
 
 
-def app_error_snapshot(error: AppError) -> dict[str, object]:
-    return {
-        "code": error.code,
-        "message": error.message,
-        "status_code": error.status_code,
-        "retryable": error.retryable,
-        "details": error.details,
-    }
+def app_error_snapshot(error: AppError) -> tuple[ErrorCode, int, bool]:
+    return error.code, error.status_code, error.retryable
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("steps", "expected_payload"),
-    [
-        (
-            None,
-            {
-                "model": "x/z-image-turbo:fp8",
-                "prompt": "Indian tomato curry",
-                "stream": True,
-                "width": 512,
-                "height": 384,
-            },
-        ),
-        (
-            9,
-            {
-                "model": "x/z-image-turbo:fp8",
-                "prompt": "Indian tomato curry",
-                "stream": True,
-                "width": 512,
-                "height": 384,
-                "steps": 9,
-            },
-        ),
-    ],
-)
-async def test_generate_posts_the_exact_experimental_payload(
-    steps: int | None,
-    expected_payload: dict[str, object],
-) -> None:
-    transport = StreamingJsonTransport([final_line(image=image_base64())])
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test/root/",
-            model=Model.Z_IMAGE,
-            client=client,
-        )
+async def test_generate_submits_polls_downloads_and_verifies_image() -> None:
+    data = image_bytes(size=(341, 299))
+    poll_responses = deque(
+        [
+            job("running", progress=0.37),
+            job("completed", progress=100, outputs=[output_for(data)]),
+        ]
+    )
+    requests: list[httpx.Request] = []
 
-        await generator.generate(
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(202, json=job("queued", progress=0))
+        if request.url.path == "/root/v1/jobs/job-123/outputs/0":
+            return httpx.Response(
+                200, content=data, headers={"Content-Type": "image/png"}
+            )
+        return httpx.Response(200, json=poll_responses.popleft())
+
+    progress = ProgressRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        generator = BeastImageGenerator(
+            base_url="http://beast.test/root/",
+            api_key="secret-beast-key",
+            model="configured-image-model",
+            client=client,
+            poll_interval_seconds=0.001,
+        )
+        result = await generator.generate(
             ImageGenerationRequest(
                 prompt="Indian tomato curry",
                 width=512,
                 height=384,
-                steps=steps,
+                steps=9,
             ),
-            no_progress,
-        )
-
-    assert len(transport.requests) == 1
-    sent_request = transport.requests[0]
-    assert sent_request.method == "POST"
-    assert str(sent_request.url) == "http://ollama.test/root/api/generate"
-    assert json.loads(sent_request.content) == expected_payload
-    assert sent_request.headers["content-type"] == "application/json"
-
-
-@pytest.mark.asyncio
-async def test_generate_parses_split_and_combined_ndjson_chunks() -> None:
-    body = (
-        b'{"completed":1,"total":8,"done":false}\n'
-        b"\n"
-        b'{"completed":3,"total":8,"done":false}\n'
-        + final_line(image=image_base64(size=(341, 299))).rstrip(b"\n")
-    )
-    boundaries = [1, 19, 48, 49, 73, len(body) - 11]
-    chunks = [
-        body[start:end]
-        for start, end in zip(
-            [0, *boundaries],
-            [*boundaries, len(body)],
-            strict=True,
-        )
-    ]
-    transport = StreamingJsonTransport(chunks)
-    progress = ProgressRecorder()
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
-        image = await generator.generate(
-            ImageGenerationRequest(prompt="Tomato curry"),
             progress,
         )
 
-    assert image.data == base64.b64decode(image_base64(size=(341, 299)))
-    assert image.media_type == "image/png"
-    assert (image.width, image.height) == (341, 299)
-    assert progress.values == [12, 37, 100]
+    assert result.data == data
+    assert result.media_type == "image/png"
+    assert (result.width, result.height) == (341, 299)
+    assert progress.values == [0, 37, 99, 100]
+    assert progress.values == sorted(progress.values)
+    assert [request.method for request in requests] == ["POST", "GET", "GET", "GET"]
+    assert [request.url.path for request in requests] == [
+        "/root/v1/images/generations",
+        "/root/v1/jobs/job-123",
+        "/root/v1/jobs/job-123",
+        "/root/v1/jobs/job-123/outputs/0",
+    ]
+    assert all(
+        request.headers["authorization"] == "Bearer secret-beast-key"
+        for request in requests
+    )
+    assert json.loads(requests[0].content) == {
+        "model": "configured-image-model",
+        "prompt": "Indian tomato curry",
+        "width": 512,
+        "height": 384,
+        "output_format": "png",
+        "model_options": {"steps": 9},
+    }
 
 
 @pytest.mark.asyncio
-async def test_generate_reports_monotonic_clamped_progress_before_completion() -> None:
-    chunks = [
-        (
-            b'{"completed":2,"total":10,"done":false}\n'
-            b'{"completed":1,"total":10,"done":false}\n'
-            b'{"completed":2.9,"total":10,"done":false}\n'
-            b'{"completed":50,"total":10,"done":false}\n'
-            b'{"completed":4,"total":0,"done":false}\n'
-        ),
-        final_line(image=image_base64()),
-    ]
-    transport = StreamingJsonTransport(chunks)
-    progress = ProgressRecorder()
+async def test_submit_omits_model_options_when_steps_are_not_configured() -> None:
+    data = image_bytes()
+    requests: list[httpx.Request] = []
 
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                202,
+                json=job("completed", outputs=[output_for(data)]),
+            )
+        return httpx.Response(200, content=data)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        generator = BeastImageGenerator(
+            base_url="http://beast.test",
+            api_key="key",
+            model="z-image-turbo",
             client=client,
         )
-
         await generator.generate(
-            ImageGenerationRequest(prompt="Tomato curry"),
-            progress,
+            ImageGenerationRequest(prompt="Tomato curry", steps=None),
+            ProgressRecorder(),
         )
 
-    assert progress.values == [20, 28, 99, 100]
+    assert "model_options" not in json.loads(requests[0].content)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("image_format", "expected_media_type"),
-    [
-        ("PNG", "image/png"),
-        ("JPEG", "image/jpeg"),
-        ("WEBP", "image/webp"),
-    ],
-)
-async def test_generate_returns_verified_supported_image_metadata(
-    image_format: str,
-    expected_media_type: str,
-) -> None:
-    encoded = image_base64(image_format, size=(333, 277))
-    transport = StreamingJsonTransport([final_line(image=encoded)])
-    progress = ProgressRecorder()
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
-        result = await generator.generate(
-            ImageGenerationRequest(
-                prompt="Tomato curry",
-                width=768,
-                height=768,
+async def test_failed_job_maps_to_image_provider_unavailable() -> None:
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json=job("queued"))
+        return httpx.Response(
+            200,
+            json=job(
+                "failed",
+                error={
+                    "code": "model_failed",
+                    "retryable": False,
+                    "detail": "private provider detail",
+                },
             ),
-            progress,
         )
 
-    assert result.data == base64.b64decode(encoded)
-    assert result.media_type == expected_media_type
-    assert (result.width, result.height) == (333, 277)
-    assert progress.values == [100]
-
-
-@pytest.mark.asyncio
-async def test_generate_checks_http_status_without_leaking_response() -> None:
-    secret_response = "private provider diagnostic"
-    transport = StreamingJsonTransport(
-        [secret_response.encode()],
-        status_code=503,
+    generator = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        transport=httpx.MockTransport(respond),
+        poll_interval_seconds=0.001,
     )
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
+    try:
         with pytest.raises(AppError) as raised:
             await generator.generate(
                 ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
+                ProgressRecorder(),
             )
+    finally:
+        await generator.aclose()
 
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.OLLAMA_UNAVAILABLE,
-        "message": "Ollama is unavailable.",
-        "status_code": 503,
-        "retryable": True,
-        "details": {},
-    }
-    assert secret_response not in str(raised.value)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("chunks", "expected_progress"),
-    [
-        (
-            [b'{"error":"private early provider detail","done":false}\n'],
-            [],
-        ),
-        (
-            [
-                (
-                    b'{"completed":2,"total":10,"done":false}\n'
-                    b'{"error":"private midstream provider detail",'
-                    b'"completed":8,"total":10,"done":false}\n'
-                ),
-                final_line(image=image_base64()),
-            ],
-            [20],
-        ),
-        (
-            [
-                (
-                    b'{"error":"private terminal provider detail","done":true,'
-                    b'"image":"' + image_base64().encode() + b'"}\n'
-                )
-            ],
-            [],
-        ),
-    ],
-    ids=["early", "midstream", "terminal"],
-)
-async def test_provider_error_frame_is_safe_retryable_ollama_unavailable(
-    chunks: list[bytes],
-    expected_progress: list[int],
-) -> None:
-    transport = StreamingJsonTransport(chunks)
-    progress = ProgressRecorder()
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
-        with pytest.raises(AppError) as raised:
-            await generator.generate(
-                ImageGenerationRequest(prompt="Tomato curry"),
-                progress,
-            )
-
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.OLLAMA_UNAVAILABLE,
-        "message": "Ollama is unavailable.",
-        "status_code": 503,
-        "retryable": True,
-        "details": {},
-    }
-    assert progress.values == expected_progress
-    assert "private" not in str(raised.value)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "encoded_image",
-    [
-        pytest.param(verify_only_truncated_jpeg_base64(), id="truncated-jpeg"),
-        pytest.param(verify_only_corrupt_webp_base64(), id="corrupt-webp"),
-    ],
-)
-async def test_verify_only_image_that_fails_full_decode_is_rejected(
-    encoded_image: str,
-) -> None:
-    image_bytes = base64.b64decode(encoded_image)
-    with Image.open(BytesIO(image_bytes)) as image:
-        image.verify()
-
-    transport = StreamingJsonTransport([final_line(image=encoded_image)])
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
-        with pytest.raises(AppError) as raised:
-            await generator.generate(
-                ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
-            )
-
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.ARTIFACT_FAILURE,
-        "message": "The generated image artifact is invalid.",
-        "status_code": 502,
-        "retryable": False,
-        "details": {},
-    }
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "chunks",
-    [
-        [b'{"done":tru private provider diagnostic}\n'],
-        [b'["not","an","object"]\n'],
-        [b'{"completed":1,"total":2,"done":false}\n'],
-        [final_line(image=image_base64(), done=False)],
-        [final_line()],
-        [final_line(image=png_with_invalid_base64_character())],
-        [final_line(image=base64.b64encode(b"not an image").decode("ascii"))],
-        [final_line(image=png_with_bad_checksum_base64())],
-        [final_line(image=image_base64("GIF"))],
-    ],
-    ids=[
-        "malformed-json",
-        "non-object-json",
-        "missing-final-response",
-        "image-without-done",
-        "missing-final-image",
-        "invalid-base64",
-        "invalid-image-bytes",
-        "corrupt-image-checksum",
-        "unsupported-image-format",
-    ],
-)
-async def test_invalid_provider_output_is_a_safe_non_retryable_artifact_failure(
-    chunks: list[bytes],
-) -> None:
-    transport = StreamingJsonTransport(chunks)
-    progress = ProgressRecorder()
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
-        with pytest.raises(AppError) as raised:
-            await generator.generate(
-                ImageGenerationRequest(prompt="Tomato curry"),
-                progress,
-            )
-
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.ARTIFACT_FAILURE,
-        "message": "The generated image artifact is invalid.",
-        "status_code": 502,
-        "retryable": False,
-        "details": {},
-    }
-    assert "private provider diagnostic" not in str(raised.value)
-    assert 100 not in progress.values
-
-
-@pytest.mark.asyncio
-async def test_parser_rejected_integer_is_a_safe_artifact_failure() -> None:
-    provider_number = "9" * 5_000
-    transport = StreamingJsonTransport(
-        [(f'{{"completed":{provider_number},"total":1,"done":false}}\n').encode()]
+    assert app_error_snapshot(raised.value) == (
+        ErrorCode.IMAGE_PROVIDER_UNAVAILABLE,
+        503,
+        True,
     )
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
-        with pytest.raises(AppError) as raised:
-            await generator.generate(
-                ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
-            )
-
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.ARTIFACT_FAILURE,
-        "message": "The generated image artifact is invalid.",
-        "status_code": 502,
-        "retryable": False,
-        "details": {},
-    }
-    assert provider_number not in str(raised.value)
+    assert "private provider detail" not in str(raised.value)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("huge_field", ["completed", "total"])
-async def test_float_overflowing_progress_is_a_safe_artifact_failure(
-    huge_field: str,
-) -> None:
-    provider_number = "9" * 400
-    completed = provider_number if huge_field == "completed" else "1"
-    total = provider_number if huge_field == "total" else "1"
-    transport = StreamingJsonTransport(
-        [(f'{{"completed":{completed},"total":{total},"done":false}}\n').encode()]
-    )
+async def test_submit_problem_json_maps_to_image_provider_unavailable() -> None:
+    problem = {
+        "type": "about:blank",
+        "title": "Request failed",
+        "status": 422,
+        "detail": "private rejection detail",
+        "code": "invalid_model_options",
+        "retryable": False,
+    }
 
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
+    async def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json=problem,
+            headers={"Content-Type": "application/problem+json"},
         )
 
+    generator = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        transport=httpx.MockTransport(respond),
+    )
+    try:
         with pytest.raises(AppError) as raised:
             await generator.generate(
                 ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
+                ProgressRecorder(),
             )
+    finally:
+        await generator.aclose()
 
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.ARTIFACT_FAILURE,
-        "message": "The generated image artifact is invalid.",
-        "status_code": 502,
-        "retryable": False,
-        "details": {},
-    }
-    assert provider_number not in str(raised.value)
+    assert app_error_snapshot(raised.value) == (
+        ErrorCode.IMAGE_PROVIDER_UNAVAILABLE,
+        503,
+        True,
+    )
+    assert problem["detail"] not in str(raised.value)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_location", ["request", "stream"])
-async def test_network_failure_is_mapped_to_ollama_unavailable(
-    failure_location: str,
-) -> None:
-    network_error = httpx.ConnectError("private-host:11434 refused")
-    transport = StreamingJsonTransport(
-        request_error=network_error if failure_location == "request" else None,
-        stream_error=network_error if failure_location == "stream" else None,
+async def test_connection_error_maps_to_image_provider_unavailable() -> None:
+    async def fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("private-host refused connection", request=request)
+
+    generator = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        transport=httpx.MockTransport(fail),
     )
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
+    try:
         with pytest.raises(AppError) as raised:
             await generator.generate(
                 ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
+                ProgressRecorder(),
             )
+    finally:
+        await generator.aclose()
 
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.OLLAMA_UNAVAILABLE,
-        "message": "Ollama is unavailable.",
-        "status_code": 503,
-        "retryable": True,
-        "details": {},
-    }
+    assert raised.value.code is ErrorCode.IMAGE_PROVIDER_UNAVAILABLE
     assert "private-host" not in str(raised.value)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_location", ["request", "stream"])
-@pytest.mark.parametrize(
-    "timeout_error",
-    [
-        httpx.ReadTimeout("private timeout detail"),
-        TimeoutError("private timeout detail"),
-    ],
-)
-async def test_timeout_is_mapped_to_operation_timed_out(
-    failure_location: str,
-    timeout_error: Exception,
-) -> None:
-    transport = StreamingJsonTransport(
-        request_error=timeout_error if failure_location == "request" else None,
-        stream_error=timeout_error if failure_location == "stream" else None,
+async def test_overall_timeout_includes_poll_wait() -> None:
+    async def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=job("queued"))
+
+    generator = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        transport=httpx.MockTransport(respond),
+        timeout_seconds=0.001,
+        poll_interval_seconds=1,
     )
-
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
+    try:
         with pytest.raises(AppError) as raised:
             await generator.generate(
                 ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
+                ProgressRecorder(),
             )
+    finally:
+        await generator.aclose()
 
-    assert app_error_snapshot(raised.value) == {
-        "code": ErrorCode.OPERATION_TIMED_OUT,
-        "message": "Image generation timed out.",
-        "status_code": 504,
-        "retryable": True,
-        "details": {},
-    }
-    assert "private timeout detail" not in str(raised.value)
-
-
-@pytest.mark.asyncio
-async def test_timeout_bounds_total_time_for_a_progressing_stream() -> None:
-    transport = StreamingJsonTransport(
-        [b'{"completed":1,"total":10,"done":false}\n'] * 10,
-        chunk_delay_seconds=0.02,
+    assert app_error_snapshot(raised.value) == (
+        ErrorCode.OPERATION_TIMED_OUT,
+        504,
+        True,
     )
 
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-            timeout_seconds=0.05,
-        )
 
-        with pytest.raises(AppError) as raised:
-            await generator.generate(
-                ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
+@pytest.mark.asyncio
+async def test_sha256_mismatch_is_an_artifact_failure() -> None:
+    data = image_bytes()
+    bad_sha = "0" * 64
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                202,
+                json=job(
+                    "completed",
+                    outputs=[output_for(data, sha256=bad_sha)],
+                ),
             )
+        return httpx.Response(200, content=data)
 
-    assert raised.value.code is ErrorCode.OPERATION_TIMED_OUT
-    assert raised.value.status_code == 504
+    await _assert_artifact_failure(respond)
 
 
 @pytest.mark.asyncio
-async def test_cancellation_propagates_unchanged() -> None:
-    transport = StreamingJsonTransport(request_error=asyncio.CancelledError())
+async def test_size_mismatch_is_an_artifact_failure() -> None:
+    data = image_bytes()
+    output = output_for(data)
+    output["size_bytes"] = len(data) + 1
 
-    async with httpx.AsyncClient(transport=transport) as client:
-        generator = OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            client=client,
-        )
-
-        with pytest.raises(asyncio.CancelledError):
-            await generator.generate(
-                ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                202,
+                json=job("completed", outputs=[output]),
             )
+        return httpx.Response(200, content=data)
+
+    await _assert_artifact_failure(respond)
 
 
 @pytest.mark.asyncio
-async def test_injected_client_remains_owned_by_the_caller() -> None:
-    transport = StreamingJsonTransport([final_line(image=image_base64())])
-    client = httpx.AsyncClient(transport=transport)
-    generator = OllamaImageGenerator(
-        base_url="http://ollama.test",
-        model="configured-image-model",
-        client=client,
+async def test_undecodable_bytes_are_an_artifact_failure() -> None:
+    data = b"this is not an image"
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                202,
+                json=job("completed", outputs=[output_for(data)]),
+            )
+        return httpx.Response(200, content=data)
+
+    await _assert_artifact_failure(respond)
+
+
+@pytest.mark.asyncio
+async def test_empty_outputs_on_completed_job_are_an_artifact_failure() -> None:
+    async def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=job("completed", outputs=[]))
+
+    await _assert_artifact_failure(respond)
+
+
+@pytest.mark.asyncio
+async def test_progress_normalizes_fraction_and_percentage_scales_monotonically() -> (
+    None
+):
+    data = image_bytes()
+    poll_responses = deque(
+        [
+            job("loading", progress=0.2),
+            job("running", progress=18),
+            job("running", progress=45.9),
+            job("completed", progress=1, outputs=[output_for(data)]),
+        ]
     )
 
-    await generator.generate(
-        ImageGenerationRequest(prompt="Tomato curry"),
-        no_progress,
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json=job("queued", progress=-2))
+        if request.url.path.endswith("/outputs/0"):
+            return httpx.Response(200, content=data)
+        return httpx.Response(200, json=poll_responses.popleft())
+
+    progress = ProgressRecorder()
+    generator = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        transport=httpx.MockTransport(respond),
+        poll_interval_seconds=0.001,
     )
-    await generator.aclose()
-
-    assert client.is_closed is False
-    assert transport.close_calls == 0
-
-    await client.aclose()
-    assert transport.close_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_internally_created_client_closes_once_through_async_lifecycle() -> None:
-    transport = StreamingJsonTransport([final_line(image=image_base64())])
-
-    async with OllamaImageGenerator(
-        base_url="http://ollama.test",
-        model="configured-image-model",
-        transport=transport,
-        timeout_seconds=13,
-    ) as generator:
+    try:
         await generator.generate(
             ImageGenerationRequest(prompt="Tomato curry"),
-            no_progress,
+            progress,
         )
+    finally:
+        await generator.aclose()
 
-    assert transport.close_calls == 1
-
-    await generator.aclose()
-    assert transport.close_calls == 1
+    assert progress.values == [0, 20, 45, 99, 100]
 
 
 @pytest.mark.asyncio
-async def test_async_lifecycle_closes_internally_created_client_after_failure() -> None:
-    transport = StreamingJsonTransport(
-        request_error=httpx.ConnectError("connection refused")
+async def test_aclose_closes_only_an_owned_client() -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(202, json=job("failed")))
+    owned = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        transport=transport,
     )
+    await owned.aclose()
+    await owned.aclose()
+    assert owned._client.is_closed is True
 
-    with pytest.raises(AppError):
-        async with OllamaImageGenerator(
-            base_url="http://ollama.test",
-            model="configured-image-model",
-            transport=transport,
-        ) as generator:
+    injected_client = httpx.AsyncClient(transport=transport)
+    injected = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        client=injected_client,
+    )
+    await injected.aclose()
+    assert injected_client.is_closed is False
+    await injected_client.aclose()
+
+
+async def _assert_artifact_failure(
+    respond: Callable[[httpx.Request], Awaitable[httpx.Response]],
+) -> None:
+    generator = BeastImageGenerator(
+        base_url="http://beast.test",
+        api_key="key",
+        model="z-image-turbo",
+        transport=httpx.MockTransport(respond),
+    )
+    try:
+        with pytest.raises(AppError) as raised:
             await generator.generate(
                 ImageGenerationRequest(prompt="Tomato curry"),
-                no_progress,
+                ProgressRecorder(),
             )
+    finally:
+        await generator.aclose()
 
-    assert transport.close_calls == 1
+    assert app_error_snapshot(raised.value) == (
+        ErrorCode.ARTIFACT_FAILURE,
+        502,
+        False,
+    )

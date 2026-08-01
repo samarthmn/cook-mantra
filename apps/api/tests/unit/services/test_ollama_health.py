@@ -6,7 +6,6 @@ from core.errors import AppError, ErrorCode
 from services.ollama_health import OllamaHealthService
 
 ALL_REQUIRED_MODELS = [model.value for model in Model]
-TEXT_MODELS = [model.value for model in Model if model is not Model.Z_IMAGE]
 
 
 def model_tag(name: str) -> dict[str, object]:
@@ -28,127 +27,11 @@ def model_tag(name: str) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_inspect_uses_tags_without_pulling_and_compares_every_model() -> None:
-    requests: list[tuple[str, str]] = []
+async def test_inspect_uses_one_text_tags_request_and_compares_four_models() -> None:
+    requests: list[str] = []
     installed = [Model.QWEN_SMALL.value, Model.GPT_OSS.value, "custom:latest"]
 
     async def respond(request: httpx.Request) -> httpx.Response:
-        requests.append((request.method, request.url.path))
-        return httpx.Response(
-            200,
-            json={"models": [model_tag(name) for name in installed]},
-        )
-
-    service = OllamaHealthService(
-        "http://ollama.local:11434",
-        timeout_seconds=1,
-        transport=httpx.MockTransport(respond),
-    )
-
-    result = await service.inspect()
-
-    assert requests == [("GET", "/api/tags")]
-    assert result == {
-        "reachable": True,
-        "available_models": installed,
-        "missing": list(
-            dict.fromkeys(
-                model.value
-                for model in (
-                    Model.QWEN_LARGE,
-                    Model.GEMMA_LARGE,
-                    Model.Z_IMAGE,
-                )
-                if model.value not in installed
-            )
-        ),
-    }
-
-
-@pytest.mark.asyncio
-async def test_inspect_returns_the_complete_available_inventory() -> None:
-    async def respond(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "models": [model_tag(name) for name in reversed(ALL_REQUIRED_MODELS)]
-            },
-        )
-
-    service = OllamaHealthService(
-        "http://ollama.local:11434/",
-        timeout_seconds=1,
-        transport=httpx.MockTransport(respond),
-    )
-
-    result = await service.inspect()
-
-    assert result == {
-        "reachable": True,
-        "available_models": list(reversed(ALL_REQUIRED_MODELS)),
-        "missing": [],
-    }
-
-
-@pytest.mark.asyncio
-async def test_inspect_checks_each_model_on_its_designated_host() -> None:
-    requests: list[str] = []
-    text_model_on_wrong_host = TEXT_MODELS[0]
-    text_inventory = [
-        *TEXT_MODELS[1:],
-        "shared:latest",
-        "text-extra:latest",
-    ]
-    image_inventory = [
-        "shared:latest",
-        text_model_on_wrong_host,
-        Model.Z_IMAGE.value,
-        "image-extra:latest",
-    ]
-
-    async def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(str(request.url))
-        inventory = (
-            text_inventory
-            if request.url.host == "text-ollama.test"
-            else image_inventory
-        )
-        return httpx.Response(
-            200,
-            json={"models": [model_tag(name) for name in inventory]},
-        )
-
-    service = OllamaHealthService(
-        "http://text-ollama.test:11434",
-        image_base_url="http://image-ollama.test:11434",
-        timeout_seconds=1,
-        transport=httpx.MockTransport(respond),
-    )
-
-    result = await service.inspect()
-
-    assert requests == [
-        "http://text-ollama.test:11434/api/tags",
-        "http://image-ollama.test:11434/api/tags",
-    ]
-    assert result == {
-        "reachable": True,
-        "available_models": [
-            *text_inventory,
-            text_model_on_wrong_host,
-            Model.Z_IMAGE.value,
-            "image-extra:latest",
-        ],
-        "missing": [text_model_on_wrong_host],
-    }
-
-
-@pytest.mark.asyncio
-async def test_inspect_queries_equal_hosts_only_once() -> None:
-    requests: list[str] = []
-    installed = list(dict.fromkeys([*TEXT_MODELS, Model.Z_IMAGE.value]))
-
-    async def respond(request: httpx.Request) -> httpx.Response:
         requests.append(str(request.url))
         return httpx.Response(
             200,
@@ -157,7 +40,6 @@ async def test_inspect_queries_equal_hosts_only_once() -> None:
 
     service = OllamaHealthService(
         "http://ollama.local:11434",
-        image_base_url="http://ollama.local:11434/",
         timeout_seconds=1,
         transport=httpx.MockTransport(respond),
     )
@@ -168,45 +50,93 @@ async def test_inspect_queries_equal_hosts_only_once() -> None:
     assert result == {
         "reachable": True,
         "available_models": installed,
+        "missing": [Model.QWEN_LARGE.value, Model.GEMMA_LARGE.value],
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_returns_the_complete_text_inventory() -> None:
+    inventory = [*reversed(ALL_REQUIRED_MODELS), "extra:latest"]
+
+    async def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"models": [model_tag(name) for name in inventory]},
+        )
+
+    service = OllamaHealthService(
+        "http://ollama.local:11434/",
+        timeout_seconds=1,
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert await service.inspect() == {
+        "reachable": True,
+        "available_models": inventory,
         "missing": [],
     }
 
 
 @pytest.mark.asyncio
-async def test_unreachable_image_host_is_reported_as_unavailable() -> None:
-    requests: list[str] = []
+async def test_enabled_beast_health_reports_status_verbatim_without_auth() -> None:
+    requests: list[httpx.Request] = []
 
     async def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(str(request.url))
-        if request.url.host == "image-ollama.test":
-            raise httpx.ConnectError("image host refused connection", request=request)
+        requests.append(request)
+        if request.url.host == "beast.test":
+            return httpx.Response(
+                200,
+                json={"version": "0.1.0", "status": "degraded"},
+            )
         return httpx.Response(
             200,
-            json={"models": [model_tag(name) for name in TEXT_MODELS]},
+            json={"models": [model_tag(name) for name in ALL_REQUIRED_MODELS]},
         )
 
     service = OllamaHealthService(
-        "http://text-ollama.test:11434",
-        image_base_url="http://image-ollama.test:11434",
+        "http://ollama.local:11434",
         timeout_seconds=1,
+        beast_base_url="http://beast.test:4900/",
         transport=httpx.MockTransport(respond),
     )
 
-    with pytest.raises(AppError) as raised:
-        await service.inspect()
+    result = await service.inspect()
 
-    assert requests == [
-        "http://text-ollama.test:11434/api/tags",
-        "http://image-ollama.test:11434/api/tags",
+    assert [str(request.url) for request in requests] == [
+        "http://ollama.local:11434/api/tags",
+        "http://beast.test:4900/health",
     ]
-    assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
-    assert raised.value.message == "Ollama is unavailable."
-    assert raised.value.status_code == 503
-    assert raised.value.retryable is True
+    assert "authorization" not in requests[1].headers
+    assert result["beast"] == {"reachable": True, "status": "degraded"}
 
 
 @pytest.mark.asyncio
-async def test_connection_details_are_hidden_behind_the_public_error() -> None:
+async def test_unreachable_beast_is_reported_without_hiding_ollama_inventory() -> None:
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "beast.test":
+            raise httpx.ConnectError("private Beast address", request=request)
+        return httpx.Response(
+            200,
+            json={"models": [model_tag(name) for name in ALL_REQUIRED_MODELS]},
+        )
+
+    service = OllamaHealthService(
+        "http://ollama.local:11434",
+        timeout_seconds=1,
+        beast_base_url="http://beast.test:4900",
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert await service.inspect() == {
+        "reachable": True,
+        "available_models": ALL_REQUIRED_MODELS,
+        "missing": [],
+        "beast": {"reachable": False, "status": None},
+    }
+
+
+@pytest.mark.asyncio
+async def test_connection_details_are_hidden_behind_the_ollama_error() -> None:
     async def fail(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError(
             "connection refused at private-host:11434",
@@ -231,7 +161,7 @@ async def test_connection_details_are_hidden_behind_the_public_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_malformed_tags_response_is_reported_as_unavailable() -> None:
+async def test_malformed_tags_response_is_reported_as_ollama_unavailable() -> None:
     async def respond(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"<html>not ollama</html>")
 

@@ -21,7 +21,8 @@ TEST_ONLY_VARIABLES = frozenset(
 ENVIRONMENT_SPECIFIC_VARIABLES = frozenset(
     {
         "OLLAMA_BASE_URL",
-        "OLLAMA_IMAGE_BASE_URL",
+        "BEAST_BASE_URL",
+        "BEAST_API_KEY",
         "DISH_PREVIEWS_ENABLED",
         "LOG_LEVEL",
         "CORS_ORIGINS",
@@ -66,6 +67,17 @@ def test_tuning_values_are_not_pushed_into_the_environment_file() -> None:
 def test_the_one_required_setting_is_documented() -> None:
     """ollama_base_url has no default, so a missing .env entry is fatal."""
     assert "OLLAMA_BASE_URL" in documented_variables()
+
+
+def test_example_documents_only_the_beast_image_provider_variables() -> None:
+    documented = documented_variables()
+
+    assert {"BEAST_BASE_URL", "BEAST_API_KEY"} <= documented
+    assert {
+        "IMAGE_GEN_TARGET",
+        "OLLAMA_IMAGE_LOCAL_URL",
+        "OLLAMA_IMAGE_REMOTE_URL",
+    }.isdisjoint(documented)
 
 
 def test_browser_variables_are_documented_where_next_actually_loads_them() -> None:

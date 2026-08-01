@@ -14,7 +14,7 @@ from langsmith import tracing_context
 
 from agents.master_chef import MasterChef, OllamaMasterChef
 from agents.nutrition import NutritionAgent, OllamaNutritionAgent
-from core.config import Model, Settings
+from core.config import Settings
 from core.errors import AppError, ErrorCode
 from core.logging import cause_chain
 from domain.images import DishPreview
@@ -37,7 +37,11 @@ from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
-from services.image_generation import OllamaImageGenerator
+from services.image_generation import (
+    BeastImageGenerator,
+    ImageGenerator,
+    UnavailableImageGenerator,
+)
 from services.tracing import TracingService, trace_batch_number
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
@@ -702,7 +706,7 @@ class DevelopmentRecipeOptionsRuntime:
     """Own the settings, real dependencies, and inspectable development graph."""
 
     settings: Settings
-    image_generator: OllamaImageGenerator = field(init=False)
+    image_generator: ImageGenerator = field(init=False)
     artifact_store: ArtifactStore = field(init=False)
     dependencies: RecipeOptionDependencies = field(init=False)
     graph: CompiledStateGraph = field(init=False)
@@ -715,11 +719,7 @@ class DevelopmentRecipeOptionsRuntime:
     )
 
     def __post_init__(self) -> None:
-        image_generator = OllamaImageGenerator(
-            base_url=str(self.settings.image_base_url()),
-            model=Model.Z_IMAGE,
-            timeout_seconds=self.settings.image_timeout_seconds,
-        )
+        image_generator = _configured_image_generator(self.settings)
         artifact_store = ArtifactStore(
             self.settings.artifact_root,
             ttl_seconds=self.settings.session_ttl_seconds,
@@ -766,7 +766,8 @@ class DevelopmentRecipeOptionsRuntime:
 
     async def _shutdown_owned_resources(self) -> None:
         try:
-            await self.image_generator.aclose()
+            if isinstance(self.image_generator, BeastImageGenerator):
+                await self.image_generator.aclose()
         finally:
             await self.artifact_store.shutdown()
 
@@ -774,17 +775,13 @@ class DevelopmentRecipeOptionsRuntime:
 def build_real_recipe_option_dependencies(
     settings: Settings,
     *,
-    image_generator: OllamaImageGenerator | None = None,
+    image_generator: ImageGenerator | None = None,
     artifact_store: ArtifactStore | None = None,
 ) -> RecipeOptionDependencies:
     """Wire real lazy agents, a store, and one shared model-call limiter."""
     model_call_limiter = ModelCallLimiter(settings.max_concurrent_model_calls)
     tracing = TracingService(settings)
-    resolved_image_generator = image_generator or OllamaImageGenerator(
-        base_url=str(settings.image_base_url()),
-        model=Model.Z_IMAGE,
-        timeout_seconds=settings.image_timeout_seconds,
-    )
+    resolved_image_generator = image_generator or _configured_image_generator(settings)
     resolved_artifact_store = artifact_store or ArtifactStore(
         settings.artifact_root,
         ttl_seconds=settings.session_ttl_seconds,
@@ -800,6 +797,18 @@ def build_real_recipe_option_dependencies(
         session_store=SessionStore(ttl_seconds=settings.session_ttl_seconds),
         model_call_limiter=model_call_limiter,
         dish_previews_enabled=settings.dish_previews_enabled,
+    )
+
+
+def _configured_image_generator(settings: Settings) -> ImageGenerator:
+    if settings.beast_base_url is None or settings.beast_api_key is None:
+        return UnavailableImageGenerator()
+    return BeastImageGenerator(
+        base_url=str(settings.beast_base_url),
+        api_key=settings.beast_api_key.get_secret_value(),
+        model=settings.beast_image_model,
+        timeout_seconds=settings.image_timeout_seconds,
+        poll_interval_seconds=settings.beast_poll_interval_seconds,
     )
 
 
