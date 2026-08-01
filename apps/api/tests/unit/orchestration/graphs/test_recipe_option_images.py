@@ -62,28 +62,42 @@ class RecordingDishPreviewService(FakeDishPreviewService):
         return await super().generate(session_id, option, progress)
 
 
-class SharedConcurrencyProbe:
+class EnrichmentPhaseProbe:
     def __init__(self) -> None:
-        self.active = 0
-        self.maximum_active = 0
-        self.active_kinds: set[str] = set()
-        self.two_kinds_started = asyncio.Event()
-        self.release = asyncio.Event()
+        self.events: list[str] = []
+        self.completed_nutrition: set[str] = set()
+        self.previews_started_after_nutrition: list[bool] = []
+        self.active_previews = 0
+        self.maximum_active_previews = 0
+        self.two_previews_started = asyncio.Event()
+        self.release_previews = asyncio.Event()
 
-    async def hold(self, kind: str) -> None:
-        self.active += 1
-        self.maximum_active = max(self.maximum_active, self.active)
-        self.active_kinds.add(kind)
-        if self.active == 2 and self.active_kinds == {"nutrition", "preview"}:
-            self.two_kinds_started.set()
+    async def finish_nutrition(self, option_name: str) -> None:
+        self.events.append(f"nutrition-start:{option_name}")
+        await asyncio.sleep(0)
+        self.completed_nutrition.add(option_name)
+        self.events.append(f"nutrition-complete:{option_name}")
+
+    async def hold_preview(self, option_name: str) -> None:
+        self.previews_started_after_nutrition.append(
+            self.completed_nutrition == {"Tomato Curry", "Tomato Rice"}
+        )
+        self.events.append(f"preview-start:{option_name}")
+        self.active_previews += 1
+        self.maximum_active_previews = max(
+            self.maximum_active_previews,
+            self.active_previews,
+        )
+        if self.active_previews == 2:
+            self.two_previews_started.set()
         try:
-            await self.release.wait()
+            await self.release_previews.wait()
         finally:
-            self.active -= 1
+            self.active_previews -= 1
 
 
 class ProbedNutritionAgent:
-    def __init__(self, probe: SharedConcurrencyProbe) -> None:
+    def __init__(self, probe: EnrichmentPhaseProbe) -> None:
         self._probe = probe
 
     async def estimate(
@@ -91,12 +105,12 @@ class ProbedNutritionAgent:
         option: RecipeOptionDraft,
         preferences: object,
     ) -> NutritionEstimate:
-        await self._probe.hold("nutrition")
+        await self._probe.finish_nutrition(option.name)
         return estimate(240 if option.name == "Tomato Curry" else 180)
 
 
 class ProbedDishPreviewService:
-    def __init__(self, probe: SharedConcurrencyProbe) -> None:
+    def __init__(self, probe: EnrichmentPhaseProbe) -> None:
         self._probe = probe
 
     async def generate(
@@ -105,10 +119,41 @@ class ProbedDishPreviewService:
         option: RecipeOptionDraft,
         progress: Callable[[int], Awaitable[None]],
     ) -> DishPreview:
-        await self._probe.hold("preview")
+        await self._probe.hold_preview(option.name)
         return DishPreview(
             artifact_id=f"preview-{option.name.casefold().replace(' ', '-')}"
         )
+
+
+class BlockingNutritionAgent:
+    def __init__(self, expected_calls: int = 1) -> None:
+        self._expected_calls = expected_calls
+        self._started_count = 0
+        self.cancelled_count = 0
+        self.started = asyncio.Event()
+        self.cancellation_received = asyncio.Event()
+        self.allow_exit = asyncio.Event()
+
+    async def estimate(
+        self,
+        option: RecipeOptionDraft,
+        preferences: object,
+    ) -> NutritionEstimate:
+        self._started_count += 1
+        if self._started_count == self._expected_calls:
+            self.started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as cancellation:
+            self.cancelled_count += 1
+            if self.cancelled_count == self._expected_calls:
+                self.cancellation_received.set()
+            while not self.allow_exit.is_set():
+                try:
+                    await self.allow_exit.wait()
+                except asyncio.CancelledError:
+                    continue
+            raise cancellation
 
 
 class BlockingDishPreviewService:
@@ -367,7 +412,7 @@ async def test_disabled_previews_skip_generation_and_commit_without_warnings() -
 
 
 @pytest.mark.asyncio
-async def test_image_failure_preserves_option_with_only_image_warning() -> None:
+async def test_preview_failure_after_nutrition_commits_option_with_warning() -> None:
     fixture = await make_generation(option_count=1)
     graph = graph_for(
         fixture,
@@ -387,11 +432,14 @@ async def test_image_failure_preserves_option_with_only_image_warning() -> None:
 
     result = await graph.ainvoke(invocation(fixture))
 
+    saved = await fixture.store.require(fixture.generating.id)
     option = result["recipe_options"][0]
     assert option.name == "Tomato Curry"
     assert option.nutrition == estimate(321)
     assert option.preview is None
     assert option.warnings == ["Dish preview unavailable."]
+    assert saved.stage is SessionStage.OPTIONS_READY
+    assert saved.recipe_options[0] == option
 
 
 @pytest.mark.asyncio
@@ -489,12 +537,10 @@ async def test_enrichment_failures_log_structured_app_error_context(
 
 
 @pytest.mark.asyncio
-async def test_each_option_schedules_nutrition_and_preview_through_shared_limiter() -> (
-    None
-):
+async def test_previews_start_after_nutrition_and_bypass_model_limiter() -> None:
     fixture = await make_generation(option_count=2)
-    probe = SharedConcurrencyProbe()
-    limiter = CountingLimiter(max_concurrent_calls=2)
+    probe = EnrichmentPhaseProbe()
+    limiter = CountingLimiter(max_concurrent_calls=1)
     dependencies = RecipeOptionDependencies(
         master_chef=FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Rice")]]),
         nutrition_agent=ProbedNutritionAgent(probe),
@@ -506,19 +552,27 @@ async def test_each_option_schedules_nutrition_and_preview_through_shared_limite
     graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
 
     try:
-        await asyncio.wait_for(probe.two_kinds_started.wait(), timeout=1)
-        assert probe.maximum_active == 2
-        assert probe.active_kinds == {"nutrition", "preview"}
-        assert limiter.call_count == 5
-        probe.release.set()
+        await asyncio.wait_for(probe.two_previews_started.wait(), timeout=1)
+        first_preview = next(
+            index
+            for index, event in enumerate(probe.events)
+            if event.startswith("preview-start:")
+        )
+        assert all(
+            event.startswith("nutrition-") for event in probe.events[:first_preview]
+        )
+        assert probe.previews_started_after_nutrition == [True, True]
+        assert probe.maximum_active_previews == 2
+        assert limiter.call_count == 3
+        probe.release_previews.set()
         await graph_task
     finally:
-        probe.release.set()
+        probe.release_previews.set()
         if not graph_task.done():
             graph_task.cancel()
         await asyncio.gather(graph_task, return_exceptions=True)
 
-    assert probe.maximum_active == 2
+    assert probe.maximum_active_previews == 2
 
 
 @pytest.mark.asyncio
@@ -619,6 +673,50 @@ async def test_more_preserves_prior_enrichments_and_enriches_only_new_drafts() -
     assert previews.calls == [(fixture.generating.id, "Tomato Rice")]
     assert result["option_ids"] == [saved.recipe_options[1].id]
     assert result["batch_number"] == 8
+
+
+@pytest.mark.asyncio
+async def test_nutrition_phase_cancellation_drains_before_starting_previews() -> None:
+    fixture = await make_generation(option_count=2)
+    nutrition = BlockingNutritionAgent(expected_calls=2)
+    previews = RecordingDishPreviewService()
+    graph = graph_for(
+        fixture,
+        FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Rice")]]),
+        nutrition,
+        previews=previews,
+        limiter=ModelCallLimiter(max_concurrent_calls=4),
+    )
+    graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
+
+    try:
+        await asyncio.wait_for(nutrition.started.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.wait_for(nutrition.cancellation_received.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+
+        nutrition.allow_exit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        nutrition.allow_exit.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    saved = await fixture.store.require(fixture.generating.id)
+    assert nutrition.cancellation_received.is_set()
+    assert nutrition.cancelled_count == 2
+    assert previews.calls == []
+    assert previews.deleted_artifact_ids == []
+    assert saved.model_copy(update={"updated_at": fixture.previous.updated_at}) == (
+        fixture.previous
+    )
 
 
 @pytest.mark.asyncio

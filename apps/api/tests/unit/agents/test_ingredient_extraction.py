@@ -91,11 +91,13 @@ async def test_extractor_forwards_its_exact_settings_to_model_factory(
         agent: Agent,
         *,
         thinking: bool,
+        keep_alive: float | str,
         settings: Settings,
     ) -> StructuredModelFactory:
         nonlocal captured_settings
         assert agent is Agent.INGREDIENT_EXTRACTION
         assert thinking is False
+        assert keep_alive == 0
         captured_settings = settings
         return StructuredModelFactory(
             ExtractionResult(detected=[{"name": "Tomato", "confidence": 0.94}])

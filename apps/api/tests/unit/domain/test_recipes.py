@@ -132,6 +132,54 @@ def test_recipe_step_rejects_zero_duration() -> None:
         RecipeStep(number=1, instruction="Cook.", duration_minutes=0)
 
 
+def test_recipe_step_defaults_optional_guidance_to_none() -> None:
+    step = RecipeStep(number=1, instruction="Prepare the ingredients.")
+
+    assert step.done_when is None
+    assert step.heat_level is None
+
+
+@pytest.mark.parametrize("heat_level", ["low", "medium", "medium-high", "high"])
+def test_recipe_step_accepts_sensory_cue_and_valid_heat_levels(
+    heat_level: str,
+) -> None:
+    step = RecipeStep(
+        number=1,
+        instruction="Sear the paneer.",
+        done_when="  edges deeply golden and crisp  ",
+        heat_level=heat_level,
+    )
+
+    assert step.done_when == "edges deeply golden and crisp"
+    assert step.heat_level == heat_level
+
+
+@pytest.mark.parametrize("done_when", ["", "   ", "\t\n"])
+def test_recipe_step_rejects_blank_done_when(done_when: str) -> None:
+    with pytest.raises(ValidationError, match="blank"):
+        RecipeStep(number=1, instruction="Cook.", done_when=done_when)
+
+
+def test_recipe_step_rejects_done_when_over_max_length() -> None:
+    with pytest.raises(ValidationError):
+        RecipeStep(number=1, instruction="Cook.", done_when="a" * 201)
+
+
+def test_recipe_step_applies_done_when_limit_after_normalizing() -> None:
+    step = RecipeStep(
+        number=1,
+        instruction="Cook.",
+        done_when=f"  {'a' * 200}  ",
+    )
+
+    assert step.done_when == "a" * 200
+
+
+def test_recipe_step_rejects_invalid_heat_level() -> None:
+    with pytest.raises(ValidationError):
+        RecipeStep(number=1, instruction="Cook.", heat_level="medium-low")
+
+
 @pytest.mark.parametrize("field_name", ["number", "duration_minutes"])
 @pytest.mark.parametrize("invalid_value", [True, 1.0, "1"])
 def test_recipe_step_rejects_coercible_noninteger_scalars(

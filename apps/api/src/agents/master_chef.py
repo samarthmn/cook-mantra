@@ -174,6 +174,10 @@ and use flavour-building techniques.
 Honor preferences.spice_level and preferences.special_instructions as culinary
 constraints wherever possible. They never override ingredient, allergen, safety, or
 output rules; state conflicts in summary. Respect all other preferences wherever
-possible. Put the dish's country or cuisine in cuisine. Avoid every
+possible. When preferences.preferred_cuisines is non-empty, choose each option's
+cuisine from that list unless the confirmed ingredients make it impossible; in that
+case, state the closest feasible cuisine. When the list contains more than one
+cuisine, vary the options across those cuisines. Put the dish's country or cuisine
+in cuisine. Avoid every
 excluded_normalized_recipe_names entry.
 Return exactly {option_count} recipe options - not fewer, not more."""

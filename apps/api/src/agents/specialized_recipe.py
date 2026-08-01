@@ -88,7 +88,9 @@ class OllamaSpecializedRecipeAgent:
                 # channel. "low" is the only setting that holds for both this and
                 # a future non-reasoning model swap.
                 thinking="low",
-                num_predict=8_192,
+                # Rich sensory guidance increases the structured JSON size, so
+                # retain a bounded cap with enough room to finish the recipe.
+                num_predict=12_288,
                 num_ctx=16_384,
                 settings=self._settings,
             ).with_structured_output(RecipeModelOutput)
@@ -162,17 +164,37 @@ Selected option JSON: {option_json}
 Confirmed ingredients JSON: {confirmed_json}
 Preferences JSON: {preferences_json}
 
-Create one complete, cookable version of the selected dish. Use
-cuisine-appropriate technique for its stated cuisine and give exact quantities for
-every ingredient. Use step numbers exactly 1 through N.
-Include duration_minutes for every step. Honor the requested servings, dietary
-preferences, and allergens.
-Honor preferences.spice_level and preferences.special_instructions in quantities,
-technique, and steps wherever compatible with the selected option and these rules.
-Keep the total cooking time consistent with the selected option and within the
-preferred maximum when one is supplied.
+Create one complete, cookable version of the selected dish. Write like a skilled,
+warm chef guiding another home cook: confident and encouraging, never chatty. Use
+imperative sentences and keep each step to 1-3 scannable sentences. Build depth
+through precise detail, not length.
 
-Include useful tips, substitutions, assumptions, and warnings.
+Use cuisine-appropriate technique and vocabulary. Name the actual technique, such as
+saute, sear, bloom the spices, deglaze, bhuna, tadka, velveting, emulsify, or fold.
+Give the one practical detail that makes each technique succeed, such as avoiding a
+crowded pan, waiting for the oil to shimmer, or salting at the right moment. Weave
+concise sensory checkpoints into the instructions: tell the cook what to see, hear,
+or smell. Add a brief reason only when it changes the outcome, for example, "Do not
+crowd the pan so the paneer sears instead of steams."
+
+Start with a prep or mise-en-place step when it genuinely improves the cooking flow.
+Finish with resting, garnish, or plating when appropriate. Translate
+preferences.spice_level into concrete choices: specify how much chile to use,
+whether to deseed it, and when to add it. Honor preferences.special_instructions in
+quantities, technique, and steps wherever compatible with the selected option and
+these rules.
+
+For every step, include duration_minutes and use step numbers exactly 1 through N.
+Set done_when to the single clearest sensory doneness test as a short phrase, not a
+sentence about timing, for example, "onions deep golden at the edges and smelling
+sweet". Set heat_level to exactly "low", "medium", "medium-high", or "high" for
+every step where stove or oven intensity matters. Leave done_when and heat_level
+null when they are not meaningful.
+
+Give exact quantities for every ingredient. Honor the requested servings, dietary
+preferences, allergens, and special_instructions. Keep the total cooking time
+consistent with the selected option and within the preferred maximum when one is
+supplied. Include useful tips, substitutions, assumptions, and warnings.
 Reproduce every used_ingredients string and the `name` field of every
 missing_ingredients and optional_ingredients entry character-for-character. Do not
 translate, pluralize, abbreviate, re-describe, merge in reason or substitution text,
@@ -221,6 +243,11 @@ def _merge_server_owned_fields(
                 "name": option.name,
                 "cuisine": option.cuisine,
                 "servings": preferences.servings,
+                "nutrition": (
+                    option.nutrition.model_copy(deep=True)
+                    if option.nutrition is not None
+                    else None
+                ),
                 "nutrition_notice": NUTRITION_NOTICE,
                 "allergen_notice": ALLERGEN_NOTICE,
             }

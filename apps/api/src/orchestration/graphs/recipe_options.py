@@ -13,7 +13,11 @@ from langgraph.graph.state import CompiledStateGraph
 from langsmith import tracing_context
 
 from agents.master_chef import MasterChef, OllamaMasterChef
-from agents.nutrition import NutritionAgent, OllamaNutritionAgent
+from agents.nutrition import (
+    ApiBackedNutritionAgent,
+    NutritionAgent,
+    OllamaNutritionAgent,
+)
 from core.config import Settings
 from core.errors import AppError, ErrorCode
 from core.logging import cause_chain
@@ -41,6 +45,11 @@ from services.image_generation import (
     BeastImageGenerator,
     ImageGenerator,
     UnavailableImageGenerator,
+)
+from services.nutrition_lookup import (
+    HttpNutritionLookup,
+    NutritionLookup,
+    UnavailableNutritionLookup,
 )
 from services.tracing import TracingService, trace_batch_number
 
@@ -273,60 +282,24 @@ def build_recipe_options_graph(
             return call
 
         nutrition_calls = [nutrition_call(option) for option in state["drafts"]]
-        preview_calls = (
-            [
-                preview_call(index, option)
-                for index, option in enumerate(state["drafts"])
-            ]
-            if dependencies.dish_previews_enabled
-            else []
-        )
         with trace_batch_number(state["session"].option_batch_number + 1):
-            nutrition_tasks: list[asyncio.Task[NutritionEstimate]] = []
-            preview_tasks: list[asyncio.Task[DishPreview]] = []
-            if dependencies.dish_previews_enabled:
-                for nutrition_operation, preview_operation in zip(
-                    nutrition_calls,
-                    preview_calls,
-                    strict=True,
-                ):
-                    nutrition_tasks.append(
-                        asyncio.create_task(
-                            dependencies.model_call_limiter.run(nutrition_operation)
-                        )
-                    )
-                    preview_tasks.append(
-                        asyncio.create_task(
-                            dependencies.model_call_limiter.run(preview_operation)
-                        )
-                    )
-            else:
-                nutrition_tasks = [
-                    asyncio.create_task(dependencies.model_call_limiter.run(call))
-                    for call in nutrition_calls
-                ]
-        try:
-            nutrition_results, preview_results = await _settle_enrichment_tasks(
-                nutrition_tasks,
-                preview_tasks,
-            )
-        except asyncio.CancelledError as cancellation:
-            for task in [*nutrition_tasks, *preview_tasks]:
-                task.cancel()
-            nutrition_results, preview_results = await _drain_enrichment_tasks(
-                nutrition_tasks,
-                preview_tasks,
-            )
-            await _drain_preview_cleanup(
-                _successful_preview_ids(preview_results),
-                dependencies,
-            )
-            raise cancellation
+            nutrition_tasks = [
+                asyncio.create_task(dependencies.model_call_limiter.run(call))
+                for call in nutrition_calls
+            ]
 
-        attempt_preview_ids = _successful_preview_ids(preview_results)
-        nutrition: list[NutritionEstimate | None] = []
-        nutrition_warnings: list[list[str]] = []
+        attempt_preview_ids: list[str] = []
         try:
+            try:
+                nutrition_results = await _settle_enrichment_tasks(nutrition_tasks)
+            except asyncio.CancelledError as cancellation:
+                for task in nutrition_tasks:
+                    task.cancel()
+                await _drain_enrichment_tasks(nutrition_tasks)
+                raise cancellation
+
+            nutrition: list[NutritionEstimate | None] = []
+            nutrition_warnings: list[list[str]] = []
             for index, (option, nutrition_result) in enumerate(
                 zip(state["drafts"], nutrition_results, strict=True)
             ):
@@ -348,6 +321,25 @@ def build_recipe_options_graph(
             previews: list[DishPreview | None] = []
             preview_warnings: list[list[str]] = []
             if dependencies.dish_previews_enabled:
+                preview_calls = [
+                    preview_call(index, option)
+                    for index, option in enumerate(state["drafts"])
+                ]
+                with trace_batch_number(state["session"].option_batch_number + 1):
+                    # Beast queues HTTP jobs itself; previews must not occupy LLM slots.
+                    preview_tasks = [
+                        asyncio.create_task(call()) for call in preview_calls
+                    ]
+                try:
+                    preview_results = await _settle_enrichment_tasks(preview_tasks)
+                except asyncio.CancelledError as cancellation:
+                    for task in preview_tasks:
+                        task.cancel()
+                    preview_results = await _drain_enrichment_tasks(preview_tasks)
+                    attempt_preview_ids = _successful_preview_ids(preview_results)
+                    raise cancellation
+
+                attempt_preview_ids = _successful_preview_ids(preview_results)
                 for index, (option, preview_result) in enumerate(
                     zip(state["drafts"], preview_results, strict=True)
                 ):
@@ -595,35 +587,17 @@ async def _drain_rollback(
         raise cancellation from None
 
 
-async def _settle_enrichment_tasks(
-    nutrition_tasks: list[asyncio.Task[NutritionEstimate]],
-    preview_tasks: list[asyncio.Task[DishPreview]],
-) -> tuple[
-    list[NutritionEstimate | BaseException],
-    list[DishPreview | BaseException],
-]:
-    nutrition_results = await asyncio.gather(
-        *nutrition_tasks,
-        return_exceptions=True,
-    )
-    preview_results = await asyncio.gather(
-        *preview_tasks,
-        return_exceptions=True,
-    )
-    return nutrition_results, preview_results
+async def _settle_enrichment_tasks[ResultT](
+    tasks: list[asyncio.Task[ResultT]],
+) -> list[ResultT | BaseException]:
+    return await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _drain_enrichment_tasks(
-    nutrition_tasks: list[asyncio.Task[NutritionEstimate]],
-    preview_tasks: list[asyncio.Task[DishPreview]],
-) -> tuple[
-    list[NutritionEstimate | BaseException],
-    list[DishPreview | BaseException],
-]:
+async def _drain_enrichment_tasks[ResultT](
+    tasks: list[asyncio.Task[ResultT]],
+) -> list[ResultT | BaseException]:
     """Settle every fan-out child despite repeated parent cancellation."""
-    settle_task = asyncio.create_task(
-        _settle_enrichment_tasks(nutrition_tasks, preview_tasks)
-    )
+    settle_task = asyncio.create_task(_settle_enrichment_tasks(tasks))
     while not settle_task.done():
         try:
             await asyncio.shield(settle_task)
@@ -707,6 +681,7 @@ class DevelopmentRecipeOptionsRuntime:
 
     settings: Settings
     image_generator: ImageGenerator = field(init=False)
+    nutrition_lookup: NutritionLookup = field(init=False)
     artifact_store: ArtifactStore = field(init=False)
     dependencies: RecipeOptionDependencies = field(init=False)
     graph: CompiledStateGraph = field(init=False)
@@ -720,6 +695,7 @@ class DevelopmentRecipeOptionsRuntime:
 
     def __post_init__(self) -> None:
         image_generator = _configured_image_generator(self.settings)
+        nutrition_lookup = _configured_nutrition_lookup(self.settings)
         artifact_store = ArtifactStore(
             self.settings.artifact_root,
             ttl_seconds=self.settings.session_ttl_seconds,
@@ -727,9 +703,11 @@ class DevelopmentRecipeOptionsRuntime:
         dependencies = build_real_recipe_option_dependencies(
             self.settings,
             image_generator=image_generator,
+            nutrition_lookup=nutrition_lookup,
             artifact_store=artifact_store,
         )
         object.__setattr__(self, "image_generator", image_generator)
+        object.__setattr__(self, "nutrition_lookup", nutrition_lookup)
         object.__setattr__(self, "artifact_store", artifact_store)
         object.__setattr__(self, "dependencies", dependencies)
         object.__setattr__(
@@ -766,8 +744,12 @@ class DevelopmentRecipeOptionsRuntime:
 
     async def _shutdown_owned_resources(self) -> None:
         try:
-            if isinstance(self.image_generator, BeastImageGenerator):
-                await self.image_generator.aclose()
+            try:
+                if isinstance(self.image_generator, BeastImageGenerator):
+                    await self.image_generator.aclose()
+            finally:
+                if isinstance(self.nutrition_lookup, HttpNutritionLookup):
+                    await self.nutrition_lookup.aclose()
         finally:
             await self.artifact_store.shutdown()
 
@@ -776,19 +758,27 @@ def build_real_recipe_option_dependencies(
     settings: Settings,
     *,
     image_generator: ImageGenerator | None = None,
+    nutrition_lookup: NutritionLookup | None = None,
     artifact_store: ArtifactStore | None = None,
 ) -> RecipeOptionDependencies:
     """Wire real lazy agents, a store, and one shared model-call limiter."""
     model_call_limiter = ModelCallLimiter(settings.max_concurrent_model_calls)
     tracing = TracingService(settings)
     resolved_image_generator = image_generator or _configured_image_generator(settings)
+    resolved_nutrition_lookup = nutrition_lookup or _configured_nutrition_lookup(
+        settings
+    )
     resolved_artifact_store = artifact_store or ArtifactStore(
         settings.artifact_root,
         ttl_seconds=settings.session_ttl_seconds,
     )
     return RecipeOptionDependencies(
         master_chef=OllamaMasterChef(settings=settings, tracing=tracing),
-        nutrition_agent=OllamaNutritionAgent(settings=settings, tracing=tracing),
+        nutrition_agent=_configured_nutrition_agent(
+            settings,
+            nutrition_lookup=resolved_nutrition_lookup,
+            tracing=tracing,
+        ),
         dish_previews=DishPreviewService(
             resolved_image_generator,
             resolved_artifact_store,
@@ -809,6 +799,29 @@ def _configured_image_generator(settings: Settings) -> ImageGenerator:
         model=settings.beast_image_model,
         timeout_seconds=settings.image_timeout_seconds,
         poll_interval_seconds=settings.beast_poll_interval_seconds,
+    )
+
+
+def _configured_nutrition_lookup(settings: Settings) -> NutritionLookup:
+    if not settings.nutrition_lookup_enabled or settings.nutrition_api_base_url is None:
+        return UnavailableNutritionLookup()
+    return HttpNutritionLookup(base_url=str(settings.nutrition_api_base_url))
+
+
+def _configured_nutrition_agent(
+    settings: Settings,
+    *,
+    nutrition_lookup: NutritionLookup | None = None,
+    tracing: TracingService | None = None,
+) -> NutritionAgent:
+    fallback = OllamaNutritionAgent(settings=settings, tracing=tracing)
+    if not settings.nutrition_lookup_enabled or settings.nutrition_api_base_url is None:
+        return fallback
+    return ApiBackedNutritionAgent(
+        lookup=nutrition_lookup or _configured_nutrition_lookup(settings),
+        fallback=fallback,
+        settings=settings,
+        tracing=tracing,
     )
 
 

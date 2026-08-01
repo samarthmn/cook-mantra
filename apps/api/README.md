@@ -5,9 +5,6 @@ reviewable ingredients, recipe suggestions with nutrition and generated dish
 previews, and complete recipes. Ollama runs text agents, and the Beast API
 generates dish previews.
 
-For a plain-language walkthrough of every implemented stage, read
-[`../../docs/what-was-built.md`](../../docs/what-was-built.md).
-
 ## Local setup
 
 Prerequisites:

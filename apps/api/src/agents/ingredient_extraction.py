@@ -49,6 +49,8 @@ class OllamaIngredientExtractor:
             model = get_model(
                 Agent.INGREDIENT_EXTRACTION,
                 thinking=False,
+                # Free the vision model's VRAM before the gpt-oss stages begin.
+                keep_alive=0,
                 settings=self._settings,
             ).with_structured_output(ExtractionResult)
 

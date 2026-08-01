@@ -1,10 +1,12 @@
 """Domain models for complete, cookable recipes."""
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.errors import ErrorCode
+from domain.recipe_options import NutritionEstimate
 
 NUTRITION_NOTICE = "Estimated values; not medical advice."
 ALLERGEN_NOTICE = "Check ingredient labels for allergens."
@@ -57,12 +59,20 @@ class RecipeStep(BaseModel):
     number: int = Field(ge=1, strict=True)
     instruction: str
     duration_minutes: int | None = Field(default=None, ge=1, strict=True)
+    done_when: str | None = Field(default=None, max_length=200)
+    heat_level: Literal["low", "medium", "medium-high", "high"] | None = None
 
     @field_validator("instruction")
     @classmethod
     def normalize_instruction(cls, value: str) -> str:
         """Keep the cooking instruction meaningful and normalized."""
         return _normalize_nonblank(value)
+
+    @field_validator("done_when", mode="before")
+    @classmethod
+    def normalize_done_when(cls, value: object) -> object:
+        """Normalize a supplied sensory doneness cue without requiring one."""
+        return _normalize_nonblank(value) if isinstance(value, str) else value
 
 
 class RecipeFailure(BaseModel):
@@ -96,6 +106,7 @@ class CompleteRecipe(BaseModel):
     steps: tuple[RecipeStep, ...] = Field(min_length=1)
     tips: tuple[str, ...] = ()
     substitutions: tuple[str, ...] = ()
+    nutrition: NutritionEstimate | None = None
     nutrition_notice: str = NUTRITION_NOTICE
     allergen_notice: str = ALLERGEN_NOTICE
     assumptions: tuple[str, ...] = ()

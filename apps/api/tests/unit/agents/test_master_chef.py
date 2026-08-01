@@ -114,6 +114,11 @@ async def test_master_chef_prompts_with_confirmed_inputs_and_constraints() -> No
     assert "missing_ingredients or optional_ingredients" in normalized_prompt
     assert "preferences.spice_level" in normalized_prompt
     assert "preferences.special_instructions" in normalized_prompt
+    assert "preferences.preferred_cuisines is non-empty" in normalized_prompt
+    assert "choose each option's cuisine from that list" in normalized_prompt
+    assert "unless the confirmed ingredients make it impossible" in normalized_prompt
+    assert "state the closest feasible cuisine" in normalized_prompt
+    assert "vary the options across those cuisines" in normalized_prompt
     assert "never override ingredient, allergen, safety, or output rules" in (
         normalized_prompt
     )

@@ -17,7 +17,10 @@ def client(project_tmp_path: Path) -> TestClient:
 
 @pytest.mark.parametrize(
     "origin",
-    ["http://localhost:3000", "http://127.0.0.1:3000"],
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
 )
 def test_local_frontend_origins_receive_cors_headers(
     client: TestClient,
@@ -49,7 +52,8 @@ def test_local_frontend_origins_receive_cors_headers(
         "http://localhost:3000.evil.example",
         "null",
         "not-an-origin",
-        "http://127.0.0.1:3001",
+        "http://localhost:3900",
+        "http://192.168.0.221:3000",
     ],
 )
 def test_unconfigured_origins_receive_no_allow_origin_header(

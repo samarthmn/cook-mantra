@@ -244,7 +244,7 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
     assert result.name == recipe_option().name
     # GPT-OSS needs a bounded reasoning level: True/unbounded fills the context
     # window mid-JSON, False returns an empty content channel.
-    assert calls == [(Agent.SPECIALIZED_RECIPE, "low", 8_192, 16_384, settings)]
+    assert calls == [(Agent.SPECIALIZED_RECIPE, "low", 12_288, 16_384, settings)]
     assert factory.schema is not None
     assert {
         "option_id",
@@ -267,17 +267,20 @@ async def test_agent_builds_server_owned_recipe_fields_around_model_output() -> 
     recipe_agent = OllamaSpecializedRecipeAgent(
         model=UntrustedStructuredModel([model_output])
     )
+    option = recipe_option()
 
     result = await recipe_agent.generate(
-        recipe_option(),
+        option,
         ["Tomato, ripe"],
         preferences(),
     )
 
-    assert result.option_id == recipe_option().id
-    assert result.name == recipe_option().name
-    assert result.cuisine == recipe_option().cuisine
+    assert result.option_id == option.id
+    assert result.name == option.name
+    assert result.cuisine == option.cuisine
     assert result.servings == preferences().servings
+    assert result.nutrition == option.nutrition
+    assert result.nutrition is not option.nutrition
     assert result.nutrition_notice == NUTRITION_NOTICE
     assert result.allergen_notice == ALLERGEN_NOTICE
     assert len(result.ingredients) == 3
@@ -343,13 +346,29 @@ async def test_prompt_contains_every_input_fact_and_complete_recipe_constraint()
 
     prompt_lower = " ".join(first_prompt.lower().split())
     assert "cuisine-appropriate technique" in prompt_lower
+    assert "skilled, warm chef" in prompt_lower
+    assert "imperative sentences" in prompt_lower
+    assert "1-3 scannable sentences" in prompt_lower
+    assert "what to see, hear, or smell" in prompt_lower
+    assert "do not crowd the pan so the paneer sears instead of steams" in prompt_lower
+    assert "mise-en-place" in prompt_lower
+    assert "resting, garnish, or plating" in prompt_lower
     assert "exact quantities" in prompt_lower
     assert "step numbers exactly 1 through n" in prompt_lower
-    assert "duration_minutes for every step" in prompt_lower
-    assert "requested servings" in prompt_lower
-    assert "preferences.spice_level and preferences.special_instructions" in (
+    assert "for every step, include duration_minutes" in prompt_lower
+    assert "done_when" in prompt_lower
+    assert "single clearest sensory doneness test" in prompt_lower
+    assert "short phrase, not a sentence about timing" in prompt_lower
+    assert "heat_level" in prompt_lower
+    assert '"low", "medium", "medium-high", or "high"' in prompt_lower
+    assert "leave done_when and heat_level null when they are not meaningful" in (
         prompt_lower
     )
+    assert "requested servings" in prompt_lower
+    assert "preferences.spice_level into concrete choices" in prompt_lower
+    assert "how much chile to use" in prompt_lower
+    assert "whether to deseed it, and when to add it" in prompt_lower
+    assert "preferences.special_instructions" in prompt_lower
     assert "quantities, technique, and steps" in prompt_lower
     assert "total cooking time" in prompt_lower
     assert "tips" in prompt_lower

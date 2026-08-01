@@ -15,7 +15,12 @@ from agents.specialized_recipe import (
 from core.config import PROJECT_ROOT, Settings
 from core.errors import AppError, ErrorCode
 from domain.ingredients import Ingredient, IngredientSource
-from domain.recipe_options import Difficulty, RecipeOption, RecipePreferences
+from domain.recipe_options import (
+    Difficulty,
+    NutritionEstimate,
+    RecipeOption,
+    RecipePreferences,
+)
 from domain.recipe_service import (
     RecipeGenerationContext,
     begin_recipe_generation,
@@ -69,6 +74,7 @@ def complete_recipe(option: RecipeOption, *, servings: int = 2) -> CompleteRecip
             ),
         ),
         steps=(RecipeStep(number=1, instruction="Cook until tender."),),
+        nutrition=option.nutrition,
     )
 
 
@@ -221,6 +227,26 @@ class CountingLimiter(ModelCallLimiter):
         return await super().run(operation)
 
 
+class RecordingNutritionAgent:
+    def __init__(
+        self,
+        outcome: NutritionEstimate | BaseException,
+    ) -> None:
+        self.outcome = outcome
+        self.calls: list[dict[str, str] | None] = []
+
+    async def estimate(
+        self,
+        option: RecipeOption,
+        preferences: RecipePreferences,
+        ingredient_quantities: dict[str, str] | None = None,
+    ) -> NutritionEstimate:
+        self.calls.append(ingredient_quantities)
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
 class PausingRollbackStore(SessionStore):
     def __init__(self) -> None:
         super().__init__(ttl_seconds=21_600)
@@ -363,6 +389,7 @@ async def make_generation(
     store: SessionStore | None = None,
     selected_ids: tuple[str, ...] = ("option-1", "option-2"),
     previous_stage: SessionStage = SessionStage.OPTIONS_READY,
+    option_nutrition: NutritionEstimate | None = None,
 ) -> GenerationFixture:
     resolved_store = store or SessionStore(ttl_seconds=21_600)
     created = await resolved_store.create(stage=previous_stage)
@@ -371,6 +398,8 @@ async def make_generation(
         stored_option("option-2", "Onion Soup", cuisine="French"),
         stored_option("option-3", "Spinach Rice"),
     ]
+    if option_nutrition is not None:
+        options[0] = options[0].model_copy(update={"nutrition": option_nutrition})
     prior_recipe = (
         {"option-1": complete_recipe(options[0])}
         if previous_stage is SessionStage.RECIPES_READY
@@ -452,11 +481,15 @@ def graph_for(
     *,
     limiter: ModelCallLimiter | None = None,
     progress: Callable[[int], Awaitable[None]] | None = None,
+    nutrition_agent: RecordingNutritionAgent | None = None,
+    nutrition_lookup_enabled: bool = False,
 ):
     dependencies = CompleteRecipeDependencies(
         agent=agent,
         session_store=fixture.store,
         model_call_limiter=limiter or ModelCallLimiter(max_concurrent_calls=2),
+        nutrition_agent=nutrition_agent,
+        nutrition_lookup_enabled=nutrition_lookup_enabled,
     )
     if progress is not None:
         dependencies = CompleteRecipeDependencies(
@@ -464,6 +497,8 @@ def graph_for(
             session_store=fixture.store,
             model_call_limiter=dependencies.model_call_limiter,
             progress=progress,
+            nutrition_agent=nutrition_agent,
+            nutrition_lookup_enabled=nutrition_lookup_enabled,
         )
     return build_complete_recipes_graph(dependencies)
 
@@ -501,6 +536,102 @@ async def test_selected_options_run_concurrently_through_the_shared_limit() -> N
     assert limiter.call_count == 3
     assert sorted(agent.calls) == ["option-1", "option-2", "option-3"]
     assert len({task for *_, task in agent.calls}) == 3
+
+
+@pytest.mark.asyncio
+async def test_enabled_lookup_recomputes_complete_recipe_with_exact_quantities() -> (
+    None
+):
+    carried = NutritionEstimate(
+        calories_kcal=200,
+        protein_g=5,
+        carbohydrates_g=30,
+        fat_g=7,
+    )
+    recomputed = NutritionEstimate(
+        calories_kcal=180,
+        protein_g=6,
+        carbohydrates_g=28,
+        fat_g=5,
+    )
+    fixture = await make_generation(
+        selected_ids=("option-1",),
+        option_nutrition=carried,
+    )
+    nutrition_agent = RecordingNutritionAgent(recomputed)
+    limiter = CountingLimiter(max_concurrent_calls=2)
+    generated_recipe = complete_recipe(fixture.selected[0])
+    generated_recipe = generated_recipe.model_copy(
+        update={
+            "ingredients": (
+                *generated_recipe.ingredients,
+                RecipeIngredient(
+                    name="Coriander",
+                    quantity="2 tbsp",
+                    availability=IngredientAvailability.OPTIONAL,
+                ),
+            )
+        }
+    )
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": generated_recipe}),
+        limiter=limiter,
+        nutrition_agent=nutrition_agent,
+        nutrition_lookup_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    assert result["complete_recipes"][0].nutrition == recomputed
+    assert nutrition_agent.calls == [{"Tomato": "3 medium"}]
+    assert limiter.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_recompute_failure_keeps_carried_nutrition() -> None:
+    carried = NutritionEstimate(
+        calories_kcal=200,
+        protein_g=5,
+        carbohydrates_g=30,
+        fat_g=7,
+    )
+    fixture = await make_generation(
+        selected_ids=("option-1",),
+        option_nutrition=carried,
+    )
+    nutrition_agent = RecordingNutritionAgent(RuntimeError("lookup failed"))
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+        nutrition_agent=nutrition_agent,
+        nutrition_lookup_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    assert result["complete_recipes"][0].nutrition == carried
+    assert nutrition_agent.calls == [{"Tomato": "3 medium"}]
+
+
+@pytest.mark.asyncio
+async def test_disabled_lookup_makes_no_complete_recipe_nutrition_call() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+    nutrition_agent = RecordingNutritionAgent(
+        NutritionEstimate(
+            calories_kcal=180,
+            protein_g=6,
+            carbohydrates_g=28,
+            fat_g=5,
+        )
+    )
+
+    await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+        nutrition_agent=nutrition_agent,
+        nutrition_lookup_enabled=False,
+    ).ainvoke(invocation(fixture))
+
+    assert nutrition_agent.calls == []
 
 
 @pytest.mark.asyncio

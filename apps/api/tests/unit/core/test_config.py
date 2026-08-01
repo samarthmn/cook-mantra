@@ -83,6 +83,37 @@ def test_disabled_previews_allow_missing_beast_configuration() -> None:
     assert settings.beast_api_key is None
 
 
+def test_nutrition_lookup_is_disabled_by_default() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.nutrition_lookup_enabled is False
+    assert settings.nutrition_api_base_url is None
+
+
+def test_enabled_nutrition_lookup_requires_base_url() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="nutrition lookup requires nutrition_api_base_url when enabled",
+    ):
+        Settings(
+            _env_file=None,
+            nutrition_lookup_enabled=True,
+            nutrition_api_base_url=None,
+        )
+
+
+def test_enabled_nutrition_lookup_accepts_base_url() -> None:
+    settings = Settings(
+        _env_file=None,
+        nutrition_lookup_enabled=True,
+        nutrition_api_base_url="http://nutrition.test:5900",
+    )
+
+    assert str(settings.nutrition_api_base_url).rstrip("/") == (
+        "http://nutrition.test:5900"
+    )
+
+
 def test_enabled_previews_accept_complete_beast_configuration() -> None:
     settings = Settings(
         _env_file=None,

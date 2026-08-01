@@ -27,17 +27,36 @@ COMPLETE_RECIPE_EXAMPLE = {
     "steps": [
         {
             "number": 1,
-            "instruction": "Cook the pasta until tender.",
+            "instruction": (
+                "Boil the pasta in well-salted water, stirring once so it does not "
+                "stick. Taste a piece near the end; it should retain a gentle bite."
+            ),
             "duration_minutes": 10,
+            "done_when": "pasta tender with a gentle bite at the center",
+            "heat_level": "high",
         },
         {
             "number": 2,
-            "instruction": "Simmer the tomatoes, then combine with pasta.",
+            "instruction": (
+                "Saute the tomatoes until they slump and smell sweet, then emulsify "
+                "the sauce with the pasta and a splash of reserved cooking water."
+            ),
             "duration_minutes": 15,
+            "done_when": "sauce glossy and clinging evenly to the pasta",
+            "heat_level": "medium",
         },
     ],
     "tips": ["Reserve a little pasta water for the sauce."],
     "substitutions": ["Use coriander if basil is unavailable."],
+    "nutrition": {
+        "calories_kcal": 420,
+        "protein_g": 16.5,
+        "carbohydrates_g": 55.0,
+        "fat_g": 14.0,
+        "diet_tags": ["vegetarian"],
+        "allergen_warnings": ["wheat/gluten"],
+        "disclaimer": "Estimated values; not medical advice.",
+    },
     "nutrition_notice": "Estimated values; not medical advice.",
     "allergen_notice": "Check ingredient labels for allergens.",
     "assumptions": ["Salt and cooking oil are available."],

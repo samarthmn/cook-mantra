@@ -4,6 +4,7 @@ from typing import Protocol
 
 import httpx
 from langchain_core.exceptions import OutputParserException
+from ollama import ResponseError
 from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
@@ -49,6 +50,14 @@ async def invoke_structured[ResultT](
                     code=ErrorCode.OPERATION_TIMED_OUT,
                     message="The model operation timed out.",
                     status_code=504,
+                    retryable=True,
+                ) from error
+        except (httpx.HTTPError, ResponseError) as error:
+            if attempt + 1 == attempt_limit:
+                raise AppError(
+                    code=ErrorCode.OLLAMA_UNAVAILABLE,
+                    message="The model server could not be reached.",
+                    status_code=503,
                     retryable=True,
                 ) from error
         except ValueError as error:

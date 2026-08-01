@@ -9,6 +9,25 @@ from domain.jobs import JobOperation
 
 
 @pytest.mark.asyncio
+async def test_lifespan_closes_owned_nutrition_lookup_client(
+    project_tmp_path: Path,
+) -> None:
+    app = create_app(
+        settings=Settings(
+            _env_file=None,
+            artifact_root=project_tmp_path / "nutrition-client",
+            nutrition_lookup_enabled=True,
+            nutrition_api_base_url="http://nutrition.test:5900",
+        )
+    )
+
+    async with app.router.lifespan_context(app):
+        assert app.state.owned_nutrition_lookup._client.is_closed is False
+
+    assert app.state.owned_nutrition_lookup._client.is_closed is True
+
+
+@pytest.mark.asyncio
 async def test_lifespan_uses_configured_cleanup_and_drains_blocked_work(
     project_tmp_path: Path,
 ) -> None:

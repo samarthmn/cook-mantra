@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from agents.ingredient_extraction import IngredientExtractor, OllamaIngredientExtractor
 from agents.master_chef import MasterChef, OllamaMasterChef
-from agents.nutrition import NutritionAgent, OllamaNutritionAgent
+from agents.nutrition import NutritionAgent
 from agents.specialized_recipe import (
     OllamaSpecializedRecipeAgent,
     SpecializedRecipeAgent,
@@ -34,6 +34,7 @@ from orchestration.graphs.ingredient_extraction import (
 )
 from orchestration.graphs.recipe_options import (
     RecipeOptionDependencies,
+    _configured_nutrition_agent,
     build_recipe_options_runner,
 )
 from orchestration.job_runner import JobRunner
@@ -47,6 +48,11 @@ from services.image_generation import (
     BeastImageGenerator,
     ImageGenerator,
     UnavailableImageGenerator,
+)
+from services.nutrition_lookup import (
+    HttpNutritionLookup,
+    NutritionLookup,
+    UnavailableNutritionLookup,
 )
 from services.ollama_health import OllamaHealthService
 from services.tracing import TracingService
@@ -94,11 +100,16 @@ async def _shutdown_runtime_resources(app: FastAPI) -> None:
             await app.state.job_runner.shutdown()
         finally:
             try:
-                owned_image_generator = app.state.owned_image_generator
-                if owned_image_generator is not None:
-                    await owned_image_generator.aclose()
+                owned_nutrition_lookup = app.state.owned_nutrition_lookup
+                if owned_nutrition_lookup is not None:
+                    await owned_nutrition_lookup.aclose()
             finally:
-                await app.state.artifact_store.shutdown()
+                try:
+                    owned_image_generator = app.state.owned_image_generator
+                    if owned_image_generator is not None:
+                        await owned_image_generator.aclose()
+                finally:
+                    await app.state.artifact_store.shutdown()
 
 
 def create_app(
@@ -107,6 +118,8 @@ def create_app(
     ingredient_extractor: IngredientExtractor | None = None,
     master_chef: MasterChef | None = None,
     nutrition_agent: NutritionAgent | None = None,
+    nutrition_lookup: NutritionLookup | None = None,
+    nutrition_client: httpx.AsyncClient | None = None,
     dish_previews: DishPreviewService | None = None,
     image_generator: ImageGenerator | None = None,
     image_client: httpx.AsyncClient | None = None,
@@ -160,14 +173,28 @@ def create_app(
             tracing=resolved_tracing_service,
         )
     )
-    resolved_nutrition_agent = (
-        nutrition_agent
-        if nutrition_agent is not None
-        else OllamaNutritionAgent(
-            settings=resolved_settings,
+    resolved_nutrition_lookup = nutrition_lookup
+    owned_nutrition_lookup: HttpNutritionLookup | None = None
+    if nutrition_agent is None:
+        if resolved_nutrition_lookup is None:
+            if (
+                resolved_settings.nutrition_lookup_enabled
+                and resolved_settings.nutrition_api_base_url is not None
+            ):
+                owned_nutrition_lookup = HttpNutritionLookup(
+                    base_url=str(resolved_settings.nutrition_api_base_url),
+                    client=nutrition_client,
+                )
+                resolved_nutrition_lookup = owned_nutrition_lookup
+            else:
+                resolved_nutrition_lookup = UnavailableNutritionLookup()
+        resolved_nutrition_agent = _configured_nutrition_agent(
+            resolved_settings,
+            nutrition_lookup=resolved_nutrition_lookup,
             tracing=resolved_tracing_service,
         )
-    )
+    else:
+        resolved_nutrition_agent = nutrition_agent
     resolved_image_generator = image_generator
     owned_image_generator: BeastImageGenerator | None = None
     if dish_previews is None:
@@ -219,6 +246,8 @@ def create_app(
         agent=resolved_specialized_recipe_agent,
         session_store=session_store,
         model_call_limiter=model_call_limiter,
+        nutrition_agent=resolved_nutrition_agent,
+        nutrition_lookup_enabled=resolved_settings.nutrition_lookup_enabled,
     )
     complete_recipes_runner = build_complete_recipes_runner(
         complete_recipes_dependencies
@@ -256,6 +285,9 @@ def create_app(
     app.state.ingredient_extraction_runner = ingredient_extraction_runner
     app.state.image_generator = resolved_image_generator
     app.state.owned_image_generator = owned_image_generator
+    app.state.nutrition_lookup = resolved_nutrition_lookup
+    app.state.owned_nutrition_lookup = owned_nutrition_lookup
+    app.state.nutrition_agent = resolved_nutrition_agent
     app.state.dish_preview_service = resolved_dish_previews
     app.state.recipe_options_dependencies = recipe_options_dependencies
     app.state.recipe_options_runner = recipe_options_runner

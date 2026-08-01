@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langsmith import tracing_context
 
+from agents.nutrition import ApiBackedNutritionAgent, NutritionAgent
 from agents.specialized_recipe import (
     OllamaSpecializedRecipeAgent,
     SpecializedRecipeAgent,
@@ -25,7 +26,7 @@ from domain.recipe_service import (
     restore_after_recipe_failure,
     validate_recipe_generation,
 )
-from domain.recipes import CompleteRecipe, RecipeFailure
+from domain.recipes import CompleteRecipe, IngredientAvailability, RecipeFailure
 from domain.session_service import confirmed_ingredient_names
 from domain.sessions import Session, SessionStage
 from repositories.session_store import SessionStore
@@ -92,6 +93,8 @@ class CompleteRecipeDependencies:
     session_store: SessionStore
     model_call_limiter: ModelCallLimiter
     progress: ProgressReporter = _ignore_progress
+    nutrition_agent: NutritionAgent | None = None
+    nutrition_lookup_enabled: bool = False
 
 
 class _CommitSucceededDuringCancellation(Exception):
@@ -253,6 +256,40 @@ async def _generate_one(
                 warnings="error",
             )
         )
+        if (
+            dependencies.nutrition_lookup_enabled
+            and dependencies.nutrition_agent is not None
+        ):
+            try:
+                ingredient_quantities = {
+                    ingredient.name: ingredient.quantity
+                    for ingredient in detached.ingredients
+                    if ingredient.availability is not IngredientAvailability.OPTIONAL
+                }
+                nutrition_agent = dependencies.nutrition_agent
+
+                async def estimate_nutrition():
+                    if isinstance(nutrition_agent, ApiBackedNutritionAgent):
+                        return await nutrition_agent.estimate_from_lookup(
+                            option,
+                            preferences.model_copy(deep=True),
+                            ingredient_quantities,
+                        )
+                    return await nutrition_agent.estimate(
+                        option,
+                        preferences.model_copy(deep=True),
+                        ingredient_quantities,
+                    )
+
+                nutrition = await dependencies.model_call_limiter.run(
+                    estimate_nutrition
+                )
+                detached = detached.model_copy(
+                    deep=True,
+                    update={"nutrition": nutrition},
+                )
+            except Exception:
+                pass
         return option.id, detached
     except AppError as error:
         return option.id, _failure_from_app_error(option.id, error)
@@ -509,6 +546,8 @@ def build_real_complete_recipe_dependencies(
     """Wire one lazy real agent, configured limiter, and in-memory store."""
     resolved_settings = settings or Settings(_env_file=None)
     tracing = TracingService(resolved_settings)
+    from orchestration.graphs.recipe_options import _configured_nutrition_agent
+
     return CompleteRecipeDependencies(
         agent=OllamaSpecializedRecipeAgent(
             settings=resolved_settings,
@@ -518,6 +557,11 @@ def build_real_complete_recipe_dependencies(
         model_call_limiter=ModelCallLimiter(
             resolved_settings.max_concurrent_model_calls
         ),
+        nutrition_agent=_configured_nutrition_agent(
+            resolved_settings,
+            tracing=tracing,
+        ),
+        nutrition_lookup_enabled=resolved_settings.nutrition_lookup_enabled,
     )
 
 

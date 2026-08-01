@@ -3,6 +3,7 @@ import asyncio
 import httpx
 import pytest
 from langchain_core.exceptions import OutputParserException
+from ollama import ResponseError
 from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
@@ -118,6 +119,59 @@ async def test_exhausted_transient_timeouts_map_to_operation_timed_out() -> None
 
     assert raised.value.code is ErrorCode.OPERATION_TIMED_OUT
     assert raised.value.status_code == 504
+    assert raised.value.retryable is True
+    assert model.attempts == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_errors",
+    [
+        pytest.param(
+            [
+                httpx.ConnectError(
+                    "first connection failure",
+                    request=httpx.Request("POST", "http://ollama.test/api/chat"),
+                ),
+                httpx.ConnectError(
+                    "second connection failure",
+                    request=httpx.Request("POST", "http://ollama.test/api/chat"),
+                ),
+            ],
+            id="connect-error",
+        ),
+        pytest.param(
+            [
+                httpx.RemoteProtocolError(
+                    "first protocol failure",
+                    request=httpx.Request("POST", "http://ollama.test/api/chat"),
+                ),
+                httpx.RemoteProtocolError(
+                    "second protocol failure",
+                    request=httpx.Request("POST", "http://ollama.test/api/chat"),
+                ),
+            ],
+            id="remote-protocol-error",
+        ),
+        pytest.param(
+            [
+                ResponseError("first server failure", status_code=500),
+                ResponseError("second server failure", status_code=500),
+            ],
+            id="response-error",
+        ),
+    ],
+)
+async def test_model_server_failures_are_retried_then_map_to_ollama_unavailable(
+    model_errors: list[Exception],
+) -> None:
+    model = SequencedStructuredModel(model_errors)
+
+    with pytest.raises(AppError) as raised:
+        await invoke_structured(model, ["extract ingredients"])
+
+    assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
+    assert raised.value.status_code == 503
     assert raised.value.retryable is True
     assert model.attempts == 2
 

@@ -23,6 +23,7 @@ def get_model(
     thinking: bool | Literal["low", "medium", "high"] | None = None,
     num_predict: int | None = None,
     num_ctx: int | None = None,
+    keep_alive: int | str | None = None,
     timeout: float | None = None,
     settings: Settings | None = None,
 ) -> BaseChatModel:
@@ -39,6 +40,8 @@ def get_model(
         num_ctx: Context window size. None uses the configured
             `llm_num_ctx` rather than Ollama's 4k default, which is too small
             to hold a prompt plus a full structured-output response.
+        keep_alive: How long Ollama keeps the model loaded. None leaves
+            Ollama's default in place.
         timeout: Request timeout in seconds.
         settings: Override configuration, primarily for tests.
 
@@ -61,6 +64,7 @@ def get_model(
         reasoning=thinking,
         num_predict=num_predict,
         num_ctx=resolved_num_ctx,
+        keep_alive=keep_alive,
         client_kwargs={"timeout": resolved_timeout},
     )
 

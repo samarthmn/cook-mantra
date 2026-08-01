@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     beast_base_url: AnyHttpUrl | None = None
     beast_api_key: SecretStr | None = None
     dish_previews_enabled: bool = False
+    # Local ingredient nutrition lookup is independently opt-in.
+    nutrition_api_base_url: AnyHttpUrl | None = None
+    nutrition_lookup_enabled: bool = False
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     cors_origins: list[str] = [
         "http://localhost:3000",
@@ -129,6 +132,15 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "dish previews require both beast_base_url and beast_api_key"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_nutrition_lookup_configuration(self) -> "Settings":
+        """Require the nutrition endpoint when lookup is enabled."""
+        if self.nutrition_lookup_enabled and self.nutrition_api_base_url is None:
+            raise ValueError(
+                "nutrition lookup requires nutrition_api_base_url when enabled"
             )
         return self
 

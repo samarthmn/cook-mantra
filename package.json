@@ -3,6 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "scripts": {
+    "api:dev": "cd apps/api && uv run uvicorn main:app",
     "web:build": "pnpm --filter @cook-mantra/web build",
     "web:dev": "pnpm --filter @cook-mantra/web dev",
     "web:format": "pnpm --filter @cook-mantra/web format",

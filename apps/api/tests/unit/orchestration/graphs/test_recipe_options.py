@@ -430,7 +430,7 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
     assert saved.excluded_recipe_names == {"tomato curry", "tomato rice"}
     assert nutrition.completed_names == ["Tomato Curry", "Tomato Rice"]
     assert previews.completed_names == ["Tomato Curry", "Tomato Rice"]
-    assert limiter.call_count == 5
+    assert limiter.call_count == 3
     assert progress_updates == sorted(progress_updates)
     assert progress_updates == [10, 15, 45, 80]
     assert observed_before_commit is not None
@@ -773,7 +773,7 @@ async def test_graph_attaches_the_target_batch_to_each_text_model_call() -> None
     assert nutrition.configs[0]["metadata"]["batch_number"] == 1
     assert result["stage"] is SessionStage.OPTIONS_READY
     assert progress_updates == [10, 15, 45, 80]
-    assert limiter.call_count == 3
+    assert limiter.call_count == 2
 
 
 @pytest.mark.asyncio
