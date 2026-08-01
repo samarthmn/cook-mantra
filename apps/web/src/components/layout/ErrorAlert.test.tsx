@@ -11,6 +11,11 @@ describe("ErrorAlert", () => {
     const user = userEvent.setup();
     const onRetry = vi.fn();
     const onDismiss = vi.fn();
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
     render(
       <ErrorAlert
         title="That took too long"
@@ -25,6 +30,12 @@ describe("ErrorAlert", () => {
     const dismiss = within(alert).getByRole("button", { name: "Dismiss" });
 
     expect(alert).toHaveClass("alert");
+    expect(alert).toHaveAttribute("tabindex", "-1");
+    expect(alert).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: "nearest",
+      behavior: "smooth",
+    });
     expect(alert.querySelector("svg.alert-icon")).toHaveAttribute(
       "aria-hidden",
       "true",
@@ -42,5 +53,33 @@ describe("ErrorAlert", () => {
     await user.click(dismiss);
     expect(onRetry).toHaveBeenCalledOnce();
     expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("uses non-animated scrolling when reduced motion is requested", () => {
+    vi.spyOn(window, "matchMedia").mockImplementation(
+      (query) =>
+        ({
+          matches: query === "(prefers-reduced-motion: reduce)",
+          media: query,
+          onchange: null,
+          addEventListener() {},
+          removeEventListener() {},
+          addListener() {},
+          removeListener() {},
+          dispatchEvent: () => false,
+        }) as MediaQueryList,
+    );
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    render(<ErrorAlert title="Offline" message="Try again later." />);
+
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: "nearest",
+      behavior: "auto",
+    });
   });
 });

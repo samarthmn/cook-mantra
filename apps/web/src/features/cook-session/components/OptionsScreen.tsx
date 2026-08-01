@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useState } from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
   ArrowRight,
   Check,
   Clock3,
@@ -33,6 +34,11 @@ function plural(value: number, singular: string, pluralForm = `${singular}s`) {
   return value === 1 ? singular : pluralForm;
 }
 
+const allergenListFormat = new Intl.ListFormat("en", {
+  style: "long",
+  type: "conjunction",
+});
+
 export function OptionsScreen({
   options,
   selectedOptionIds,
@@ -61,7 +67,7 @@ export function OptionsScreen({
         intro={
           isEmpty
             ? "Nothing here yet. A short ingredient list is the usual reason — the agents only suggest dishes they can actually see you cooking."
-            : "Pick one or more. Every image is an AI illustration — your dish may look different. Nutrition is an estimate, not medical advice."
+            : "Pick one or more. Every photo is AI-generated — your dish may look different. Nutrition is an estimate, not medical advice."
         }
       />
 
@@ -100,7 +106,8 @@ export function OptionsScreen({
 
       <div className="screen-secondary-actions">
         <button className="btn btn-ghost" type="button" onClick={onEditIngredients}>
-          ← Edit ingredients
+          <ArrowLeft aria-hidden="true" size={16} />
+          Edit ingredients
         </button>
       </div>
 
@@ -127,7 +134,7 @@ export function OptionsScreen({
               {ideasExhausted
                 ? "No more ideas"
                 : moreIdeasUnavailableReason
-                  ? "Start fresh for more"
+                  ? "More ideas unavailable"
                   : isEmpty
                     ? "Try again"
                     : "More ideas"}
@@ -173,7 +180,7 @@ function NoIdeasState({
       <p className="empty-state-body">
         {thinPantry
           ? `${ingredientCount === 2 ? "Two ingredients is a thin pantry" : `${ingredientCount} ${plural(ingredientCount, "ingredient")} is a thin pantry`} — there is no honest dish to build from it. Add a few more and the ideas come back.`
-          : "Your ingredients are fine, but nothing came back that respects every preference. Relax a preference — more time, a wider diet, fewer allergen exclusions — or add another ingredient, then try again."}
+          : "Your ingredients are fine, but nothing came back that respects every preference. Relax a preference — a wider diet, fewer allergen exclusions, a different spice level — or add another ingredient, then try again."}
       </p>
       {thinPantry ? (
         <ul className="empty-state-hints">
@@ -229,9 +236,9 @@ function OptionCard({
       <span className="option-card-media">
         {previewAvailable && previewArtifactId ? (
           <Image
-            className="option-card-image grayscale-media"
+            className="option-card-image"
             src={previewUrl(previewArtifactId)}
-            alt={`${option.name}, AI-generated illustration`}
+            alt={`${option.name}, AI-generated image`}
             fill
             sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
             unoptimized
@@ -241,7 +248,7 @@ function OptionCard({
           <UtensilsCrossed className="option-card-placeholder" aria-hidden="true" />
         )}
         {previewAvailable && previewArtifactId ? (
-          <span className="tag tag-neutral option-card-ai-label">AI illustration</span>
+          <span className="tag tag-neutral option-card-ai-label">AI image</span>
         ) : null}
         <span className="option-card-selected-mark" aria-hidden="true">
           <Check />
@@ -307,7 +314,7 @@ function OptionCard({
         {nutrition?.allergenWarnings.length ? (
           <span className="option-card-honesty option-card-allergens">
             <AlertTriangle aria-hidden="true" size={14} />
-            Contains {nutrition.allergenWarnings.join(" and ")}
+            May contain {allergenListFormat.format(nutrition.allergenWarnings)}
           </span>
         ) : null}
         {option.warnings.length ? (

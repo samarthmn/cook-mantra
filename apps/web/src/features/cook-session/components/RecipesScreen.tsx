@@ -1,7 +1,14 @@
 "use client";
 
-import { AlertTriangle, Check, Clock3, UsersRound } from "lucide-react";
-import type { KeyboardEvent } from "react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Check,
+  Clock3,
+  RefreshCw,
+  UsersRound,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import type {
   CompleteRecipeView,
@@ -21,6 +28,7 @@ interface RecipesScreenProps {
   completedSteps: Record<string, number[]>;
   onSetActiveRecipe: (optionId: string) => void;
   onToggleStep: (optionId: string, stepNumber: number) => void;
+  onRetryFailed: () => void;
   onBack: () => void;
   onReset: () => void;
 }
@@ -38,13 +46,55 @@ export function RecipesScreen({
   completedSteps,
   onSetActiveRecipe,
   onToggleStep,
+  onRetryFailed,
   onBack,
   onReset,
 }: RecipesScreenProps) {
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const startOverButtonRef = useRef<HTMLButtonElement>(null);
+  const cancelResetButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmResetButtonRef = useRef<HTMLButtonElement>(null);
   const recipeList = Object.values(recipes);
   const failureList = Object.values(failures);
+  const optionNames = useMemo(
+    () => new Map(options.map((option) => [option.id, option.name])),
+    [options],
+  );
   const activeRecipe =
     (activeRecipeId ? recipes[activeRecipeId] : undefined) ?? recipeList[0];
+
+  useEffect(() => {
+    if (!resetDialogOpen) return;
+
+    cancelResetButtonRef.current?.focus();
+    function handleDialogKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelReset();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const first = cancelResetButtonRef.current;
+      const last = confirmResetButtonRef.current;
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleDialogKeyDown);
+    return () => document.removeEventListener("keydown", handleDialogKeyDown);
+  }, [resetDialogOpen]);
+
+  function cancelReset() {
+    setResetDialogOpen(false);
+    startOverButtonRef.current?.focus({ preventScroll: true });
+  }
 
   if (!activeRecipe) {
     return (
@@ -54,15 +104,16 @@ export function RecipesScreen({
           title={<span id="recipes-title">No recipes returned</span>}
           intro="The recipe agents did not return a usable recipe. Your selected ideas are still here, so you can go back and try again."
         />
-        {failureList.map((failure) => (
-          <div className="notice notice-accent" key={failure.optionId}>
-            <AlertTriangle className="notice-icon" aria-hidden="true" />
-            {failure.message}
-          </div>
-        ))}
+        <RecipeFailuresNotice
+          completedCount={0}
+          failures={failureList}
+          optionNames={optionNames}
+          onRetryFailed={onRetryFailed}
+        />
         <div className="recipe-footer">
           <button className="btn btn-secondary btn-lg" type="button" onClick={onBack}>
-            ← Back to recipe ideas
+            <ArrowLeft aria-hidden="true" size={16} />
+            Back to recipe ideas
           </button>
         </div>
       </section>
@@ -103,12 +154,12 @@ export function RecipesScreen({
       />
 
       {failureList.length ? (
-        <div className="notice notice-accent" role="status">
-          <AlertTriangle className="notice-icon" aria-hidden="true" />
-          {recipeList.length} {plural(recipeList.length, "recipe")} completed;{" "}
-          {failureList.length} {plural(failureList.length, "agent")} could not finish.
-          Your successful recipes are ready below.
-        </div>
+        <RecipeFailuresNotice
+          completedCount={recipeList.length}
+          failures={failureList}
+          optionNames={optionNames}
+          onRetryFailed={onRetryFailed}
+        />
       ) : null}
 
       {recipeList.length > 1 ? (
@@ -295,12 +346,63 @@ export function RecipesScreen({
 
       <div className="recipe-footer">
         <button className="btn btn-secondary btn-lg" type="button" onClick={onBack}>
-          ← Back to recipe ideas
+          <ArrowLeft aria-hidden="true" size={16} />
+          Back to recipe ideas
         </button>
-        <button className="btn btn-ghost btn-lg" type="button" onClick={onReset}>
+        <button
+          ref={startOverButtonRef}
+          className="btn btn-ghost btn-lg"
+          type="button"
+          aria-haspopup="dialog"
+          aria-expanded={resetDialogOpen}
+          onClick={() => setResetDialogOpen(true)}
+        >
           Start over with a new photo
         </button>
       </div>
+
+      {resetDialogOpen ? (
+        <div
+          className="dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) cancelReset();
+          }}
+        >
+          <div
+            className="dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="start-over-dialog-title"
+            aria-describedby="start-over-dialog-body"
+          >
+            <h2 className="dialog-title" id="start-over-dialog-title">
+              Start over with a new photo?
+            </h2>
+            <p className="dialog-body" id="start-over-dialog-body">
+              Starting over clears all recipes, chosen ideas, and checked steps. Your
+              pantry defaults are kept.
+            </p>
+            <div className="dialog-actions">
+              <button
+                ref={cancelResetButtonRef}
+                className="btn btn-primary"
+                type="button"
+                onClick={cancelReset}
+              >
+                Cancel
+              </button>
+              <button
+                ref={confirmResetButtonRef}
+                className="btn btn-secondary"
+                type="button"
+                onClick={onReset}
+              >
+                Start over
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -312,6 +414,55 @@ function NutritionItem({ value, label }: { value: number | string; label: string
       <span className="nutrition-label">{label}</span>
     </span>
   );
+}
+
+function RecipeFailuresNotice({
+  completedCount,
+  failures,
+  optionNames,
+  onRetryFailed,
+}: {
+  completedCount: number;
+  failures: RecipeFailureView[];
+  optionNames: Map<string, string>;
+  onRetryFailed: () => void;
+}) {
+  if (failures.length === 0) return null;
+  const hasRetryableFailure = failures.some((failure) => failure.retryable);
+
+  return (
+    <div className="notice notice-accent recipe-failures" role="status">
+      <AlertTriangle className="notice-icon" aria-hidden="true" />
+      <div className="recipe-failure-body">
+        <strong>
+          {completedCount > 0
+            ? `${completedCount} ${plural(completedCount, "recipe")} completed; ${failures.length} ${plural(failures.length, "agent")} could not finish.`
+            : `${failures.length} ${plural(failures.length, "recipe agent")} could not finish.`}
+        </strong>
+        {completedCount > 0 ? <p>Your successful recipes are ready below.</p> : null}
+        <ul className="recipe-failure-list">
+          {failures.map((failure) => (
+            <li key={failure.optionId}>
+              <strong>{optionNames.get(failure.optionId) ?? failure.optionId}:</strong>{" "}
+              {safeFailureMessage(failure.message)}
+            </li>
+          ))}
+        </ul>
+        {hasRetryableFailure ? (
+          <button className="btn btn-secondary" type="button" onClick={onRetryFailed}>
+            <RefreshCw aria-hidden="true" size={16} />
+            Retry failed recipes
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function safeFailureMessage(message: string): string {
+  const normalized = message.replaceAll(/\p{C}/gu, " ").trim().replaceAll(/\s+/g, " ");
+  if (!normalized) return "The recipe agent did not return a usable recipe.";
+  return normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
 }
 
 function ingredientStatus(
@@ -332,9 +483,16 @@ function ingredientStatus(
     return confirmedName.includes(recipeName) || recipeName.includes(confirmedName);
   })?.source;
 
-  return source === "pantry_suggestion"
-    ? { label: "pantry", className: "tag-accent" }
-    : { label: "confirmed", className: "tag-neutral" };
+  if (source === "detected") {
+    return { label: "detected", className: "tag-neutral" };
+  }
+  if (source === "pantry_suggestion") {
+    return { label: "pantry", className: "tag-neutral" };
+  }
+  if (source === "user_added") {
+    return { label: "added by you", className: "tag-neutral" };
+  }
+  return { label: "available", className: "tag-neutral" };
 }
 
 function normalizeIngredientName(name: string) {

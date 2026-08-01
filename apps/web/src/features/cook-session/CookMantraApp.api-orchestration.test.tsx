@@ -37,6 +37,8 @@ const extractedSession: SessionResponse = {
     max_total_minutes: null,
     servings: 2,
     option_count: 4,
+    spice_level: null,
+    special_instructions: "",
   },
   recipe_options: [],
   complete_recipes: {},
@@ -59,9 +61,11 @@ const optionsSession: SessionResponse = {
     dietary_preferences: ["vegetarian"],
     allergens: [],
     preferred_cuisines: [],
-    max_total_minutes: 45,
+    max_total_minutes: null,
     servings: 2,
     option_count: 4,
+    spice_level: "medium",
+    special_instructions: "",
   },
   recipe_options: [
     {
@@ -323,6 +327,12 @@ describe("CookMantraApp API orchestration", () => {
         ingredients: [
           { id: "ingredient-tomato", name: "Tomato", confirmed: true },
           { id: "ingredient-salt", name: "Salt", confirmed: false },
+          { id: null, name: "Pepper powder", confirmed: false },
+          { id: null, name: "Oil or ghee", confirmed: false },
+          { id: null, name: "Chilli powder", confirmed: false },
+          { id: null, name: "Onion", confirmed: false },
+          { id: null, name: "Garlic", confirmed: false },
+          { id: null, name: "Ginger", confirmed: false },
         ],
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -333,9 +343,11 @@ describe("CookMantraApp API orchestration", () => {
         dietary_preferences: ["vegetarian"],
         allergens: [],
         preferred_cuisines: [],
-        max_total_minutes: 45,
+        max_total_minutes: null,
         servings: 2,
         option_count: 4,
+        spice_level: "medium",
+        special_instructions: "",
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -409,6 +421,28 @@ describe("CookMantraApp API orchestration", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "It may still be running; try checking it again.",
     );
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+  });
+
+  it("shows normalized retryable copy when fetch cannot reach the server", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = new CookMantraClient({
+      fetch: vi.fn<typeof fetch>().mockRejectedValue(new TypeError("Load failed")),
+    });
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", {
+        type: "image/jpeg",
+      }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Cook Mantra could not reach the server");
+    expect(alert).toHaveTextContent("Check your connection and try again.");
+    expect(alert).not.toHaveTextContent("Load failed");
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
   });
 
@@ -580,6 +614,12 @@ describe("CookMantraApp API orchestration", () => {
         ingredients: [
           { id: null, name: "Cherry Tomato", confirmed: true },
           { id: "fresh-ingredient-salt", name: "Salt", confirmed: false },
+          { id: null, name: "Pepper powder", confirmed: false },
+          { id: null, name: "Oil or ghee", confirmed: false },
+          { id: null, name: "Chilli powder", confirmed: false },
+          { id: null, name: "Onion", confirmed: false },
+          { id: null, name: "Garlic", confirmed: false },
+          { id: null, name: "Ginger", confirmed: false },
         ],
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -715,6 +755,12 @@ describe("CookMantraApp API orchestration", () => {
         ingredients: [
           { id: null, name: "Cherry Tomato", confirmed: true },
           { id: "retry-ingredient-salt", name: "Salt", confirmed: false },
+          { id: null, name: "Pepper powder", confirmed: false },
+          { id: null, name: "Oil or ghee", confirmed: false },
+          { id: null, name: "Chilli powder", confirmed: false },
+          { id: null, name: "Onion", confirmed: false },
+          { id: null, name: "Garlic", confirmed: false },
+          { id: null, name: "Ginger", confirmed: false },
         ],
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
@@ -785,11 +831,133 @@ describe("CookMantraApp API orchestration", () => {
     await user.click(screen.getByRole("button", { name: "Create 1 recipe" }));
     await screen.findByRole("heading", { name: "Your recipe, ready" });
     await user.click(screen.getByRole("button", { name: /Back to recipe ideas/ }));
-    expect(screen.getByRole("button", { name: "Start fresh for more" })).toBeDisabled();
     expect(
-      screen.getByText(/edit your ingredients to start a fresh photo-backed/i),
+      screen.getByRole("button", { name: "More ideas unavailable" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(/edit your ingredients — Cook Mantra will re-read your photo/i),
     ).toBeVisible();
     expect(moreIdeas).not.toHaveBeenCalled();
+  });
+
+  it("retries only failed recipes and merges a later success", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const secondOption = {
+      ...optionsSession.recipe_options[0],
+      id: "option-tomato-rasam",
+      name: "Tomato Rasam",
+    };
+    const optionsWithTwo: SessionResponse = {
+      ...optionsSession,
+      recipe_options: [...optionsSession.recipe_options, secondOption],
+    };
+    const partialRecipes: SessionResponse = {
+      ...recipesSession,
+      recipe_failures: {
+        "option-tomato-rasam": {
+          option_id: "option-tomato-rasam",
+          code: "model_output_invalid",
+          message: "  The recipe output was invalid.\n",
+          retryable: true,
+        },
+      },
+    };
+    const recoveredRecipes: SessionResponse = {
+      ...partialRecipes,
+      complete_recipes: {
+        ...partialRecipes.complete_recipes,
+        "option-tomato-rasam": {
+          ...recipesSession.complete_recipes["option-tomato-skillet"],
+          option_id: "option-tomato-rasam",
+          name: "Tomato Rasam",
+        },
+      },
+      recipe_failures: {},
+    };
+    let sessionReadCount = 0;
+
+    vi.spyOn(client, "createSession").mockResolvedValue({
+      session_id: "session-api-123",
+      job_id: "job-extract",
+    });
+    vi.spyOn(client, "pollJob").mockImplementation(async (jobId) => {
+      const operation =
+        jobId === "job-extract"
+          ? "extract_ingredients"
+          : jobId === "job-options"
+            ? "generate_options"
+            : "generate_recipes";
+      return {
+        ...job(operation, "succeeded", 100, {}),
+        id: jobId,
+      } as TerminalJobResponse;
+    });
+    vi.spyOn(client, "getSession").mockImplementation(async () => {
+      sessionReadCount += 1;
+      if (sessionReadCount === 1) return extractedSession;
+      if (sessionReadCount === 2) return optionsWithTwo;
+      if (sessionReadCount === 3) return partialRecipes;
+      return recoveredRecipes;
+    });
+    vi.spyOn(client, "updateIngredients").mockResolvedValue({
+      ...extractedSession,
+      ingredients: optionsSession.ingredients,
+    });
+    vi.spyOn(client, "confirmIngredients").mockResolvedValue({
+      ...extractedSession,
+      stage: "ingredients_confirmed",
+      ingredients: optionsSession.ingredients,
+    });
+    vi.spyOn(client, "generateRecipeOptions").mockResolvedValue({
+      session_id: "session-api-123",
+      job_id: "job-options",
+    });
+    const generateRecipes = vi
+      .spyOn(client, "generateRecipes")
+      .mockResolvedValueOnce({
+        session_id: "session-api-123",
+        job_id: "job-recipes",
+      })
+      .mockResolvedValueOnce({
+        session_id: "session-api-123",
+        job_id: "job-recipes-retry",
+      });
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", {
+        type: "image/jpeg",
+      }),
+    );
+    await screen.findByRole("heading", { name: "Check what we found" });
+    await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
+    await user.click(await screen.findByRole("button", { name: /Tomato Skillet/ }));
+    await user.click(screen.getByRole("button", { name: /Tomato Rasam/ }));
+    await user.click(screen.getByRole("button", { name: "Create 2 recipes" }));
+
+    expect(await screen.findByText("Tomato Rasam:")).toBeVisible();
+    expect(screen.getByText("The recipe output was invalid.")).toBeVisible();
+    const completedStep = screen.getByRole("button", {
+      name: /Cook the tomatoes until soft/,
+    });
+    await user.click(completedStep);
+    await user.click(screen.getByRole("button", { name: "Retry failed recipes" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Your 2 recipes, ready" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry failed recipes" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Cook the tomatoes until soft/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(generateRecipes).toHaveBeenNthCalledWith(
+      2,
+      "session-api-123",
+      { option_ids: ["option-tomato-rasam"] },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("resumes the accepted recipe job instead of submitting it twice", async () => {

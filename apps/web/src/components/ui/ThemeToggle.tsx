@@ -8,6 +8,10 @@ type Theme = "light" | "dark";
 const THEME_STORAGE_KEY = "cm-theme";
 const THEME_CHANGE_EVENT = "cm-theme-change";
 const DARK_THEME_QUERY = "(prefers-color-scheme: dark)";
+const THEME_COLORS: Record<Theme, string> = {
+  light: "#f3f2f2",
+  dark: "#1a1817",
+};
 
 export function ThemeToggle() {
   const theme = useSyncExternalStore(
@@ -17,7 +21,7 @@ export function ThemeToggle() {
   );
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
+    applyTheme(theme);
   }, [theme]);
 
   const nextTheme: Theme = theme === "dark" ? "light" : "dark";
@@ -25,7 +29,14 @@ export function ThemeToggle() {
   const Icon = theme === "dark" ? Sun : Moon;
 
   function toggleTheme(): void {
-    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    memoryTheme = nextTheme;
+    applyTheme(nextTheme);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    } catch {
+      // Storage can be blocked (private mode, embedded webviews); the theme
+      // still applies for this visit via the in-memory fallback.
+    }
     window.dispatchEvent(new Event(THEME_CHANGE_EVENT));
   }
 
@@ -42,6 +53,13 @@ export function ThemeToggle() {
   );
 }
 
+function applyTheme(theme: Theme): void {
+  document.documentElement.dataset.theme = theme;
+  document
+    .querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+    ?.setAttribute("content", THEME_COLORS[theme]);
+}
+
 function subscribeToTheme(onStoreChange: () => void): () => void {
   const mediaQuery = window.matchMedia(DARK_THEME_QUERY);
   window.addEventListener("storage", onStoreChange);
@@ -55,11 +73,21 @@ function subscribeToTheme(onStoreChange: () => void): () => void {
   };
 }
 
+// Fallback for environments where localStorage throws; only ever read after a
+// toggle in such an environment.
+let memoryTheme: Theme | null = null;
+
 function getThemeSnapshot(): Theme {
-  const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  let savedTheme: string | null = null;
+  try {
+    savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {
+    // Blocked storage: fall through to the in-memory value or the OS setting.
+  }
   if (savedTheme === "light" || savedTheme === "dark") {
     return savedTheme;
   }
+  if (memoryTheme) return memoryTheme;
   return window.matchMedia(DARK_THEME_QUERY).matches ? "dark" : "light";
 }
 

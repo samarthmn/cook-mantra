@@ -9,6 +9,7 @@ import type {
 } from "@/types/api";
 import {
   ApiError,
+  ApiNetworkError,
   ApiTimeoutError,
   CookMantraClient,
   DEFAULT_API_BASE_URL,
@@ -42,6 +43,8 @@ function sessionResponse(): SessionResponse {
       max_total_minutes: null,
       servings: 2,
       option_count: 4,
+      spice_level: null,
+      special_instructions: "",
     },
     recipe_options: [],
     complete_recipes: {},
@@ -218,9 +221,11 @@ describe("CookMantraClient", () => {
       dietary_preferences: ["vegetarian"],
       allergens: ["peanut"],
       preferred_cuisines: ["Indian"],
-      max_total_minutes: 45,
+      max_total_minutes: null,
       servings: 2,
       option_count: 4,
+      spice_level: "hot",
+      special_instructions: "Use a pressure cooker.",
     };
 
     await client.generateRecipeOptions("session-123", preferences);
@@ -323,6 +328,23 @@ describe("CookMantraClient", () => {
       sessionId: null,
       jobId: null,
     });
+  });
+
+  it("normalizes a fetch TypeError into a retryable network error", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new TypeError("Failed to fetch"));
+    const client = new CookMantraClient({ fetch: fetchImpl });
+
+    const error = await client.getSession("session-123").catch((value) => value);
+
+    expect(error).toBeInstanceOf(ApiNetworkError);
+    expect(error).toMatchObject({
+      name: "ApiNetworkError",
+      message: "Check your connection and try again.",
+      retryable: true,
+    });
+    expect(error.message).not.toContain("Failed to fetch");
   });
 
   it("polls at a bounded interval until a job succeeds", async () => {

@@ -1,7 +1,11 @@
+import { normalizePantryStaples, PANTRY_STAPLES } from "./pantry-staples";
+
 export type AppView = "upload" | "job" | "confirm" | "options" | "recipes";
 export type SessionMode = "demo" | "api";
 export type IngredientSource = "detected" | "pantry_suggestion" | "user_added";
-export type DietPreference = "none" | "vegetarian" | "vegan";
+export type DietPreference = "vegetarian" | "non-vegetarian";
+export type DietStyle = "vegan" | "eggetarian" | "jain" | "halal" | "kosher";
+export type SpiceLevel = "mild" | "medium" | "hot" | "extra-hot";
 export type RecipeDifficulty = "easy" | "medium" | "hard";
 export type IngredientAvailability = "available" | "missing" | "optional";
 
@@ -15,10 +19,13 @@ export interface IngredientView {
 
 export interface PreferenceView {
   diet: DietPreference;
+  dietStyle: DietStyle | null;
+  dietAddOns: string[];
   servings: 1 | 2 | 4;
-  maxMinutes: 30 | 45 | 60;
   optionCount: 3 | 4 | 6;
-  allergens: string;
+  allergens: string[];
+  spiceLevel: SpiceLevel;
+  specialInstructions: string;
 }
 
 export interface IngredientRequirementView {
@@ -112,6 +119,7 @@ export interface CookSessionState {
   weakDetection: boolean;
   ingredients: IngredientView[];
   ingredientNameErrors: Record<string, string>;
+  pantryStaples: string[];
   preferences: PreferenceView;
   options: RecipeOptionView[];
   selectedOptionIds: string[];
@@ -125,6 +133,12 @@ export interface CookSessionState {
   nextLocalId: number;
 }
 
+type SetPreferenceAction = {
+  type: "set-preference";
+  key: keyof PreferenceView;
+  value: PreferenceView[keyof PreferenceView];
+};
+
 export type CookSessionAction =
   | { type: "start-manual-entry" }
   | {
@@ -136,11 +150,7 @@ export type CookSessionAction =
       ingredients: IngredientView[];
     }
   | { type: "replace-session-id"; sessionId: string }
-  | {
-      type: "set-preference";
-      key: keyof PreferenceView;
-      value: PreferenceView[keyof PreferenceView];
-    }
+  | SetPreferenceAction
   | { type: "set-active-recipe"; optionId: string }
   | {
       type: "start-job";
@@ -158,39 +168,31 @@ export type CookSessionAction =
       type: "receive-recipes";
       recipes: Record<string, CompleteRecipeView>;
       failures: Record<string, RecipeFailureView>;
+      merge: boolean;
     }
   | { type: "navigate"; view: Exclude<AppView, "job"> }
   | { type: "add-ingredient"; name: string }
   | { type: "rename-ingredient"; id: string; name: string }
   | { type: "remove-ingredient"; id: string }
   | { type: "toggle-ingredient"; id: string }
+  | { type: "toggle-all-pantry"; confirmed: boolean }
+  | { type: "set-pantry-staples"; names: string[] }
   | { type: "toggle-option"; id: string }
   | { type: "toggle-recipe-step"; optionId: string; stepNumber: number }
   | { type: "reset" };
 
 const MAX_RECIPE_SELECTIONS = 6;
+export const LOCAL_PANTRY_INGREDIENT_ID_PREFIX = "local-pantry-";
 
-const PANTRY_STAPLES = [
-  "Salt",
-  "Pepper powder",
-  "Oil or ghee",
-  "Chilli powder",
-  "Onion",
-  "Garlic",
-  "Ginger",
-] as const;
+const VALID_DIET_STYLES: Record<DietPreference, ReadonlySet<DietStyle>> = {
+  vegetarian: new Set(["vegan", "eggetarian", "jain"]),
+  "non-vegetarian": new Set(["halal", "kosher"]),
+};
+const VALID_DIET_ADD_ONS = new Set(["keto", "no onion or garlic"]);
 
-function pantryIngredients(): IngredientView[] {
-  return PANTRY_STAPLES.map((name) => ({
-    id: `pantry-${name.toLowerCase().replaceAll(" ", "-")}`,
-    name,
-    source: "pantry_suggestion",
-    confidence: null,
-    confirmed: false,
-  }));
-}
-
-export function createInitialCookSessionState(): CookSessionState {
+export function createInitialCookSessionState(
+  pantryStaples: readonly string[] = PANTRY_STAPLES,
+): CookSessionState {
   return {
     view: "upload",
     maxReached: 1,
@@ -200,12 +202,16 @@ export function createInitialCookSessionState(): CookSessionState {
     weakDetection: false,
     ingredients: [],
     ingredientNameErrors: {},
+    pantryStaples: normalizePantryStaples(pantryStaples),
     preferences: {
       diet: "vegetarian",
+      dietStyle: null,
+      dietAddOns: [],
       servings: 2,
-      maxMinutes: 45,
       optionCount: 4,
-      allergens: "",
+      allergens: [],
+      spiceLevel: "medium",
+      specialInstructions: "",
     },
     options: [],
     selectedOptionIds: [],
@@ -231,6 +237,244 @@ export function confirmedIngredientNames(ingredients: IngredientView[]): string[
     .filter((ingredient) => ingredient.confirmed)
     .map((ingredient) => normalizedName(ingredient.name))
     .filter((name) => name.length > 0);
+}
+
+function normalizedComparisonName(name: string): string {
+  return normalizedName(name).toLocaleLowerCase();
+}
+
+function ingredientIdSlug(name: string): string {
+  return (
+    normalizedComparisonName(name)
+      .normalize("NFKD")
+      .replaceAll(/[\u0300-\u036f]/g, "")
+      .replaceAll(/[^a-z0-9]+/g, "-")
+      .replaceAll(/^-+|-+$/g, "") || "staple"
+  );
+}
+
+function nextUniqueId(baseId: string, usedIds: Set<string>): string {
+  let id = baseId;
+  let suffix = 2;
+  while (usedIds.has(id)) {
+    id = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+  usedIds.add(id);
+  return id;
+}
+
+function newPantryIngredient(name: string, usedIds: Set<string>): IngredientView {
+  return {
+    id: nextUniqueId(
+      `${LOCAL_PANTRY_INGREDIENT_ID_PREFIX}${ingredientIdSlug(name)}`,
+      usedIds,
+    ),
+    name,
+    source: "pantry_suggestion",
+    confidence: null,
+    confirmed: false,
+  };
+}
+
+function pantryIngredients(names: readonly string[]): IngredientView[] {
+  const usedIds = new Set<string>();
+  return normalizePantryStaples(names).map((name) =>
+    newPantryIngredient(name, usedIds),
+  );
+}
+
+function appendMissingPantryIngredients(
+  ingredients: IngredientView[],
+  pantryStaples: readonly string[],
+): IngredientView[] {
+  const usedIds = new Set(ingredients.map((ingredient) => ingredient.id));
+  const usedNames = new Set(
+    ingredients.map((ingredient) => normalizedComparisonName(ingredient.name)),
+  );
+  const additions: IngredientView[] = [];
+
+  for (const name of normalizePantryStaples(pantryStaples)) {
+    const comparisonName = normalizedComparisonName(name);
+    if (usedNames.has(comparisonName)) continue;
+    usedNames.add(comparisonName);
+    additions.push(newPantryIngredient(name, usedIds));
+  }
+
+  return additions.length === 0 ? ingredients : [...ingredients, ...additions];
+}
+
+function reconcilePantryIngredients(
+  ingredients: IngredientView[],
+  pantryStaples: readonly string[],
+): IngredientView[] {
+  const retainedIngredients = ingredients.filter(
+    (ingredient) => ingredient.source !== "pantry_suggestion",
+  );
+  const retainedNames = new Set(
+    retainedIngredients.map((ingredient) => normalizedComparisonName(ingredient.name)),
+  );
+  const existingPantryByName = new Map<string, IngredientView>();
+  for (const ingredient of ingredients) {
+    if (ingredient.source !== "pantry_suggestion") continue;
+    const name = normalizedComparisonName(ingredient.name);
+    if (!existingPantryByName.has(name)) existingPantryByName.set(name, ingredient);
+  }
+
+  const usedIds = new Set(retainedIngredients.map((ingredient) => ingredient.id));
+  const reconciledPantry: IngredientView[] = [];
+  for (const name of normalizePantryStaples(pantryStaples)) {
+    const comparisonName = normalizedComparisonName(name);
+    if (retainedNames.has(comparisonName)) continue;
+
+    const existing = existingPantryByName.get(comparisonName);
+    if (existing && !usedIds.has(existing.id)) {
+      usedIds.add(existing.id);
+      reconciledPantry.push(existing.name === name ? existing : { ...existing, name });
+    } else {
+      reconciledPantry.push(newPantryIngredient(name, usedIds));
+    }
+  }
+
+  return [...retainedIngredients, ...reconciledPantry];
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length && left.every((value, index) => value === right[index])
+  );
+}
+
+function ingredientsEqual(
+  left: readonly IngredientView[],
+  right: readonly IngredientView[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((ingredient, index) => {
+      const other = right[index];
+      return (
+        ingredient.id === other?.id &&
+        ingredient.name === other.name &&
+        ingredient.source === other.source &&
+        ingredient.confidence === other.confidence &&
+        ingredient.confirmed === other.confirmed
+      );
+    })
+  );
+}
+
+function normalizedUniqueNames(values: readonly string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const name = normalizedName(value);
+    const comparisonName = name.toLocaleLowerCase();
+    if (!name || seen.has(comparisonName)) continue;
+    seen.add(comparisonName);
+    result.push(name);
+  }
+  return result;
+}
+
+function normalizedDietStyle(
+  style: DietStyle | null,
+  diet: DietPreference,
+): DietStyle | null {
+  if (typeof style !== "string") return null;
+  const normalizedStyle = normalizedName(style).toLocaleLowerCase() as DietStyle;
+  return VALID_DIET_STYLES[diet].has(normalizedStyle) ? normalizedStyle : null;
+}
+
+function normalizedDietAddOns(addOns: readonly string[]): string[] {
+  return normalizedUniqueNames(addOns)
+    .map((addOn) => addOn.toLocaleLowerCase())
+    .filter((addOn) => VALID_DIET_ADD_ONS.has(addOn));
+}
+
+function nextPreferences(
+  preferences: PreferenceView,
+  action: SetPreferenceAction,
+): PreferenceView {
+  switch (action.key) {
+    case "diet": {
+      const diet = action.value as PreferenceView["diet"];
+      return {
+        ...preferences,
+        diet,
+        dietStyle:
+          diet === preferences.diet
+            ? normalizedDietStyle(preferences.dietStyle, diet)
+            : null,
+        dietAddOns: normalizedDietAddOns(preferences.dietAddOns),
+      };
+    }
+    case "dietStyle":
+      return {
+        ...preferences,
+        dietStyle: normalizedDietStyle(
+          action.value as PreferenceView["dietStyle"],
+          preferences.diet,
+        ),
+      };
+    case "dietAddOns":
+      return {
+        ...preferences,
+        dietAddOns: normalizedDietAddOns(action.value as PreferenceView["dietAddOns"]),
+      };
+    case "allergens":
+      return {
+        ...preferences,
+        allergens: normalizedUniqueNames(action.value as PreferenceView["allergens"]),
+      };
+    case "specialInstructions":
+      return {
+        ...preferences,
+        specialInstructions: (
+          action.value as PreferenceView["specialInstructions"]
+        ).slice(0, 500),
+      };
+    case "servings":
+      return {
+        ...preferences,
+        servings: action.value as PreferenceView["servings"],
+      };
+    case "optionCount":
+      return {
+        ...preferences,
+        optionCount: action.value as PreferenceView["optionCount"],
+      };
+    case "spiceLevel":
+      return {
+        ...preferences,
+        spiceLevel: action.value as PreferenceView["spiceLevel"],
+      };
+  }
+}
+
+function preferencesEqual(left: PreferenceView, right: PreferenceView): boolean {
+  return (
+    left.diet === right.diet &&
+    left.dietStyle === right.dietStyle &&
+    arraysEqual(left.dietAddOns, right.dietAddOns) &&
+    left.servings === right.servings &&
+    left.optionCount === right.optionCount &&
+    arraysEqual(left.allergens, right.allergens) &&
+    left.spiceLevel === right.spiceLevel &&
+    left.specialInstructions === right.specialInstructions
+  );
+}
+
+function hasGeneratedContent(state: CookSessionState): boolean {
+  return (
+    state.options.length > 0 ||
+    state.selectedOptionIds.length > 0 ||
+    Object.keys(state.completeRecipes).length > 0 ||
+    Object.keys(state.recipeFailures).length > 0 ||
+    state.activeRecipeId !== null ||
+    Object.keys(state.completedSteps).length > 0 ||
+    state.ideasExhausted
+  );
 }
 
 function invalidateGeneratedContent(
@@ -285,16 +529,20 @@ export function cookSessionReducer(
   switch (action.type) {
     case "start-manual-entry":
       return {
-        ...createInitialCookSessionState(),
+        ...createInitialCookSessionState(state.pantryStaples),
         view: "confirm",
         maxReached: 2,
         // Typed ingredients open a real server session on Generate, so this is
         // an API session that simply does not have its id yet.
         mode: "api",
-        ingredients: pantryIngredients(),
+        ingredients: pantryIngredients(state.pantryStaples),
       };
 
-    case "receive-ingredients":
+    case "receive-ingredients": {
+      const ingredients = appendMissingPantryIngredients(
+        action.ingredients,
+        state.pantryStaples,
+      );
       return {
         ...state,
         view: "confirm",
@@ -303,24 +551,23 @@ export function cookSessionReducer(
         sessionId: action.sessionId,
         photoPreviewUrl: action.photoPreviewUrl,
         weakDetection: action.weakDetection,
-        ingredients: action.ingredients,
-        ingredientNameErrors: findIngredientNameErrors(action.ingredients),
+        ingredients,
+        ingredientNameErrors: findIngredientNameErrors(ingredients),
         job: null,
         error: null,
       };
+    }
 
     case "replace-session-id":
       return { ...state, sessionId: action.sessionId, error: null };
 
     case "set-preference": {
-      if (state.preferences[action.key] === action.value) return state;
+      const preferences = nextPreferences(state.preferences, action);
+      if (preferencesEqual(state.preferences, preferences)) return state;
       const invalidated = invalidateGeneratedContent(state, state.ingredients);
       return {
         ...invalidated,
-        preferences: {
-          ...state.preferences,
-          [action.key]: action.value,
-        } as PreferenceView,
+        preferences,
       };
     }
 
@@ -348,7 +595,9 @@ export function cookSessionReducer(
         ...state,
         job: {
           ...state.job,
-          progress: Math.max(0, Math.min(100, action.progress)),
+          // Monotonic within a job: early client-side ticks (e.g. "upload
+          // finished") must not be undone by a slower first server report.
+          progress: Math.max(state.job.progress, Math.min(100, action.progress)),
         },
       };
 
@@ -406,16 +655,42 @@ export function cookSessionReducer(
     }
 
     case "receive-recipes": {
-      const activeRecipeId =
-        state.selectedOptionIds.find((id) => action.recipes[id] !== undefined) ??
-        Object.keys(action.recipes)[0] ??
-        null;
+      const retriedIds = new Set([
+        ...Object.keys(action.recipes),
+        ...Object.keys(action.failures),
+      ]);
+      const completeRecipes = action.merge
+        ? { ...state.completeRecipes }
+        : action.recipes;
+      const recipeFailures = action.merge
+        ? { ...state.recipeFailures }
+        : action.failures;
+
+      if (action.merge) {
+        for (const optionId of retriedIds) {
+          delete completeRecipes[optionId];
+          delete recipeFailures[optionId];
+        }
+        Object.assign(completeRecipes, action.recipes);
+        Object.assign(recipeFailures, action.failures);
+      }
+
+      const activeRecipeId = action.merge
+        ? ((state.activeRecipeId && completeRecipes[state.activeRecipeId]
+            ? state.activeRecipeId
+            : null) ??
+          state.selectedOptionIds.find((id) => completeRecipes[id] !== undefined) ??
+          Object.keys(completeRecipes)[0] ??
+          null)
+        : (state.selectedOptionIds.find((id) => completeRecipes[id] !== undefined) ??
+          Object.keys(completeRecipes)[0] ??
+          null);
       return {
         ...state,
         view: "recipes",
         maxReached: 4,
-        completeRecipes: action.recipes,
-        recipeFailures: action.failures,
+        completeRecipes,
+        recipeFailures,
         activeRecipeId,
         job: null,
         error: null,
@@ -442,7 +717,7 @@ export function cookSessionReducer(
 
       const existing = state.ingredients.find(
         (ingredient) =>
-          ingredient.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
+          normalizedComparisonName(ingredient.name) === normalizedComparisonName(name),
       );
       if (existing) {
         if (existing.confirmed) return state;
@@ -456,10 +731,13 @@ export function cookSessionReducer(
         );
       }
 
+      const usedIds = new Set(state.ingredients.map((ingredient) => ingredient.id));
+      let nextLocalId = state.nextLocalId;
+      while (usedIds.has(`user-${nextLocalId}`)) nextLocalId += 1;
       const ingredients = [
         ...state.ingredients,
         {
-          id: `user-${state.nextLocalId}`,
+          id: `user-${nextLocalId}`,
           name,
           source: "user_added" as const,
           confidence: null,
@@ -468,7 +746,7 @@ export function cookSessionReducer(
       ];
       return {
         ...invalidateGeneratedContent(state, ingredients),
-        nextLocalId: state.nextLocalId + 1,
+        nextLocalId: nextLocalId + 1,
       };
     }
 
@@ -496,6 +774,55 @@ export function cookSessionReducer(
             : ingredient,
         ),
       );
+
+    case "toggle-all-pantry": {
+      const pantryIngredients = state.ingredients.filter(
+        (ingredient) => ingredient.source === "pantry_suggestion",
+      );
+      if (
+        pantryIngredients.length === 0 ||
+        pantryIngredients.every(
+          (ingredient) => ingredient.confirmed === action.confirmed,
+        )
+      ) {
+        return state;
+      }
+      return invalidateGeneratedContent(
+        state,
+        state.ingredients.map((ingredient) =>
+          ingredient.source === "pantry_suggestion"
+            ? { ...ingredient, confirmed: action.confirmed }
+            : ingredient,
+        ),
+      );
+    }
+
+    case "set-pantry-staples": {
+      const pantryStaples = normalizePantryStaples(action.names);
+      const shouldReconcile =
+        state.view !== "upload" ||
+        state.ingredients.some(
+          (ingredient) => ingredient.source === "pantry_suggestion",
+        ) ||
+        hasGeneratedContent(state);
+      if (!shouldReconcile) {
+        return arraysEqual(state.pantryStaples, pantryStaples)
+          ? state
+          : { ...state, pantryStaples };
+      }
+
+      const ingredients = reconcilePantryIngredients(state.ingredients, pantryStaples);
+      if (
+        arraysEqual(state.pantryStaples, pantryStaples) &&
+        ingredientsEqual(state.ingredients, ingredients)
+      ) {
+        return state;
+      }
+      return {
+        ...invalidateGeneratedContent(state, ingredients),
+        pantryStaples,
+      };
+    }
 
     case "toggle-option": {
       if (!state.options.some((option) => option.id === action.id)) return state;
@@ -533,6 +860,6 @@ export function cookSessionReducer(
     }
 
     case "reset":
-      return createInitialCookSessionState();
+      return createInitialCookSessionState(state.pantryStaples);
   }
 }

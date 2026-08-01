@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { notFound } from "next/navigation";
 
 import { AppHeader } from "@/components/layout/AppHeader";
 import { DesignGuide } from "@/features/design-guide/DesignGuide";
@@ -10,6 +11,9 @@ export const metadata: Metadata = {
 };
 
 export default function DesignGuidePage() {
+  // Internal design reference: browsable in development, absent in production.
+  if (process.env.NODE_ENV === "production") notFound();
+
   return (
     <div className="app-shell">
       <AppHeader />

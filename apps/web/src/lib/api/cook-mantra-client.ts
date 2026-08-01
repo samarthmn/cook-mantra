@@ -100,6 +100,15 @@ export class ApiTimeoutError extends Error {
   }
 }
 
+export class ApiNetworkError extends Error {
+  readonly retryable = true;
+
+  constructor() {
+    super("Check your connection and try again.");
+    this.name = "ApiNetworkError";
+  }
+}
+
 export class CookMantraClient {
   readonly baseUrl: string;
   private readonly fetch: typeof fetch;
@@ -269,6 +278,12 @@ export class CookMantraClient {
     } catch (error) {
       if (timeoutSignal.aborted && !callerSignal?.aborted) {
         throw new ApiTimeoutError("request");
+      }
+      if (callerSignal?.aborted) {
+        throw callerSignal.reason ?? error;
+      }
+      if (error instanceof TypeError) {
+        throw new ApiNetworkError();
       }
       throw error;
     }

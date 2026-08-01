@@ -30,22 +30,26 @@ describe("AppHeader", () => {
 
   afterEach(() => cleanup());
 
-  it("links the brand home and exposes the guide and theme actions", () => {
+  it("links the brand home and exposes the theme action", () => {
     render(<AppHeader />);
 
     const header = screen.getByRole("banner");
     const brand = within(header).getByRole("link", { name: "COOK MANTRA" });
-    const guide = within(header).getByRole("link", { name: "Design guide" });
 
     expect(header).toHaveClass("app-header");
     expect(brand).toHaveAttribute("href", "/");
     expect(brand).toHaveClass("app-brand");
-    expect(brand.querySelector(".app-brand-mark")).toHaveAttribute(
-      "aria-hidden",
-      "true",
-    );
-    expect(guide).toHaveAttribute("href", "/design-guide");
-    expect(guide).toHaveClass("app-header-link");
+    const mark = brand.querySelector(".app-brand-mark");
+    expect(mark).toHaveAttribute("aria-hidden", "true");
+    expect(mark?.tagName).toBe("IMG");
+    // Decorative: the adjacent wordmark already names the link.
+    expect(mark).toHaveAttribute("alt", "");
+    expect(mark?.getAttribute("src")).toContain("cook-mantra-mark");
+    // The design guide stays in the codebase as a reference, but is not linked
+    // from the product UI.
+    expect(
+      within(header).queryByRole("link", { name: "Design guide" }),
+    ).not.toBeInTheDocument();
     expect(
       within(header).getByRole("button", { name: "Switch to dark theme" }),
     ).toBeInTheDocument();

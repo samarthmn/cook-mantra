@@ -1,5 +1,7 @@
+"use client";
+
 import { TriangleAlert } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 export interface ErrorAlertProps {
   title: ReactNode;
@@ -19,9 +21,24 @@ export function ErrorAlert({
   dismissLabel = "Dismiss",
 }: ErrorAlertProps) {
   const hasActions = onRetry !== undefined || onDismiss !== undefined;
+  const alertRef = useRef<HTMLDivElement>(null);
+
+  // Errors can be triggered from far down the page (e.g. selecting a seventh
+  // recipe idea); bring the alert into view so it is never missed.
+  useEffect(() => {
+    const alert = alertRef.current;
+    if (!alert) return;
+
+    alert.focus({ preventScroll: true });
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    alert.scrollIntoView?.({
+      block: "nearest",
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
+  }, []);
 
   return (
-    <div className="alert" role="alert">
+    <div className="alert" role="alert" ref={alertRef} tabIndex={-1}>
       <TriangleAlert
         aria-hidden="true"
         className="alert-icon"

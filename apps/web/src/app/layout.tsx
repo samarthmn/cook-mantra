@@ -24,20 +24,20 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f3f2f2" },
-    { media: "(prefers-color-scheme: dark)", color: "#1a1817" },
-  ],
+  themeColor: "#f3f2f2",
 };
 
 const themeBootScript = `
-  try {
-    const saved = localStorage.getItem("cm-theme");
-    const theme = saved === "light" || saved === "dark"
-      ? saved
-      : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    document.documentElement.dataset.theme = theme;
-  } catch (_) {}
+  let saved = null;
+  try { saved = localStorage.getItem("cm-theme"); } catch (_) {}
+  const theme = saved === "light" || saved === "dark"
+    ? saved
+    : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  document.documentElement.dataset.theme = theme;
+  const themeColor = document.querySelector('meta[name="theme-color"]');
+  if (themeColor) {
+    themeColor.setAttribute("content", theme === "dark" ? "#1a1817" : "#f3f2f2");
+  }
 `;
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

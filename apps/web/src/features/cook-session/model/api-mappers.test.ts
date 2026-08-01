@@ -56,12 +56,28 @@ describe("API view mappers", () => {
         confidence: null,
         confirmed: true,
       },
+      {
+        id: "server-pantry-1",
+        name: "Salt",
+        source: "pantry_suggestion",
+        confidence: null,
+        confirmed: false,
+      },
+      {
+        id: "local-pantry-cumin",
+        name: "Cumin",
+        source: "pantry_suggestion",
+        confidence: null,
+        confirmed: true,
+      },
     ]);
 
     expect(review).toEqual({
       ingredients: [
         { id: "detected-1", name: "Cherry tomato", confirmed: true },
         { id: null, name: "Basil", confirmed: true },
+        { id: "server-pantry-1", name: "Salt", confirmed: false },
+        { id: null, name: "Cumin", confirmed: true },
       ],
     });
   });
@@ -142,32 +158,62 @@ describe("API view mappers", () => {
   it("normalizes preferences into the backend contract", () => {
     expect(
       preferencesToApi({
-        diet: "vegan",
-        servings: 4,
-        maxMinutes: 30,
-        optionCount: 6,
-        allergens: " peanuts, Shellfish ",
+        diet: "vegetarian",
+        dietStyle: "vegan",
+        dietAddOns: ["KETO"],
+        servings: 2,
+        optionCount: 4,
+        allergens: ["dairy", "Shellfish"],
+        spiceLevel: "medium",
+        specialInstructions: "  kid friendly  ",
       }),
     ).toEqual({
-      dietary_preferences: ["vegan"],
-      allergens: ["peanuts", "Shellfish"],
+      dietary_preferences: ["vegetarian", "vegan", "keto"],
+      allergens: ["dairy", "Shellfish"],
       preferred_cuisines: [],
-      max_total_minutes: 30,
-      servings: 4,
-      option_count: 6,
+      max_total_minutes: null,
+      servings: 2,
+      option_count: 4,
+      spice_level: "medium",
+      special_instructions: "kid friendly",
     });
   });
 
   it("deduplicates allergens case-insensitively while preserving first spelling", () => {
     const preferences = preferencesToApi({
-      diet: "none",
+      diet: "non-vegetarian",
+      dietStyle: "halal",
+      dietAddOns: ["KETO", "keto", ""],
       servings: 2,
-      maxMinutes: 45,
       optionCount: 4,
-      allergens: "dairy, Dairy, SOY, soy, ",
+      allergens: ["dairy", "Dairy", "SOY", "soy", ""],
+      spiceLevel: "extra-hot",
+      specialInstructions: "",
     });
 
+    expect(preferences.dietary_preferences).toEqual([
+      "non-vegetarian",
+      "halal",
+      "keto",
+    ]);
     expect(preferences.allergens).toEqual(["dairy", "SOY"]);
+    expect(preferences.spice_level).toBe("extra-hot");
+    expect(preferences.special_instructions).toBe("");
+  });
+
+  it("maps an unqualified non-vegetarian preference without extra constraints", () => {
+    const preferences = preferencesToApi({
+      diet: "non-vegetarian",
+      dietStyle: null,
+      dietAddOns: [],
+      servings: 2,
+      optionCount: 4,
+      allergens: [],
+      spiceLevel: "medium",
+      specialInstructions: "",
+    });
+
+    expect(preferences.dietary_preferences).toEqual(["non-vegetarian"]);
   });
 
   it("maps recipe option and complete recipe fields without losing honesty data", () => {
@@ -194,9 +240,9 @@ describe("API view mappers", () => {
       },
       preview: {
         artifact_id: "artifact-1",
-        label: "AI-generated illustration",
+        label: "AI-generated image",
       },
-      warnings: ["Illustration may vary."],
+      warnings: ["Image may vary."],
     };
     const recipe: CompleteRecipeResponse = {
       option_id: "option-1",

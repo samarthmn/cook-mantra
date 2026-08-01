@@ -47,6 +47,13 @@ describe("ThemeToggle", () => {
     window.localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
     setSystemTheme(false);
+    document.head
+      .querySelectorAll('meta[name="theme-color"]')
+      .forEach((meta) => meta.remove());
+    const themeColor = document.createElement("meta");
+    themeColor.name = "theme-color";
+    themeColor.content = "#f3f2f2";
+    document.head.append(themeColor);
   });
 
   afterEach(() => {
@@ -56,6 +63,9 @@ describe("ThemeToggle", () => {
       writable: true,
       value: originalMatchMedia,
     });
+    document.head
+      .querySelectorAll('meta[name="theme-color"]')
+      .forEach((meta) => meta.remove());
   });
 
   it("uses the saved cm-theme preference before the system preference", async () => {
@@ -94,9 +104,18 @@ describe("ThemeToggle", () => {
 
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     expect(window.localStorage.getItem("cm-theme")).toBe("dark");
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
+      "content",
+      "#1a1817",
+    );
+    expect(document.querySelectorAll('meta[name="theme-color"]')).toHaveLength(1);
 
     await user.click(screen.getByRole("button", { name: "Switch to light theme" }));
     expect(document.documentElement).toHaveAttribute("data-theme", "light");
     expect(window.localStorage.getItem("cm-theme")).toBe("light");
+    expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
+      "content",
+      "#f3f2f2",
+    );
   });
 });

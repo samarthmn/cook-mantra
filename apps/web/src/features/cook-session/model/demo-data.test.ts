@@ -10,10 +10,13 @@ import {
 
 const preferences: PreferenceView = {
   diet: "vegetarian",
+  dietStyle: null,
+  dietAddOns: [],
   servings: 2,
-  maxMinutes: 45,
   optionCount: 4,
-  allergens: "",
+  allergens: [],
+  spiceLevel: "medium",
+  specialInstructions: "",
 };
 
 describe("demo data", () => {
@@ -35,7 +38,7 @@ describe("demo data", () => {
 
   it("filters demo options by dietary preference", () => {
     const options = createDemoOptions({
-      preferences: { ...preferences, diet: "vegan", maxMinutes: 30 },
+      preferences: { ...preferences, dietStyle: "vegan" },
       batchNumber: 1,
       excludedIds: [],
       ingredients: [...demoDetectedIngredients(), ...demoPantryIngredients()],
@@ -44,6 +47,77 @@ describe("demo data", () => {
     expect(options.map((option) => option.name)).toEqual([
       "Tomato Rasam",
       "Spinach Tomato Dal",
+    ]);
+  });
+
+  it("returns plausible demo fixtures for a non-vegetarian preference", () => {
+    const options = createDemoOptions({
+      preferences: { ...preferences, diet: "non-vegetarian" },
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients: [...demoDetectedIngredients(), ...demoPantryIngredients()],
+    });
+
+    expect(options.map((option) => option.name)).toEqual([
+      "Egg Bhurji",
+      "Chicken Saag",
+      "Pepper Chicken",
+    ]);
+    expect(
+      Object.values(
+        createDemoRecipes(
+          options,
+          [...demoDetectedIngredients(), ...demoPantryIngredients()],
+          2,
+        ),
+      ).map((recipe) => recipe.name),
+    ).toEqual(["Egg Bhurji", "Chicken Saag", "Pepper Chicken"]);
+  });
+
+  it("does not filter demo options by total cooking time", () => {
+    const options = createDemoOptions({
+      preferences: { ...preferences, optionCount: 6 },
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients: [...demoDetectedIngredients(), ...demoPantryIngredients()],
+    });
+
+    expect(options.map((option) => option.name)).toContain("Paneer-Stuffed Tomatoes");
+    expect(
+      options.find((option) => option.name === "Paneer-Stuffed Tomatoes")?.totalMinutes,
+    ).toBe(40);
+  });
+
+  it("filters demo options against the allergen array", () => {
+    const options = createDemoOptions({
+      preferences: { ...preferences, optionCount: 6, allergens: ["Dairy"] },
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients: [...demoDetectedIngredients(), ...demoPantryIngredients()],
+    });
+
+    expect(options.map((option) => option.name)).toEqual([
+      "Tomato Rasam",
+      "Spinach Tomato Dal",
+    ]);
+  });
+
+  it("creates unchecked demo pantry rows from custom defaults", () => {
+    expect(demoPantryIngredients(["Sea salt", "Olive oil"])).toEqual([
+      {
+        id: "local-pantry-sea-salt",
+        name: "Sea salt",
+        source: "pantry_suggestion",
+        confidence: null,
+        confirmed: false,
+      },
+      {
+        id: "local-pantry-olive-oil",
+        name: "Olive oil",
+        source: "pantry_suggestion",
+        confidence: null,
+        confirmed: false,
+      },
     ]);
   });
 
@@ -83,7 +157,7 @@ describe("demo data", () => {
     const recipe = createDemoRecipes([options[0]], ingredients, 2)[options[0].id];
 
     expect(
-      recipe.ingredients.find((ingredient) => ingredient.name === "onion, chopped"),
+      recipe.ingredients.find((ingredient) => ingredient.name === "onion"),
     ).toMatchObject({ availability: "missing" });
   });
 
@@ -103,7 +177,7 @@ describe("demo data", () => {
     const recipe = createDemoRecipes([options[0]], ingredients, 2)[options[0].id];
 
     expect(
-      recipe.ingredients.find((ingredient) => ingredient.name === "onion, chopped"),
+      recipe.ingredients.find((ingredient) => ingredient.name === "onion"),
     ).toMatchObject({ availability: "available" });
   });
 
@@ -198,7 +272,7 @@ describe("demo data", () => {
       "paneer",
       "tomatoes",
       "green chilli",
-      "onion, chopped",
+      "onion",
       "garlic",
       "oil or ghee",
       "chilli powder",
@@ -224,7 +298,7 @@ describe("demo data", () => {
       (ingredient) => ingredient.name,
     );
 
-    expect(missingNames).not.toContain("onion, chopped");
+    expect(missingNames).not.toContain("onion");
     expect(missingNames).toContain("garlic");
     expect(missingNames?.filter((name) => name === "cream")).toHaveLength(1);
   });
@@ -272,5 +346,59 @@ describe("demo data", () => {
       "Paneer-Stuffed Tomatoes",
     ]);
     expect(secondBatch.every((option) => option.batchNumber === 2)).toBe(true);
+  });
+
+  it("counts every confirmed recipe ingredient in the option usage summary", () => {
+    const ingredients = [
+      ...demoDetectedIngredients(),
+      ...demoPantryIngredients().map((ingredient) => ({
+        ...ingredient,
+        confirmed: true,
+      })),
+    ];
+    const option = createDemoOptions({
+      preferences: { ...preferences, optionCount: 6 },
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients,
+    }).find((candidate) => candidate.name === "Palak Paneer");
+
+    expect(option?.usedIngredients).toEqual([
+      "Spinach",
+      "Paneer",
+      "Tomatoes",
+      "Green chillies",
+      "Onion",
+      "Garlic",
+      "Oil or ghee",
+      "Chilli powder",
+      "Salt",
+      "Coriander",
+    ]);
+    expect(option?.previewLabel).toBe("AI-generated image");
+  });
+
+  it("formats allergen notices as a natural-language list", () => {
+    const ingredients = [...demoDetectedIngredients(), ...demoPantryIngredients()];
+    const [option] = createDemoOptions({
+      preferences,
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients,
+    });
+    const optionWithAllergens = {
+      ...option,
+      nutrition: option.nutrition
+        ? {
+            ...option.nutrition,
+            allergenWarnings: ["dairy", "soy", "tree nuts"],
+          }
+        : null,
+    };
+
+    expect(
+      createDemoRecipes([optionWithAllergens], ingredients, 2)[option.id]
+        .allergenNotice,
+    ).toBe("May contain dairy, soy, and tree nuts.");
   });
 });

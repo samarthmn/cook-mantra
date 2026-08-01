@@ -1,15 +1,14 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
 import {
-  AlertTriangle,
-  ArrowRight,
-  Check,
-  ChevronDown,
-  Info,
-  Plus,
-  X,
-} from "lucide-react";
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
+import { AlertTriangle, ArrowRight, Check, Info, Minus, Plus, X } from "lucide-react";
 
 import { StickyActionBar } from "@/components/layout/StickyActionBar";
 
@@ -30,6 +29,10 @@ interface ConfirmScreenProps {
   onRenameIngredient: (id: string, name: string) => void;
   onRemoveIngredient: (id: string) => void;
   onToggleIngredient: (id: string) => void;
+  onToggleAllPantry: (confirmed: boolean) => void;
+  pantryStaples: string[];
+  generatedContentExists?: boolean;
+  onPantryStaplesChange: (names: string[]) => boolean;
   onPreferenceChange: <Key extends keyof PreferenceView>(
     key: Key,
     value: PreferenceView[Key],
@@ -41,6 +44,66 @@ interface ConfirmScreenProps {
 // Below this the agents have too little to work with, so the action bar says so
 // before the user spends a generation round finding out.
 const THIN_PANTRY_LIMIT = 5;
+
+const DIET_OPTIONS = [
+  ["vegetarian", "Veg"],
+  ["non-vegetarian", "Non-Veg"],
+] as const;
+
+const DIET_STYLE_OPTIONS: Record<
+  PreferenceView["diet"],
+  ReadonlyArray<readonly [value: string, label: string]>
+> = {
+  vegetarian: [
+    ["", "Vegetarian"],
+    ["vegan", "Vegan"],
+    ["eggetarian", "Eggetarian"],
+    ["jain", "Jain"],
+  ],
+  "non-vegetarian": [
+    ["", "Any"],
+    ["halal", "Halal"],
+    ["kosher", "Kosher"],
+  ],
+};
+
+const DIET_ADD_ONS = ["keto", "no onion or garlic"] as const;
+
+const DIET_ADD_ON_LABELS: Record<(typeof DIET_ADD_ONS)[number], string> = {
+  keto: "Keto",
+  "no onion or garlic": "No onion or garlic",
+};
+
+const BASE_ALLERGENS = [
+  "Dairy",
+  "Eggs",
+  "Peanuts",
+  "Tree nuts",
+  "Gluten",
+  "Soy",
+  "Shellfish",
+  "Fish",
+  "Sesame",
+] as const;
+
+const SERVING_OPTIONS = [
+  ["1", "1"],
+  ["2", "2"],
+  ["4", "4"],
+] as const;
+
+const OPTION_COUNT_OPTIONS = [
+  ["3", "3"],
+  ["4", "4"],
+  ["6", "6"],
+] as const;
+
+const SPICE_OPTIONS = [
+  ["mild", "Mild"],
+  ["medium", "Medium"],
+  ["hot", "Hot"],
+  ["extra-hot", "Extra hot"],
+] as const;
 
 function plural(value: number, singular: string, pluralForm = `${singular}s`) {
   return value === 1 ? singular : pluralForm;
@@ -56,12 +119,27 @@ export function ConfirmScreen({
   onRenameIngredient,
   onRemoveIngredient,
   onToggleIngredient,
+  onToggleAllPantry,
+  pantryStaples,
+  generatedContentExists = false,
+  onPantryStaplesChange,
   onPreferenceChange,
   onRetake,
   onGenerate,
 }: ConfirmScreenProps) {
   const [newIngredient, setNewIngredient] = useState("");
-  const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [customAllergen, setCustomAllergen] = useState("");
+  const [pantryEditorOpen, setPantryEditorOpen] = useState(false);
+  const [pantryDraft, setPantryDraft] = useState<string[]>([]);
+  const [newPantryStaple, setNewPantryStaple] = useState("");
+  const [pantryEditorError, setPantryEditorError] = useState<string | null>(null);
+  const [pantrySaveFailed, setPantrySaveFailed] = useState(false);
+  const selectAllPantryRef = useRef<HTMLInputElement>(null);
+  const pantryEditButtonRef = useRef<HTMLButtonElement>(null);
+  const pantryDraftInputRefs = useRef<Array<HTMLInputElement | null>>([]);
+  const newPantryStapleRef = useRef<HTMLInputElement>(null);
+  const pantryEditorWasOpenRef = useRef(false);
+  const pantryRemovalFocusRef = useRef<number | "add" | null>(null);
   const listedIngredients = ingredients.filter(
     (ingredient) => ingredient.source !== "pantry_suggestion",
   );
@@ -70,12 +148,130 @@ export function ConfirmScreen({
   );
   const confirmedCount = confirmedIngredientCount(ingredients);
   const hasNameErrors = Object.keys(ingredientNameErrors).length > 0;
+  const confirmedPantryCount = pantryIngredients.filter(
+    (ingredient) => ingredient.confirmed,
+  ).length;
+  const allPantryConfirmed =
+    pantryIngredients.length > 0 && confirmedPantryCount === pantryIngredients.length;
+  const somePantryConfirmed = confirmedPantryCount > 0 && !allPantryConfirmed;
+  const customAllergens = preferences.allergens.filter(
+    (allergen) =>
+      !BASE_ALLERGENS.some(
+        (baseAllergen) =>
+          baseAllergen.toLocaleLowerCase() === allergen.toLocaleLowerCase(),
+      ),
+  );
+
+  useEffect(() => {
+    if (selectAllPantryRef.current) {
+      selectAllPantryRef.current.indeterminate = somePantryConfirmed;
+    }
+  }, [somePantryConfirmed]);
+
+  useLayoutEffect(() => {
+    if (pantryEditorOpen) {
+      const removalTarget = pantryRemovalFocusRef.current;
+      if (removalTarget !== null) {
+        if (removalTarget === "add") {
+          newPantryStapleRef.current?.focus();
+        } else {
+          pantryDraftInputRefs.current[removalTarget]?.focus();
+        }
+        pantryRemovalFocusRef.current = null;
+      } else if (!pantryEditorWasOpenRef.current) {
+        (pantryDraftInputRefs.current[0] ?? newPantryStapleRef.current)?.focus();
+      }
+    } else if (pantryEditorWasOpenRef.current) {
+      pantryEditButtonRef.current?.focus();
+    }
+
+    pantryEditorWasOpenRef.current = pantryEditorOpen;
+  }, [pantryDraft, pantryEditorOpen]);
 
   function submitIngredient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!newIngredient.trim()) return;
     onAddIngredient(newIngredient);
     setNewIngredient("");
+  }
+
+  function toggleListPreference(key: "dietAddOns" | "allergens", value: string) {
+    const current = preferences[key];
+    const normalizedValue = value.toLocaleLowerCase();
+    const existingIndex = current.findIndex(
+      (item) => item.toLocaleLowerCase() === normalizedValue,
+    );
+    const next =
+      existingIndex === -1
+        ? [...current, value]
+        : current.filter((_, index) => index !== existingIndex);
+    onPreferenceChange(key, next);
+  }
+
+  function submitCustomAllergen(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const allergen = customAllergen.trim().replaceAll(/\s+/g, " ");
+    if (!allergen) return;
+    const alreadySelected = preferences.allergens.some(
+      (selected) => selected.toLocaleLowerCase() === allergen.toLocaleLowerCase(),
+    );
+    if (!alreadySelected) {
+      onPreferenceChange("allergens", [...preferences.allergens, allergen]);
+    }
+    setCustomAllergen("");
+  }
+
+  function openPantryEditor() {
+    setPantryDraft([...pantryStaples]);
+    setNewPantryStaple("");
+    setPantryEditorError(null);
+    setPantryEditorOpen(true);
+  }
+
+  function closePantryEditor() {
+    setPantryEditorOpen(false);
+    setPantryEditorError(null);
+  }
+
+  function submitNewPantryStaple(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const staple = newPantryStaple.trim().replaceAll(/\s+/g, " ");
+    if (!staple) return;
+    if (
+      pantryDraft.some(
+        (name) => name.trim().toLocaleLowerCase() === staple.toLocaleLowerCase(),
+      )
+    ) {
+      setPantryEditorError("Each pantry staple needs a different name.");
+      return;
+    }
+    setPantryDraft((current) => [...current, staple]);
+    setNewPantryStaple("");
+    setPantryEditorError(null);
+  }
+
+  function removePantryStaple(index: number) {
+    pantryRemovalFocusRef.current = index > 0 ? index - 1 : "add";
+    setPantryDraft((current) => current.filter((_, itemIndex) => itemIndex !== index));
+  }
+
+  function savePantryDefaults() {
+    const normalized = pantryDraft.map((name) => name.trim().replaceAll(/\s+/g, " "));
+    if (normalized.some((name) => !name)) {
+      setPantryEditorError("Pantry staple names cannot be empty.");
+      return;
+    }
+    if (normalized.length === 0) {
+      setPantryEditorError("Keep at least one pantry staple.");
+      return;
+    }
+    const uniqueNames = new Set(normalized.map((name) => name.toLocaleLowerCase()));
+    if (uniqueNames.size !== normalized.length) {
+      setPantryEditorError("Each pantry staple needs a different name.");
+      return;
+    }
+    setPantrySaveFailed(!onPantryStaplesChange(normalized));
+    closePantryEditor();
   }
 
   return (
@@ -161,14 +357,7 @@ export function ConfirmScreen({
                       <span className="tag tag-accent">added by you</span>
                     ) : null}
                     {ingredient.confidence !== null ? (
-                      <>
-                        {ingredient.confidence < 0.7 ? (
-                          <span className="tag tag-outline">check this</span>
-                        ) : null}
-                        <span className="tag tag-neutral">
-                          {Math.round(ingredient.confidence * 100)}%
-                        </span>
-                      </>
+                      <ConfidenceIndicator confidence={ingredient.confidence} />
                     ) : null}
                   </div>
                   <button
@@ -214,15 +403,145 @@ export function ConfirmScreen({
         </div>
 
         <div>
-          <h2 className="panel-heading">
-            Pantry staples — tick what you actually have
-          </h2>
+          <div className="panel-heading-row">
+            <h2 className="panel-heading">Pantry staples</h2>
+            <button
+              ref={pantryEditButtonRef}
+              className="btn btn-ghost pantry-edit-button"
+              type="button"
+              aria-expanded={pantryEditorOpen}
+              aria-controls={pantryEditorOpen ? "pantry-defaults-editor" : undefined}
+              onClick={pantryEditorOpen ? closePantryEditor : openPantryEditor}
+            >
+              {pantryEditorOpen ? "Close editor" : "Edit defaults"}
+            </button>
+          </div>
           <p className="panel-note">
             {manualEntry
-              ? "These are common in most kitchens. Nothing is assumed until you tick it."
-              : "These are common in most kitchens but weren't in your photo. Nothing is assumed until you tick it."}
+              ? "Tick what you actually have. Nothing is assumed."
+              : "These weren't in your photo. Tick what you actually have; nothing is assumed."}
           </p>
+
+          {pantryEditorOpen ? (
+            <section
+              className="pantry-editor"
+              id="pantry-defaults-editor"
+              aria-labelledby="pantry-editor-title"
+            >
+              <div className="pantry-editor-heading">
+                <div>
+                  <h3 id="pantry-editor-title">Edit pantry defaults</h3>
+                  <p className="panel-note">
+                    Saving replaces the current pantry list immediately and uses these
+                    defaults for future ingredient checks on this device.
+                  </p>
+                </div>
+              </div>
+              {generatedContentExists ? (
+                <div className="notice notice-accent" role="status">
+                  <AlertTriangle className="notice-icon" aria-hidden="true" />
+                  Saving now clears your generated ideas, recipes, and checked steps
+                  because the available ingredients change.
+                </div>
+              ) : null}
+              <div className="pantry-editor-list">
+                {pantryDraft.map((name, index) => (
+                  <div className="pantry-editor-row" key={index}>
+                    <input
+                      ref={(element) => {
+                        pantryDraftInputRefs.current[index] = element;
+                      }}
+                      className="input"
+                      aria-label={`Pantry staple ${index + 1}`}
+                      value={name}
+                      maxLength={80}
+                      onChange={(event) =>
+                        setPantryDraft((current) =>
+                          current.map((item, itemIndex) =>
+                            itemIndex === index ? event.target.value : item,
+                          ),
+                        )
+                      }
+                    />
+                    <button
+                      className="btn btn-secondary btn-icon"
+                      type="button"
+                      aria-label={`Remove ${name || `pantry staple ${index + 1}`}`}
+                      onClick={() => removePantryStaple(index)}
+                    >
+                      <X aria-hidden="true" size={16} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <form className="pantry-editor-add" onSubmit={submitNewPantryStaple}>
+                <label className="visually-hidden" htmlFor="new-pantry-staple">
+                  Add a pantry staple
+                </label>
+                <input
+                  ref={newPantryStapleRef}
+                  className="input"
+                  id="new-pantry-staple"
+                  aria-label="Add a pantry staple"
+                  placeholder="Add a staple…"
+                  value={newPantryStaple}
+                  maxLength={80}
+                  onChange={(event) => setNewPantryStaple(event.target.value)}
+                />
+                <button className="btn btn-secondary" type="submit">
+                  <Plus aria-hidden="true" size={16} />
+                  Add
+                </button>
+              </form>
+              {pantryEditorError ? (
+                <p className="field-error" role="alert">
+                  {pantryEditorError}
+                </p>
+              ) : null}
+              <div className="pantry-editor-actions">
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  onClick={savePantryDefaults}
+                >
+                  Save defaults
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  type="button"
+                  onClick={closePantryEditor}
+                >
+                  Cancel
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          {pantrySaveFailed ? (
+            <div className="notice notice-plain" role="status">
+              Pantry defaults could not be saved on this device. They apply to this
+              visit only.
+            </div>
+          ) : null}
+
           <div className="pantry-list">
+            <label className="pantry-row pantry-select-all">
+              <input
+                ref={selectAllPantryRef}
+                className="pantry-input"
+                type="checkbox"
+                aria-label="Select all pantry staples"
+                checked={allPantryConfirmed}
+                onChange={() => onToggleAllPantry(!allPantryConfirmed)}
+              />
+              <span className="pantry-checkbox" aria-hidden="true">
+                {somePantryConfirmed ? <Minus /> : <Check />}
+              </span>
+              <span className="pantry-label">Select all</span>
+              <span className="tag tag-neutral">
+                {confirmedPantryCount} of {pantryIngredients.length}
+              </span>
+            </label>
             {pantryIngredients.map((ingredient) => (
               <label className="pantry-row" key={ingredient.id}>
                 <input
@@ -240,108 +559,234 @@ export function ConfirmScreen({
               </label>
             ))}
           </div>
-
-          <div className="preferences">
-            <button
-              className="preferences-trigger"
-              type="button"
-              aria-expanded={preferencesOpen}
-              aria-controls="preferences-panel"
-              onClick={() => setPreferencesOpen((open) => !open)}
-            >
-              <span className="preferences-title">Preferences — optional</span>
-              <span className="preferences-summary">
-                {preferences.diet === "none"
-                  ? "Any diet"
-                  : preferences.diet === "vegetarian"
-                    ? "Veg"
-                    : "Vegan"}
-                {` · serves ${preferences.servings} · ≤ ${preferences.maxMinutes} min · ${preferences.optionCount} ideas`}
-              </span>
-              <ChevronDown className="preferences-chevron" aria-hidden="true" />
-            </button>
-            {preferencesOpen ? (
-              <div className="preferences-panel" id="preferences-panel">
-                <div className="preferences-grid">
-                  <PreferenceSegment
-                    label="Diet"
-                    name="diet"
-                    value={preferences.diet}
-                    options={[
-                      ["none", "Any"],
-                      ["vegetarian", "Veg"],
-                      ["vegan", "Vegan"],
-                    ]}
-                    onChange={(value) =>
-                      onPreferenceChange("diet", value as PreferenceView["diet"])
-                    }
-                  />
-                  <PreferenceSegment
-                    label="Servings"
-                    name="servings"
-                    value={String(preferences.servings)}
-                    options={[
-                      ["1", "1"],
-                      ["2", "2"],
-                      ["4", "4"],
-                    ]}
-                    onChange={(value) =>
-                      onPreferenceChange(
-                        "servings",
-                        Number(value) as PreferenceView["servings"],
-                      )
-                    }
-                  />
-                  <PreferenceSegment
-                    label="Max time"
-                    name="max-time"
-                    value={String(preferences.maxMinutes)}
-                    options={[
-                      ["30", "30 min"],
-                      ["45", "45 min"],
-                      ["60", "60 min"],
-                    ]}
-                    onChange={(value) =>
-                      onPreferenceChange(
-                        "maxMinutes",
-                        Number(value) as PreferenceView["maxMinutes"],
-                      )
-                    }
-                  />
-                  <PreferenceSegment
-                    label="Number of ideas"
-                    name="option-count"
-                    value={String(preferences.optionCount)}
-                    options={[
-                      ["3", "3"],
-                      ["4", "4"],
-                      ["6", "6"],
-                    ]}
-                    onChange={(value) =>
-                      onPreferenceChange(
-                        "optionCount",
-                        Number(value) as PreferenceView["optionCount"],
-                      )
-                    }
-                  />
-                  <div className="field">
-                    <label htmlFor="allergens">Avoid allergens</label>
-                    <input
-                      className="input"
-                      id="allergens"
-                      value={preferences.allergens}
-                      placeholder="e.g. dairy, soy"
-                      onChange={(event) =>
-                        onPreferenceChange("allergens", event.target.value)
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
-            ) : null}
-          </div>
         </div>
       </div>
+
+      <section className="preferences" aria-labelledby="preferences-title">
+        <div className="preferences-header">
+          <h2 className="preferences-title" id="preferences-title">
+            Preferences
+          </h2>
+          <p className="preferences-note">
+            Optional details that help tailor the recipe ideas.
+          </p>
+        </div>
+        <div className="preferences-panel">
+          <div className="preferences-grid">
+            <section
+              className="preference-group preference-diet"
+              aria-labelledby="preference-diet-title"
+            >
+              <h3 className="preference-group-title" id="preference-diet-title">
+                Diet
+              </h3>
+              <PreferenceSegment
+                label="Diet preference"
+                name="diet"
+                value={preferences.diet}
+                options={DIET_OPTIONS}
+                onChange={(value) =>
+                  onPreferenceChange("diet", value as PreferenceView["diet"])
+                }
+              />
+              <PreferenceSegment
+                label="Style"
+                name="diet-style"
+                value={preferences.dietStyle ?? ""}
+                options={DIET_STYLE_OPTIONS[preferences.diet]}
+                onChange={(value) =>
+                  onPreferenceChange(
+                    "dietStyle",
+                    (value || null) as PreferenceView["dietStyle"],
+                  )
+                }
+              />
+              <div className="field">
+                <span className="field-label" id="diet-add-ons-label">
+                  Also apply
+                </span>
+                <div
+                  className="preference-chips"
+                  role="group"
+                  aria-labelledby="diet-add-ons-label"
+                >
+                  {DIET_ADD_ONS.map((addOn) => {
+                    const selected = preferences.dietAddOns.includes(addOn);
+                    return (
+                      <button
+                        className="preference-chip"
+                        data-selected={selected ? "true" : undefined}
+                        type="button"
+                        aria-pressed={selected}
+                        key={addOn}
+                        onClick={() => toggleListPreference("dietAddOns", addOn)}
+                      >
+                        {DIET_ADD_ON_LABELS[addOn]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+
+            <section
+              className="preference-group"
+              aria-labelledby="preference-spice-title"
+            >
+              <h3 className="preference-group-title" id="preference-spice-title">
+                Spice
+              </h3>
+              <PreferenceSegment
+                label="Spice level"
+                name="spice-level"
+                value={preferences.spiceLevel}
+                options={SPICE_OPTIONS}
+                onChange={(value) =>
+                  onPreferenceChange(
+                    "spiceLevel",
+                    value as PreferenceView["spiceLevel"],
+                  )
+                }
+              />
+            </section>
+
+            <section
+              className="preference-group preference-serving-group"
+              aria-labelledby="preference-serving-title"
+            >
+              <h3 className="preference-group-title" id="preference-serving-title">
+                Servings &amp; ideas
+              </h3>
+              <div className="preference-pair">
+                <PreferenceSegment
+                  label="Servings"
+                  name="servings"
+                  value={String(preferences.servings)}
+                  options={SERVING_OPTIONS}
+                  onChange={(value) =>
+                    onPreferenceChange(
+                      "servings",
+                      Number(value) as PreferenceView["servings"],
+                    )
+                  }
+                />
+                <PreferenceSegment
+                  label="Number of ideas"
+                  name="option-count"
+                  value={String(preferences.optionCount)}
+                  options={OPTION_COUNT_OPTIONS}
+                  onChange={(value) =>
+                    onPreferenceChange(
+                      "optionCount",
+                      Number(value) as PreferenceView["optionCount"],
+                    )
+                  }
+                />
+              </div>
+            </section>
+
+            <section
+              className="preference-group"
+              aria-labelledby="preference-allergens-title"
+            >
+              <h3 className="preference-group-title" id="preference-allergens-title">
+                Allergens
+              </h3>
+              <div className="field">
+                <span className="field-label" id="allergens-label">
+                  Select any to avoid
+                </span>
+                <div
+                  className="preference-chips"
+                  role="group"
+                  aria-labelledby="allergens-label"
+                >
+                  {BASE_ALLERGENS.map((allergen) => {
+                    const selected = preferences.allergens.some(
+                      (value) =>
+                        value.toLocaleLowerCase() === allergen.toLocaleLowerCase(),
+                    );
+                    return (
+                      <button
+                        className="preference-chip"
+                        data-selected={selected ? "true" : undefined}
+                        type="button"
+                        aria-pressed={selected}
+                        key={allergen}
+                        onClick={() => toggleListPreference("allergens", allergen)}
+                      >
+                        {allergen}
+                      </button>
+                    );
+                  })}
+                </div>
+                <form className="allergen-add-form" onSubmit={submitCustomAllergen}>
+                  <label className="visually-hidden" htmlFor="custom-allergen">
+                    Custom allergen
+                  </label>
+                  <input
+                    className="input"
+                    id="custom-allergen"
+                    aria-label="Custom allergen"
+                    placeholder="Add another allergen…"
+                    value={customAllergen}
+                    maxLength={80}
+                    onChange={(event) => setCustomAllergen(event.target.value)}
+                  />
+                  <button className="btn btn-secondary" type="submit">
+                    <Plus aria-hidden="true" size={16} />
+                    Add
+                  </button>
+                </form>
+                {customAllergens.length > 0 ? (
+                  <div className="custom-allergen-list" aria-label="Custom allergens">
+                    {customAllergens.map((allergen) => (
+                      <button
+                        className="preference-chip preference-chip-custom"
+                        type="button"
+                        aria-label={`Remove ${allergen} allergen`}
+                        key={allergen.toLocaleLowerCase()}
+                        onClick={() => toggleListPreference("allergens", allergen)}
+                      >
+                        {allergen}
+                        <X aria-hidden="true" size={14} />
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section
+              className="preference-group preference-group-wide"
+              aria-labelledby="preference-instructions-title"
+            >
+              <h3 className="preference-group-title" id="preference-instructions-title">
+                Special instructions
+              </h3>
+              <div className="field">
+                <label className="visually-hidden" htmlFor="special-instructions">
+                  Special instructions
+                </label>
+                <textarea
+                  className="input"
+                  id="special-instructions"
+                  value={preferences.specialInstructions}
+                  maxLength={500}
+                  aria-describedby="special-instructions-count"
+                  placeholder="Anything else the agents should honor — kid-friendly, low oil, pressure cooker only…"
+                  onChange={(event) =>
+                    onPreferenceChange("specialInstructions", event.target.value)
+                  }
+                />
+                <span className="character-count" id="special-instructions-count">
+                  {preferences.specialInstructions.length} / 500
+                </span>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
 
       <StickyActionBar
         summary={`${confirmedCount} ${plural(confirmedCount, "ingredient")} confirmed`}
@@ -370,11 +815,117 @@ export function ConfirmScreen({
   );
 }
 
+type ConfidenceLevel = "high" | "medium" | "low";
+
+function confidenceLevel(confidence: number): ConfidenceLevel {
+  if (confidence >= 0.8) return "high";
+  if (confidence >= 0.6) return "medium";
+  return "low";
+}
+
+function confidenceMessage(level: ConfidenceLevel, percentage: number): string {
+  if (level === "high") {
+    return `Identified with high confidence (${percentage}%). Very likely correct.`;
+  }
+  if (level === "medium") {
+    return `Identified with medium confidence (${percentage}%). Worth a quick check.`;
+  }
+  return `Low confidence (${percentage}%). Verify or remove this item.`;
+}
+
+function ConfidenceIndicator({ confidence }: { confidence: number }) {
+  const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<"above" | "below">("below");
+  const containerRef = useRef<HTMLSpanElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLSpanElement>(null);
+  const popoverId = useId();
+  const level = confidenceLevel(confidence);
+  const percentage = Math.round(confidence * 100);
+
+  useEffect(() => {
+    if (!open) return;
+
+    function dismissOnOutsidePress(event: PointerEvent) {
+      if (
+        event.target instanceof Node &&
+        !containerRef.current?.contains(event.target)
+      ) {
+        setOpen(false);
+      }
+    }
+
+    function dismissOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+
+    document.addEventListener("pointerdown", dismissOnOutsidePress);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePress);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !buttonRef.current || !popoverRef.current) return;
+
+    const buttonRect = buttonRef.current.getBoundingClientRect();
+    const popoverHeight = popoverRef.current.getBoundingClientRect().height;
+    const stickyBarTop = document
+      .querySelector<HTMLElement>(".sticky-action-bar")
+      ?.getBoundingClientRect().top;
+    const lowerBoundary = Math.min(
+      window.innerHeight,
+      stickyBarTop ?? window.innerHeight,
+    );
+    const spaceBelow = lowerBoundary - buttonRect.bottom;
+    const spaceAbove = buttonRect.top;
+    const nextPlacement =
+      spaceBelow < popoverHeight + 8 && spaceAbove > spaceBelow ? "above" : "below";
+    setPlacement(nextPlacement);
+  }, [open]);
+
+  return (
+    <span className="confidence-indicator" ref={containerRef}>
+      <button
+        ref={buttonRef}
+        className={`confidence-button confidence-${level}`}
+        type="button"
+        aria-label={`Confidence: ${level}, ${percentage} percent`}
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        aria-describedby={open ? popoverId : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span
+          className="confidence-dot"
+          data-signal={
+            level === "high" ? "filled" : level === "medium" ? "half" : "hollow"
+          }
+          aria-hidden="true"
+        />
+      </button>
+      {open ? (
+        <span
+          ref={popoverRef}
+          className="confidence-popover"
+          data-placement={placement}
+          id={popoverId}
+          role="tooltip"
+        >
+          {confidenceMessage(level, percentage)}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 interface PreferenceSegmentProps {
   label: string;
   name: string;
   value: string;
-  options: Array<[value: string, label: string]>;
+  options: ReadonlyArray<readonly [value: string, label: string]>;
   onChange: (value: string) => void;
 }
 

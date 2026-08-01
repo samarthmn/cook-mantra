@@ -9,5 +9,9 @@ export default function manifest(): MetadataRoute.Manifest {
     display: "standalone",
     background_color: "#f3f2f2",
     theme_color: "#ec3013",
+    icons: [
+      { src: "/brand/cook-mantra-192.png", sizes: "192x192", type: "image/png" },
+      { src: "/brand/cook-mantra-512.png", sizes: "512x512", type: "image/png" },
+    ],
   };
 }

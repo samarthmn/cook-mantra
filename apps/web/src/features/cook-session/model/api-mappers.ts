@@ -6,6 +6,8 @@ import type {
   RecipePreferences,
 } from "@/types/api";
 
+import { LOCAL_PANTRY_INGREDIENT_ID_PREFIX } from "./cook-session-state";
+
 import type {
   CompleteRecipeView,
   IngredientView,
@@ -29,7 +31,11 @@ export function ingredientsToReviewRequest(
     ingredients: ingredients
       .filter((ingredient) => ingredient.name.trim().length > 0)
       .map((ingredient) => ({
-        id: ingredient.source === "user_added" ? null : ingredient.id,
+        id:
+          ingredient.source === "user_added" ||
+          ingredient.id.startsWith(LOCAL_PANTRY_INGREDIENT_ID_PREFIX)
+            ? null
+            : ingredient.id,
         name: ingredient.name.trim(),
         confirmed: ingredient.confirmed,
       })),
@@ -63,22 +69,42 @@ function normalizedIngredientName(name: string): string {
 }
 
 export function preferencesToApi(preferences: PreferenceView): RecipePreferences {
-  const allergens = new Map<string, string>();
-  for (const value of preferences.allergens.split(",")) {
-    const allergen = value.trim();
-    if (!allergen) continue;
-    const normalized = allergen.toLocaleLowerCase();
-    if (!allergens.has(normalized)) allergens.set(normalized, allergen);
-  }
+  const allergens = uniqueNormalizedValues(preferences.allergens, false);
+  const dietaryPreferences = uniqueNormalizedValues(
+    [
+      preferences.diet,
+      ...(preferences.dietStyle ? [preferences.dietStyle] : []),
+      ...preferences.dietAddOns,
+    ],
+    true,
+  );
 
   return {
-    dietary_preferences: preferences.diet === "none" ? [] : [preferences.diet],
-    allergens: [...allergens.values()],
+    dietary_preferences: dietaryPreferences,
+    allergens,
     preferred_cuisines: [],
-    max_total_minutes: preferences.maxMinutes,
+    max_total_minutes: null,
     servings: preferences.servings,
     option_count: preferences.optionCount,
+    spice_level: preferences.spiceLevel,
+    special_instructions: preferences.specialInstructions.trim().slice(0, 500),
   };
+}
+
+function uniqueNormalizedValues(
+  values: readonly string[],
+  lowercase: boolean,
+): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = value.trim().replaceAll(/\s+/g, " ");
+    const comparisonValue = normalized.toLocaleLowerCase();
+    if (!normalized || seen.has(comparisonValue)) continue;
+    seen.add(comparisonValue);
+    result.push(lowercase ? comparisonValue : normalized);
+  }
+  return result;
 }
 
 export function optionFromApi(

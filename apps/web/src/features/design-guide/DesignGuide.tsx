@@ -258,7 +258,7 @@ export function DesignGuide() {
                 strokeWidth={1.5}
               />
               <span className="tag tag-neutral option-card-ai-label">
-                AI illustration
+                AI image
               </span>
             </div>
             <div className="option-card-content">

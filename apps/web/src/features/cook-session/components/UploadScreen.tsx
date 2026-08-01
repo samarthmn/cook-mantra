@@ -9,12 +9,14 @@ interface UploadScreenProps {
   onUpload: (file: File) => void;
   onManualEntry: () => void;
   onWeakDetection: () => void;
+  showWeakDetection?: boolean;
 }
 
 export function UploadScreen({
   onUpload,
   onManualEntry,
   onWeakDetection,
+  showWeakDetection = false,
 }: UploadScreenProps) {
   const cameraInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
@@ -49,8 +51,8 @@ export function UploadScreen({
         <div>
           <div className="upload-zone-title">Photograph your ingredients</div>
           <p className="upload-zone-copy">
-            Lay them out on a counter — one photo is enough. Your image is sent only to
-            the Cook Mantra API you configured.
+            Lay them out on a counter — one photo is enough. Your photo is used only to
+            identify your ingredients for this session.
           </p>
         </div>
         <div className="upload-zone-actions">
@@ -100,13 +102,15 @@ export function UploadScreen({
           Type ingredients instead
           <ArrowRight aria-hidden="true" size={16} />
         </button>
-        <button
-          className="btn btn-ghost text-muted"
-          type="button"
-          onClick={onWeakDetection}
-        >
-          Simulate weak detection
-        </button>
+        {showWeakDetection ? (
+          <button
+            className="btn btn-ghost text-muted"
+            type="button"
+            onClick={onWeakDetection}
+          >
+            Simulate weak detection
+          </button>
+        ) : null}
       </div>
     </section>
   );

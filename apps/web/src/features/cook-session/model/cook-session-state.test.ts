@@ -108,6 +108,32 @@ describe("cookSessionReducer", () => {
     expect(confirmedIngredientCount(state.ingredients)).toBe(0);
   });
 
+  it("uses the current custom pantry defaults for manual entry", () => {
+    const customized = cookSessionReducer(createInitialCookSessionState(), {
+      type: "set-pantry-staples",
+      names: ["Sea salt", "Olive oil"],
+    });
+    const state = cookSessionReducer(customized, { type: "start-manual-entry" });
+
+    expect(state.pantryStaples).toEqual(["Sea salt", "Olive oil"]);
+    expect(state.ingredients).toEqual([
+      {
+        id: "local-pantry-sea-salt",
+        name: "Sea salt",
+        source: "pantry_suggestion",
+        confidence: null,
+        confirmed: false,
+      },
+      {
+        id: "local-pantry-olive-oil",
+        name: "Olive oil",
+        source: "pantry_suggestion",
+        confidence: null,
+        confirmed: false,
+      },
+    ]);
+  });
+
   it("adds a trimmed user ingredient as confirmed and rejects a duplicate name", () => {
     const manualState = cookSessionReducer(createInitialCookSessionState(), {
       type: "start-manual-entry",
@@ -214,6 +240,58 @@ describe("cookSessionReducer", () => {
     expect(next.maxReached).toBe(2);
   });
 
+  it("selects and deselects every pantry suggestion without changing other ingredients", () => {
+    const state = stateWithGeneratedContent();
+    const withPartialSelection = cookSessionReducer(state, {
+      type: "receive-ingredients",
+      mode: "demo",
+      sessionId: null,
+      photoPreviewUrl: null,
+      weakDetection: false,
+      ingredients: [
+        ...state.ingredients,
+        {
+          id: "pantry-pepper",
+          name: "Pepper powder",
+          source: "pantry_suggestion",
+          confidence: null,
+          confirmed: true,
+        },
+      ],
+    });
+    const selected = cookSessionReducer(withPartialSelection, {
+      type: "toggle-all-pantry",
+      confirmed: true,
+    });
+    const deselected = cookSessionReducer(selected, {
+      type: "toggle-all-pantry",
+      confirmed: false,
+    });
+
+    expect(
+      withPartialSelection.ingredients
+        .filter((ingredient) => ingredient.source === "pantry_suggestion")
+        .map((ingredient) => ingredient.confirmed),
+    ).toContain(true);
+    expect(
+      withPartialSelection.ingredients
+        .filter((ingredient) => ingredient.source === "pantry_suggestion")
+        .map((ingredient) => ingredient.confirmed),
+    ).toContain(false);
+    expect(
+      selected.ingredients
+        .filter((ingredient) => ingredient.source === "pantry_suggestion")
+        .every((ingredient) => ingredient.confirmed),
+    ).toBe(true);
+    expect(selected.ingredients[0]).toEqual(withPartialSelection.ingredients[0]);
+    expect(selected.options).toEqual([]);
+    expect(
+      deselected.ingredients
+        .filter((ingredient) => ingredient.source === "pantry_suggestion")
+        .every((ingredient) => !ingredient.confirmed),
+    ).toBe(true);
+  });
+
   it("keeps recipe selections unique and toggles them off", () => {
     const state = stateWithGeneratedContent();
     const selectedRasam = cookSessionReducer(state, {
@@ -256,11 +334,14 @@ describe("cookSessionReducer", () => {
     const state = {
       ...stateWithGeneratedContent(),
       preferences: {
-        diet: "vegan" as const,
+        diet: "non-vegetarian" as const,
+        dietStyle: "halal" as const,
+        dietAddOns: ["keto"],
         servings: 4 as const,
-        maxMinutes: 60 as const,
         optionCount: 6 as const,
-        allergens: "peanuts",
+        allergens: ["Peanuts"],
+        spiceLevel: "hot" as const,
+        specialInstructions: "Use a pressure cooker.",
       },
     };
 
@@ -310,8 +391,8 @@ describe("cookSessionReducer", () => {
 
     const edited = cookSessionReducer(failed, {
       type: "set-preference",
-      key: "maxMinutes",
-      value: 60,
+      key: "spiceLevel",
+      value: "hot",
     });
 
     expect(edited.error).toBeNull();
@@ -421,6 +502,7 @@ describe("cookSessionReducer", () => {
           retryable: false,
         },
       },
+      merge: false,
     });
 
     expect(next.view).toBe("recipes");
@@ -429,6 +511,45 @@ describe("cookSessionReducer", () => {
     expect(next.recipeFailures["tomato-rasam"]?.message).toContain(
       "could not be generated",
     );
+  });
+
+  it("merges retried recipes without losing successful recipes or checked steps", () => {
+    const state: CookSessionState = {
+      ...stateWithGeneratedContent(),
+      view: "recipes",
+      maxReached: 4,
+      selectedOptionIds: ["palak-paneer", "tomato-rasam"],
+      activeRecipeId: "palak-paneer",
+      completedSteps: { "palak-paneer": [1, 2] },
+      recipeFailures: {
+        "tomato-rasam": {
+          optionId: "tomato-rasam",
+          code: "model_output_invalid",
+          message: "The first attempt failed.",
+          retryable: true,
+        },
+      },
+    };
+    const tomatoRecipe = {
+      ...state.completeRecipes["palak-paneer"],
+      optionId: "tomato-rasam",
+      name: "Tomato Rasam",
+    };
+
+    const next = cookSessionReducer(state, {
+      type: "receive-recipes",
+      recipes: { "tomato-rasam": tomatoRecipe },
+      failures: {},
+      merge: true,
+    });
+
+    expect(next.completeRecipes).toEqual({
+      "palak-paneer": state.completeRecipes["palak-paneer"],
+      "tomato-rasam": tomatoRecipe,
+    });
+    expect(next.recipeFailures).toEqual({});
+    expect(next.completedSteps).toEqual({ "palak-paneer": [1, 2] });
+    expect(next.activeRecipeId).toBe("palak-paneer");
   });
 
   it("allows navigation across every previously reached step", () => {
@@ -513,7 +634,7 @@ describe("cookSessionReducer", () => {
     expect(replaced.error).toBeNull();
   });
 
-  it("loads a reviewed API session without assuming pantry ingredients", () => {
+  it("merges every missing pantry default into a reviewed API session", () => {
     const state = cookSessionReducer(createInitialCookSessionState(), {
       type: "receive-ingredients",
       mode: "api",
@@ -546,15 +667,242 @@ describe("cookSessionReducer", () => {
       photoPreviewUrl: "blob:photo",
     });
     expect(confirmedIngredientCount(state.ingredients)).toBe(1);
+    expect(
+      state.ingredients
+        .filter((ingredient) => ingredient.source === "pantry_suggestion")
+        .map((ingredient) => ingredient.name),
+    ).toEqual([
+      "Salt",
+      "Pepper powder",
+      "Oil or ghee",
+      "Chilli powder",
+      "Onion",
+      "Garlic",
+      "Ginger",
+    ]);
+  });
+
+  it("does not duplicate pantry defaults that match any ingredient name", () => {
+    const customized = cookSessionReducer(createInitialCookSessionState(), {
+      type: "set-pantry-staples",
+      names: ["Tomato", "Sea salt", "Oil!", "Oil?"],
+    });
+    const state = cookSessionReducer(customized, {
+      type: "receive-ingredients",
+      mode: "api",
+      sessionId: "session-123",
+      photoPreviewUrl: null,
+      weakDetection: false,
+      ingredients: [
+        {
+          id: "pantry-oil",
+          name: " tomato ",
+          source: "detected",
+          confidence: 0.94,
+          confirmed: true,
+        },
+        {
+          id: "server-pantry-salt",
+          name: "SEA SALT",
+          source: "pantry_suggestion",
+          confidence: null,
+          confirmed: false,
+        },
+      ],
+    });
+
+    expect(state.ingredients.map((ingredient) => ingredient.name)).toEqual([
+      " tomato ",
+      "SEA SALT",
+      "Oil!",
+      "Oil?",
+    ]);
+    expect(new Set(state.ingredients.map((ingredient) => ingredient.id)).size).toBe(
+      state.ingredients.length,
+    );
+  });
+
+  it("updates pantry defaults on a pristine upload without advancing the workflow", () => {
+    const state = cookSessionReducer(createInitialCookSessionState(), {
+      type: "set-pantry-staples",
+      names: ["  Sea   salt ", "Olive oil", "sea salt"],
+    });
+
+    expect(state.pantryStaples).toEqual(["Sea salt", "Olive oil"]);
+    expect(state.view).toBe("upload");
+    expect(state.maxReached).toBe(1);
+    expect(state.ingredients).toEqual([]);
+  });
+
+  it("reconciles current pantry rows immediately while preserving non-pantry rows", () => {
+    const generated = stateWithGeneratedContent();
+    const state: CookSessionState = {
+      ...generated,
+      ingredients: [
+        generated.ingredients[0],
+        { ...generated.ingredients[1], confirmed: true },
+        {
+          id: "user-basil",
+          name: "Basil",
+          source: "user_added",
+          confidence: null,
+          confirmed: true,
+        },
+        {
+          id: "pantry-pepper",
+          name: "Pepper powder",
+          source: "pantry_suggestion",
+          confidence: null,
+          confirmed: false,
+        },
+      ],
+    };
+    const next = cookSessionReducer(state, {
+      type: "set-pantry-staples",
+      names: ["salt", "Sea salt"],
+    });
+
+    expect(next.pantryStaples).toEqual(["salt", "Sea salt"]);
+    expect(next.ingredients).toEqual([
+      state.ingredients[0],
+      state.ingredients[2],
+      {
+        ...state.ingredients[1],
+        name: "salt",
+      },
+      {
+        id: "local-pantry-sea-salt",
+        name: "Sea salt",
+        source: "pantry_suggestion",
+        confidence: null,
+        confirmed: false,
+      },
+    ]);
+    expect(next.options).toEqual([]);
+    expect(next.view).toBe("confirm");
+  });
+
+  it("preserves custom pantry defaults across an in-app reset", () => {
+    const state: CookSessionState = {
+      ...stateWithGeneratedContent(),
+      pantryStaples: ["Sea salt", "Olive oil"],
+    };
+
+    const reset = cookSessionReducer(state, { type: "reset" });
+
+    expect(reset).toEqual({
+      ...createInitialCookSessionState(),
+      pantryStaples: ["Sea salt", "Olive oil"],
+    });
+  });
+
+  it("keeps locally generated ingredient IDs unique after receiving server rows", () => {
+    const received = cookSessionReducer(createInitialCookSessionState(), {
+      type: "receive-ingredients",
+      mode: "api",
+      sessionId: "session-123",
+      photoPreviewUrl: null,
+      weakDetection: false,
+      ingredients: [
+        {
+          id: "user-1",
+          name: "Tomato",
+          source: "user_added",
+          confidence: null,
+          confirmed: true,
+        },
+      ],
+    });
+    const next = cookSessionReducer(received, {
+      type: "add-ingredient",
+      name: "Basil",
+    });
+
+    expect(next.ingredients.find((ingredient) => ingredient.name === "Basil")?.id).toBe(
+      "user-2",
+    );
+  });
+
+  it("normalizes diet styles and allowed add-ons", () => {
+    const withVegan = cookSessionReducer(stateWithGeneratedContent(), {
+      type: "set-preference",
+      key: "dietStyle",
+      value: "vegan",
+    });
+    const withInvalidStyle = cookSessionReducer(withVegan, {
+      type: "set-preference",
+      key: "dietStyle",
+      value: "halal",
+    });
+    const withAddOns = cookSessionReducer(withInvalidStyle, {
+      type: "set-preference",
+      key: "dietAddOns",
+      value: [" KETO ", "keto", "No onion or garlic", "vegan", ""],
+    });
+
+    expect(withVegan.preferences.dietStyle).toBe("vegan");
+    expect(withInvalidStyle.preferences.dietStyle).toBeNull();
+    expect(withAddOns.preferences.dietAddOns).toEqual(["keto", "no onion or garlic"]);
+  });
+
+  it("resets style but keeps add-ons when the main diet changes", () => {
+    const withPreferences: CookSessionState = {
+      ...stateWithGeneratedContent(),
+      preferences: {
+        ...stateWithGeneratedContent().preferences,
+        dietStyle: "vegan",
+        dietAddOns: ["keto", "no onion or garlic"],
+      },
+    };
+    const nonVegetarian = cookSessionReducer(withPreferences, {
+      type: "set-preference",
+      key: "diet",
+      value: "non-vegetarian",
+    });
+
+    expect(nonVegetarian.preferences).toMatchObject({
+      diet: "non-vegetarian",
+      dietStyle: null,
+      dietAddOns: ["keto", "no onion or garlic"],
+    });
+  });
+
+  it("normalizes allergen entries and limits special instructions to 500 characters", () => {
+    const withAllergens = cookSessionReducer(stateWithGeneratedContent(), {
+      type: "set-preference",
+      key: "allergens",
+      value: [" Dairy ", "dairy", "Tree   nuts", "TREE NUTS", ""],
+    });
+    const withInstructions = cookSessionReducer(withAllergens, {
+      type: "set-preference",
+      key: "specialInstructions",
+      value: "x".repeat(510),
+    });
+    const withSpice = cookSessionReducer(withInstructions, {
+      type: "set-preference",
+      key: "spiceLevel",
+      value: "extra-hot",
+    });
+
+    expect(withAllergens.preferences.allergens).toEqual(["Dairy", "Tree nuts"]);
+    expect(withInstructions.preferences.specialInstructions).toHaveLength(500);
+    expect(withSpice.preferences.spiceLevel).toBe("extra-hot");
   });
 
   it("invalidates generated content when any recipe preference changes", () => {
     const changes: Array<Extract<CookSessionAction, { type: "set-preference" }>> = [
-      { type: "set-preference", key: "diet", value: "vegan" },
+      { type: "set-preference", key: "diet", value: "non-vegetarian" },
+      { type: "set-preference", key: "dietStyle", value: "vegan" },
+      { type: "set-preference", key: "dietAddOns", value: ["keto"] },
       { type: "set-preference", key: "servings", value: 4 },
-      { type: "set-preference", key: "maxMinutes", value: 60 },
       { type: "set-preference", key: "optionCount", value: 6 },
-      { type: "set-preference", key: "allergens", value: "dairy" },
+      { type: "set-preference", key: "allergens", value: ["dairy"] },
+      { type: "set-preference", key: "spiceLevel", value: "hot" },
+      {
+        type: "set-preference",
+        key: "specialInstructions",
+        value: "Kid friendly",
+      },
     ];
 
     for (const change of changes) {
@@ -578,7 +926,7 @@ describe("cookSessionReducer", () => {
         view: "recipes",
       });
 
-      expect(next.preferences[change.key]).toBe(change.value);
+      expect(next.preferences[change.key]).toEqual(change.value);
       expect(next).toMatchObject({
         view: "confirm",
         maxReached: 2,

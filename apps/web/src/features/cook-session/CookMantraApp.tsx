@@ -7,6 +7,7 @@ import { ErrorAlert } from "@/components/layout/ErrorAlert";
 import { ProgressStepper } from "@/components/layout/ProgressStepper";
 import {
   ApiError,
+  ApiNetworkError,
   ApiTimeoutError,
   CookMantraClient,
   DEFAULT_API_BASE_URL,
@@ -44,6 +45,7 @@ import {
   demoDetectedIngredients,
   demoPantryIngredients,
 } from "./model/demo-data";
+import { loadPantryStaples, savePantryStaples } from "./model/pantry-staples";
 
 const ACCEPTED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -51,6 +53,7 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export interface CookMantraAppProps {
   demoJobDurationMs?: number;
   apiClient?: CookMantraClient;
+  devControls?: boolean;
 }
 
 interface PendingOptionJob {
@@ -65,8 +68,11 @@ interface PendingOptionJob {
 interface PendingRecipeJob {
   sessionId: string;
   jobId: string;
+  optionIds: string[];
   selectedNames: string[];
   entryStage: "options_ready" | "recipes_ready";
+  merge: boolean;
+  returnView: "options" | "recipes";
 }
 
 class JobRunError extends Error {
@@ -74,7 +80,7 @@ class JobRunError extends Error {
   readonly jobError: JobErrorResponse | null;
 
   constructor(error: JobErrorResponse | null) {
-    super(error?.message ?? "The background job did not complete.");
+    super(error?.message ?? "The agents could not finish this step.");
     this.name = "JobRunError";
     this.retryable = error?.retryable ?? true;
     this.jobError = error;
@@ -84,7 +90,39 @@ class JobRunError extends Error {
 export function CookMantraApp({
   demoJobDurationMs = 900,
   apiClient,
+  devControls = false,
 }: CookMantraAppProps) {
+  const configuredBaseUrl = process.env.NEXT_PUBLIC_COOK_MANTRA_API_URL?.trim() || null;
+  const missingProductionConfiguration =
+    !apiClient && process.env.NODE_ENV === "production" && configuredBaseUrl === null;
+  const client = useMemo(() => {
+    if (apiClient) return apiClient;
+    if (missingProductionConfiguration) return null;
+    return new CookMantraClient({
+      baseUrl: configuredBaseUrl ?? DEFAULT_API_BASE_URL,
+    });
+  }, [apiClient, configuredBaseUrl, missingProductionConfiguration]);
+
+  if (!client) return <ApiConfigurationNotice />;
+
+  return (
+    <ConnectedCookMantraApp
+      client={client}
+      demoJobDurationMs={demoJobDurationMs}
+      devControls={devControls}
+    />
+  );
+}
+
+function ConnectedCookMantraApp({
+  client,
+  demoJobDurationMs,
+  devControls,
+}: {
+  client: CookMantraClient;
+  demoJobDurationMs: number;
+  devControls: boolean;
+}) {
   const [state, dispatch] = useReducer(
     cookSessionReducer,
     undefined,
@@ -100,14 +138,9 @@ export function CookMantraApp({
   const photoPreviewUrl = useRef<string | null>(null);
   const lastRetry = useRef<(() => void) | null>(null);
   const previousView = useRef(state.view);
-  const client = useMemo(
-    () =>
-      apiClient ??
-      new CookMantraClient({
-        baseUrl: process.env.NEXT_PUBLIC_COOK_MANTRA_API_URL ?? DEFAULT_API_BASE_URL,
-      }),
-    [apiClient],
-  );
+  useEffect(() => {
+    dispatch({ type: "set-pantry-staples", names: loadPantryStaples() });
+  }, []);
 
   useEffect(
     () => () => {
@@ -136,6 +169,12 @@ export function CookMantraApp({
 
   const finishOperation = useCallback((controller: AbortController) => {
     if (activeController.current === controller) activeController.current = null;
+  }, []);
+
+  const handlePantryStaplesChange = useCallback((names: string[]) => {
+    const persisted = savePantryStaples(names);
+    dispatch({ type: "set-pantry-staples", names });
+    return persisted;
   }, []);
 
   const runDemoJob = useCallback(
@@ -261,7 +300,9 @@ export function CookMantraApp({
     });
     if (terminal.status === "failed") {
       apiSessionStage.current = pending.entryStage;
-      lastRetry.current = handleCreateRecipes;
+      lastRetry.current = pending.merge
+        ? handleRetryFailedRecipes
+        : handleCreateRecipes;
     }
     assertSuccessfulJob(terminal);
     apiSessionStage.current = "recipes_ready";
@@ -269,24 +310,31 @@ export function CookMantraApp({
       signal: controller.signal,
     });
     apiSessionStage.current = session.stage;
+    const requestedIds = new Set(pending.optionIds);
     const recipes = Object.fromEntries(
-      Object.entries(session.complete_recipes).map(([optionId, recipe]) => [
-        optionId,
-        recipeFromApi(recipe),
-      ]),
+      Object.entries(session.complete_recipes)
+        .filter(([optionId]) => !pending.merge || requestedIds.has(optionId))
+        .map(([optionId, recipe]) => [optionId, recipeFromApi(recipe)]),
     );
     const failures = Object.fromEntries(
-      Object.entries(session.recipe_failures).map(([optionId, failure]) => [
-        optionId,
-        {
-          optionId: failure.option_id,
-          code: failure.code,
-          message: failure.message,
-          retryable: failure.retryable,
-        } satisfies RecipeFailureView,
-      ]),
+      Object.entries(session.recipe_failures)
+        .filter(([optionId]) => !pending.merge || requestedIds.has(optionId))
+        .map(([optionId, failure]) => [
+          optionId,
+          {
+            optionId: failure.option_id,
+            code: failure.code,
+            message: failure.message,
+            retryable: failure.retryable,
+          } satisfies RecipeFailureView,
+        ]),
     );
-    dispatch({ type: "receive-recipes", recipes, failures });
+    dispatch({
+      type: "receive-recipes",
+      recipes,
+      failures,
+      merge: pending.merge,
+    });
   }
 
   function resumeRecipeJob(pending: PendingRecipeJob) {
@@ -297,7 +345,7 @@ export function CookMantraApp({
     dispatch({
       type: "start-job",
       kind: "recipes",
-      returnView: "options",
+      returnView: pending.returnView,
       selectedNames: pending.selectedNames,
     });
     void receiveRecipeJob(controller, pending)
@@ -350,6 +398,9 @@ export function CookMantraApp({
       try {
         const queued = await client.createSession(file, { signal: controller.signal });
         apiSessionStage.current = "extracting";
+        // The photo is on the server now; nudge progress off zero so the job
+        // screen marks the upload line done and shows the agent as running.
+        dispatch({ type: "update-job-progress", progress: 2 });
         const terminal = await client.pollJob(queued.job_id, {
           intervalMs: 750,
           signal: controller.signal,
@@ -396,7 +447,10 @@ export function CookMantraApp({
         sessionId: null,
         photoPreviewUrl: null,
         weakDetection: true,
-        ingredients: [...demoDetectedIngredients(true), ...demoPantryIngredients()],
+        ingredients: [
+          ...demoDetectedIngredients(true),
+          ...demoPantryIngredients(stateRef.current.pantryStaples),
+        ],
       });
     });
   }
@@ -423,6 +477,7 @@ export function CookMantraApp({
       const names = confirmedIngredientNames(ingredients);
       if (!names.length) {
         throw new CapabilityError(
+          "Confirm an ingredient first",
           "Confirm at least one ingredient before generating ideas.",
         );
       }
@@ -436,6 +491,7 @@ export function CookMantraApp({
     const sourcePhoto = uploadedPhotoFile.current;
     if (!sourcePhoto) {
       throw new CapabilityError(
+        "Start over with a photo",
         "Editing these ingredients needs the original photo. Start over with a new photo to create another set of ideas.",
       );
     }
@@ -534,8 +590,6 @@ export function CookMantraApp({
         lastRetry.current = () => resumeOptionJob(queuedJob);
         await receiveOptionJob(controller, queuedJob);
       } catch (error) {
-        console.log(error);
-
         if (!pending) apiSessionStage.current = null;
         failCurrentOperation(error);
       } finally {
@@ -564,9 +618,9 @@ export function CookMantraApp({
 
     if (apiSessionStage.current !== "options_ready") {
       showLifecycleError("more-ideas", "options", {
-        title: "Start a fresh idea session",
+        title: "More ideas need a fresh start",
         message:
-          "New ideas require an options-ready session. After recipes are created, edit the ingredients to start a fresh photo-backed session.",
+          "This batch of ideas closed when your recipes were created. Edit your ingredients and Cook Mantra will re-read your photo for new ideas — the recipes you already created are safe.",
         retryable: false,
       });
       return;
@@ -630,6 +684,7 @@ export function CookMantraApp({
             currentState.preferences.servings,
           ),
           failures: {},
+          merge: false,
         });
       });
       return;
@@ -640,9 +695,9 @@ export function CookMantraApp({
       apiSessionStage.current !== "recipes_ready"
     ) {
       showLifecycleError("recipes", "options", {
-        title: "This session is still changing",
+        title: "Still working on this step",
         message:
-          "Wait for the current server job to finish before creating recipes from these ideas.",
+          "Wait a moment for the current step to finish, then create recipes from these ideas.",
         retryable: false,
       });
       return;
@@ -670,8 +725,11 @@ export function CookMantraApp({
         const queuedJob: PendingRecipeJob = {
           sessionId,
           jobId: queued.job_id,
+          optionIds: currentState.selectedOptionIds,
           selectedNames,
           entryStage: recipeEntryStage,
+          merge: false,
+          returnView: "options",
         };
         pending = queuedJob;
         apiSessionStage.current = "generating_recipes";
@@ -679,6 +737,72 @@ export function CookMantraApp({
         await receiveRecipeJob(controller, queuedJob);
       } catch (error) {
         if (!pending) apiSessionStage.current = recipeEntryStage;
+        failCurrentOperation(error);
+      } finally {
+        finishOperation(controller);
+      }
+    })();
+  }
+
+  function handleRetryFailedRecipes() {
+    const currentState = stateRef.current;
+    const retryableIds = Object.values(currentState.recipeFailures)
+      .filter((failure) => failure.retryable)
+      .map((failure) => failure.optionId)
+      .filter((optionId) =>
+        currentState.options.some((option) => option.id === optionId),
+      );
+    if (!retryableIds.length || !currentState.sessionId) return;
+
+    const retryableIdSet = new Set(retryableIds);
+    const selectedNames = currentState.options
+      .filter((option) => retryableIdSet.has(option.id))
+      .map((option) => option.name);
+    lastRetry.current = handleRetryFailedRecipes;
+
+    if (apiSessionStage.current !== "recipes_ready") {
+      showLifecycleError("recipes", "recipes", {
+        title: "Failed recipes cannot be retried yet",
+        message:
+          "This session is not ready to retry recipes. Return to your recipe ideas and create them again.",
+        retryable: false,
+      });
+      return;
+    }
+
+    const sessionId = currentState.sessionId;
+    const controller = beginOperation();
+    activeJobMode.current = "api";
+    dispatch({
+      type: "start-job",
+      kind: "recipes",
+      returnView: "recipes",
+      selectedNames,
+    });
+    void (async () => {
+      let pending: PendingRecipeJob | null = null;
+      try {
+        apiSessionStage.current = null;
+        const queued = await client.generateRecipes(
+          sessionId,
+          { option_ids: retryableIds },
+          { signal: controller.signal },
+        );
+        const queuedJob: PendingRecipeJob = {
+          sessionId,
+          jobId: queued.job_id,
+          optionIds: retryableIds,
+          selectedNames,
+          entryStage: "recipes_ready",
+          merge: true,
+          returnView: "recipes",
+        };
+        pending = queuedJob;
+        apiSessionStage.current = "generating_recipes";
+        lastRetry.current = () => resumeRecipeJob(queuedJob);
+        await receiveRecipeJob(controller, queuedJob);
+      } catch (error) {
+        if (!pending) apiSessionStage.current = "recipes_ready";
         failCurrentOperation(error);
       } finally {
         finishOperation(controller);
@@ -732,6 +856,10 @@ export function CookMantraApp({
   }
 
   const currentStepIndex = viewStepIndex(state.view, state.job);
+  const generatedContentExists =
+    state.options.length > 0 ||
+    Object.keys(state.completeRecipes).length > 0 ||
+    Object.keys(state.recipeFailures).length > 0;
 
   return (
     <div className="app-shell">
@@ -761,6 +889,7 @@ export function CookMantraApp({
             onUpload={handleUpload}
             onManualEntry={handleManualEntry}
             onWeakDetection={handleWeakDetection}
+            showWeakDetection={devControls}
           />
         ) : null}
         {state.view === "job" && state.job ? (
@@ -769,6 +898,7 @@ export function CookMantraApp({
             allowInterruption={activeJobMode.current !== "api"}
             onCancel={handleCancelJob}
             onSimulateFailure={handleSimulateFailure}
+            showSimulateFailure={devControls}
           />
         ) : null}
         {state.view === "confirm" ? (
@@ -784,6 +914,12 @@ export function CookMantraApp({
             }
             onRemoveIngredient={(id) => dispatch({ type: "remove-ingredient", id })}
             onToggleIngredient={(id) => dispatch({ type: "toggle-ingredient", id })}
+            onToggleAllPantry={(confirmed) =>
+              dispatch({ type: "toggle-all-pantry", confirmed })
+            }
+            pantryStaples={state.pantryStaples}
+            generatedContentExists={generatedContentExists}
+            onPantryStaplesChange={handlePantryStaplesChange}
             onPreferenceChange={<Key extends keyof PreferenceView>(
               key: Key,
               value: PreferenceView[Key],
@@ -800,7 +936,7 @@ export function CookMantraApp({
             ideasExhausted={state.ideasExhausted}
             moreIdeasUnavailableReason={
               state.mode === "api" && apiSessionStage.current !== "options_ready"
-                ? "Edit your ingredients to start a fresh photo-backed idea session. You can still create another recipe from the ideas already shown."
+                ? "To get more ideas, edit your ingredients — Cook Mantra will re-read your photo and start fresh. You can still create recipes from the ideas already shown."
                 : null
             }
             previewUrl={(artifactId) => client.artifactUrl(artifactId)}
@@ -824,10 +960,31 @@ export function CookMantraApp({
             onToggleStep={(optionId, stepNumber) =>
               dispatch({ type: "toggle-recipe-step", optionId, stepNumber })
             }
+            onRetryFailed={handleRetryFailedRecipes}
             onBack={() => dispatch({ type: "navigate", view: "options" })}
             onReset={handleReset}
           />
         ) : null}
+      </main>
+    </div>
+  );
+}
+
+function ApiConfigurationNotice() {
+  return (
+    <div className="app-shell">
+      <AppHeader />
+      <main className="page-main configuration-main">
+        <section className="configuration-notice" aria-labelledby="config-title">
+          <p className="kicker">Configuration required</p>
+          <h1 className="screen-title" id="config-title" tabIndex={-1}>
+            Cook Mantra is not connected to its kitchen
+          </h1>
+          <p className="screen-intro">
+            Set <code>NEXT_PUBLIC_COOK_MANTRA_API_URL</code> to the deployed Cook Mantra
+            API URL, then rebuild and redeploy this site.
+          </p>
+        </section>
       </main>
     </div>
   );
@@ -847,9 +1004,12 @@ function assertSuccessfulJob(job: TerminalJobResponse) {
 }
 
 class CapabilityError extends Error {
-  constructor(message: string) {
+  readonly title: string;
+
+  constructor(title: string, message: string) {
     super(message);
     this.name = "CapabilityError";
+    this.title = title;
   }
 }
 
@@ -889,6 +1049,13 @@ function logOperationFailure(error: unknown, state: CookSessionState): void {
 }
 
 function toAppError(error: unknown): AppErrorView {
+  if (error instanceof ApiNetworkError) {
+    return {
+      title: "Cook Mantra could not reach the server",
+      message: "Check your connection and try again.",
+      retryable: true,
+    };
+  }
   if (error instanceof ApiTimeoutError) {
     return {
       title:
@@ -902,7 +1069,7 @@ function toAppError(error: unknown): AppErrorView {
   if (error instanceof ApiError) {
     return {
       title: apiErrorTitle(error),
-      message: error.message,
+      message: apiErrorMessage(error),
       retryable: error.retryable,
     };
   }
@@ -915,7 +1082,7 @@ function toAppError(error: unknown): AppErrorView {
   }
   if (error instanceof CapabilityError) {
     return {
-      title: "Start over with a photo",
+      title: error.title,
       message: error.message,
       retryable: false,
     };
@@ -928,6 +1095,15 @@ function toAppError(error: unknown): AppErrorView {
         : "Something unexpected interrupted this step.",
     retryable: true,
   };
+}
+
+// Offline codes carry server-internal wording ("Ollama is unavailable."), so
+// they get a user-facing message instead of the raw one.
+function apiErrorMessage(error: ApiError): string {
+  if (error.code === "ollama_unavailable" || error.code === "model_not_found") {
+    return "The recipe agents are not reachable right now. Try again in a few minutes.";
+  }
+  return error.message;
 }
 
 function apiErrorTitle(error: ApiError): string {

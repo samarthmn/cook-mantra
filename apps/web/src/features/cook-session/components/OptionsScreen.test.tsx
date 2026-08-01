@@ -106,7 +106,39 @@ describe("OptionsScreen", () => {
     ).toBeVisible();
   });
 
-  it("does not label the placeholder as an AI illustration when no preview exists", () => {
+  it("hedges model-derived allergen warnings", () => {
+    render(
+      <OptionsScreen
+        options={[
+          {
+            ...option,
+            nutrition: {
+              caloriesKcal: 300,
+              proteinG: 12,
+              carbohydratesG: 40,
+              fatG: 10,
+              dietTags: [],
+              allergenWarnings: ["dairy", "soy"],
+              disclaimer: "Estimated values; not medical advice.",
+            },
+          },
+        ]}
+        selectedOptionIds={[]}
+        ingredientCount={1}
+        ideasExhausted={false}
+        previewUrl={(artifactId) => artifactId}
+        onToggleOption={vi.fn()}
+        onMoreIdeas={vi.fn()}
+        onEditIngredients={vi.fn()}
+        onCreateRecipes={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("May contain dairy and soy")).toBeVisible();
+    expect(screen.queryByText(/Contains dairy/)).toBeNull();
+  });
+
+  it("uses the photo disclaimer and does not label a placeholder as an AI image", () => {
     render(
       <OptionsScreen
         options={[option]}
@@ -121,10 +153,15 @@ describe("OptionsScreen", () => {
       />,
     );
 
-    expect(screen.queryByText("AI illustration")).toBeNull();
+    expect(
+      screen.getByText(
+        "Pick one or more. Every photo is AI-generated — your dish may look different. Nutrition is an estimate, not medical advice.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("AI image")).toBeNull();
   });
 
-  it("labels a real generated preview as an AI illustration", () => {
+  it("labels a real generated preview as an AI image", () => {
     render(
       <OptionsScreen
         options={[{ ...option, previewArtifactId: "artifact-1" }]}
@@ -139,10 +176,13 @@ describe("OptionsScreen", () => {
       />,
     );
 
-    expect(screen.getByText("AI illustration")).toBeVisible();
+    expect(screen.getByText("AI image")).toBeVisible();
+    expect(
+      screen.getByRole("img", { name: "Seasonal Dal, AI-generated image" }),
+    ).toBeVisible();
   });
 
-  it("replaces a failed generated preview and removes its illustration label", () => {
+  it("replaces a failed generated preview and removes its AI image label", () => {
     render(
       <OptionsScreen
         options={[{ ...option, previewArtifactId: "artifact-1" }]}
@@ -159,16 +199,16 @@ describe("OptionsScreen", () => {
 
     fireEvent.error(
       screen.getByRole("img", {
-        name: "Seasonal Dal, AI-generated illustration",
+        name: "Seasonal Dal, AI-generated image",
       }),
     );
 
     expect(
       screen.queryByRole("img", {
-        name: "Seasonal Dal, AI-generated illustration",
+        name: "Seasonal Dal, AI-generated image",
       }),
     ).toBeNull();
-    expect(screen.queryByText("AI illustration")).toBeNull();
+    expect(screen.queryByText("AI image")).toBeNull();
   });
 
   it("disables more ideas with an explanation when the API stage cannot accept it", () => {
@@ -187,7 +227,9 @@ describe("OptionsScreen", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Start fresh for more" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "More ideas unavailable" }),
+    ).toBeDisabled();
     expect(
       screen.getByText(
         "Edit your ingredients to start a fresh photo-backed idea session.",

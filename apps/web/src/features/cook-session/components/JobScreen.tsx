@@ -1,4 +1,4 @@
-import { Check } from "lucide-react";
+import { ArrowLeft, Check } from "lucide-react";
 
 import type { JobView } from "../model/cook-session-state";
 import { ScreenHeader } from "./ScreenHeader";
@@ -14,6 +14,8 @@ interface JobCopy {
   title: string;
   intro: string;
   lines: JobLine[];
+  /** Leading lines already finished before the job starts reporting progress. */
+  preCompletedLines?: number;
 }
 
 interface JobScreenProps {
@@ -21,13 +23,14 @@ interface JobScreenProps {
   allowInterruption?: boolean;
   onCancel: () => void;
   onSimulateFailure: () => void;
+  showSimulateFailure?: boolean;
 }
 
 const extractionLines: JobLine[] = [
-  { label: "Photo uploaded", detail: "Ready for local processing", agent: false },
+  { label: "Photo upload", detail: "Sent for this session only", agent: false },
   {
     label: "Ingredient Extraction Agent",
-    detail: "Identifying items in the image",
+    detail: "Identifying the ingredients in your photo",
     agent: true,
   },
   {
@@ -50,7 +53,7 @@ const ideaLines: JobLine[] = [
   },
   {
     label: "Image Agent",
-    detail: "Illustrating each dish (AI illustration)",
+    detail: "Generating a photo of each dish (AI-generated)",
     agent: true,
   },
   {
@@ -63,11 +66,15 @@ const ideaLines: JobLine[] = [
 function jobCopy(job: JobView): JobCopy {
   if (job.kind === "extraction") {
     return {
-      kicker: "Step 1 — Reading your photo",
+      kicker: "Step 1 — Identifying ingredients",
       title: "Looking at your ingredients",
       intro:
         "The Ingredient Extraction Agent lists what it sees and how sure it is. You check everything next.",
       lines: extractionLines,
+      // The upload finishes before the server reports any progress, so the
+      // upload line runs only until the first progress tick; from then on the
+      // agent line is what the user watches.
+      preCompletedLines: 1,
     };
   }
 
@@ -111,6 +118,7 @@ function lineStatus(
   lineCount: number,
   progress: number,
   parallel: boolean,
+  preCompleted = 0,
 ): "pending" | "running" | "done" {
   if (progress >= 100) return "done";
   if (parallel) {
@@ -118,9 +126,15 @@ function lineStatus(
     if (collecting) return progress >= 80 ? "running" : "pending";
     return progress > 0 ? (progress >= 80 ? "done" : "running") : "pending";
   }
-  const segment = 100 / lineCount;
-  if (progress >= (index + 1) * segment) return "done";
-  if (progress >= index * segment) return "running";
+  if (index < preCompleted) {
+    if (progress > 0) return "done";
+    return index === preCompleted - 1 ? "running" : "done";
+  }
+  if (preCompleted > 0 && progress <= 0) return "pending";
+  const segment = 100 / (lineCount - preCompleted);
+  const position = index - preCompleted;
+  if (progress >= (position + 1) * segment) return "done";
+  if (progress >= position * segment) return "running";
   return "pending";
 }
 
@@ -129,6 +143,7 @@ export function JobScreen({
   allowInterruption = true,
   onCancel,
   onSimulateFailure,
+  showSimulateFailure = false,
 }: JobScreenProps) {
   const copy = jobCopy(job);
   const parallel = job.kind === "recipes";
@@ -156,7 +171,13 @@ export function JobScreen({
         aria-live="polite"
       >
         {copy.lines.map((line, index) => {
-          const status = lineStatus(index, copy.lines.length, job.progress, parallel);
+          const status = lineStatus(
+            index,
+            copy.lines.length,
+            job.progress,
+            parallel,
+            copy.preCompletedLines ?? 0,
+          );
           return (
             <div
               className="job-row"
@@ -166,7 +187,9 @@ export function JobScreen({
             >
               <span className={`job-status job-status-${status}`}>
                 {status === "done" ? <Check aria-hidden="true" /> : null}
-                <span className="visually-hidden">Status: {status}</span>
+                <span className="visually-hidden">
+                  {line.label}: {status}
+                </span>
               </span>
               <div className="job-content">
                 <div className="job-label">{line.label}</div>
@@ -180,15 +203,18 @@ export function JobScreen({
       {allowInterruption ? (
         <div className="job-actions">
           <button className="btn btn-ghost" type="button" onClick={onCancel}>
-            ← Cancel
+            <ArrowLeft aria-hidden="true" size={16} />
+            Cancel
           </button>
-          <button
-            className="btn btn-ghost text-muted"
-            type="button"
-            onClick={onSimulateFailure}
-          >
-            Simulate a failure
-          </button>
+          {showSimulateFailure ? (
+            <button
+              className="btn btn-ghost text-muted"
+              type="button"
+              onClick={onSimulateFailure}
+            >
+              Simulate a failure
+            </button>
+          ) : null}
         </div>
       ) : (
         <p className="job-actions text-muted" role="status">

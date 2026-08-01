@@ -1,4 +1,5 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CompleteRecipeView, IngredientView } from "../model/cook-session-state";
@@ -50,6 +51,7 @@ function renderRecipe(recipeView: CompleteRecipeView) {
       completedSteps={{}}
       onSetActiveRecipe={vi.fn()}
       onToggleStep={vi.fn()}
+      onRetryFailed={vi.fn()}
       onBack={vi.fn()}
       onReset={vi.fn()}
     />,
@@ -132,6 +134,7 @@ describe("RecipesScreen", () => {
       completedSteps: {},
       onSetActiveRecipe: vi.fn(),
       onToggleStep: vi.fn(),
+      onRetryFailed: vi.fn(),
       onBack: vi.fn(),
       onReset: vi.fn(),
     };
@@ -148,5 +151,155 @@ describe("RecipesScreen", () => {
     expect(screen.getByText("A different warning.")).toBeVisible();
     expect(screen.getByText("A different tip.")).toBeVisible();
     expect(screen.getByText("Use lemon.")).toBeVisible();
+  });
+
+  it("shows detected, pantry, user-added, and unmatched availability provenance", () => {
+    render(
+      <RecipesScreen
+        recipes={{
+          [recipe.optionId]: {
+            ...recipe,
+            ingredients: [
+              { ...recipe.ingredients[0], name: "Tomato" },
+              { ...recipe.ingredients[0], name: "Salt" },
+              { ...recipe.ingredients[0], name: "Basil" },
+              { ...recipe.ingredients[0], name: "Water" },
+            ],
+          },
+        }}
+        failures={{}}
+        options={[]}
+        confirmedIngredients={[
+          ...confirmedIngredients,
+          {
+            id: "detected-tomato",
+            name: "Tomato",
+            source: "detected",
+            confidence: 0.9,
+            confirmed: true,
+          },
+          {
+            id: "user-basil",
+            name: "Basil",
+            source: "user_added",
+            confidence: null,
+            confirmed: true,
+          },
+        ]}
+        activeRecipeId={recipe.optionId}
+        completedSteps={{}}
+        onSetActiveRecipe={vi.fn()}
+        onToggleStep={vi.fn()}
+        onRetryFailed={vi.fn()}
+        onBack={vi.fn()}
+        onReset={vi.fn()}
+      />,
+    );
+
+    for (const [name, provenance] of [
+      ["Tomato", "detected"],
+      ["Salt", "pantry"],
+      ["Basil", "added by you"],
+      ["Water", "available"],
+    ]) {
+      const row = screen.getByText(name).closest(".recipe-ingredient-row");
+      expect(within(row as HTMLElement).getByText(provenance)).toBeVisible();
+    }
+  });
+
+  it("lists failed dishes by name and offers retry only for retryable failures", async () => {
+    const user = userEvent.setup();
+    const onRetryFailed = vi.fn();
+    render(
+      <RecipesScreen
+        recipes={{ [recipe.optionId]: recipe }}
+        failures={{
+          "option-2": {
+            optionId: "option-2",
+            code: "model_output_invalid",
+            message: "  Invalid\nrecipe output.  ",
+            retryable: true,
+          },
+        }}
+        options={[
+          {
+            id: "option-2",
+            name: "Tomato Rasam",
+            summary: "",
+            cuisine: "Indian",
+            totalMinutes: 20,
+            difficulty: "easy",
+            usedIngredients: [],
+            missingIngredients: [],
+            optionalIngredients: [],
+            nutrition: null,
+            previewArtifactId: null,
+            previewLabel: null,
+            warnings: [],
+            batchNumber: 1,
+          },
+        ]}
+        confirmedIngredients={confirmedIngredients}
+        activeRecipeId={recipe.optionId}
+        completedSteps={{}}
+        onSetActiveRecipe={vi.fn()}
+        onToggleStep={vi.fn()}
+        onRetryFailed={onRetryFailed}
+        onBack={vi.fn()}
+        onReset={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Tomato Rasam:")).toBeVisible();
+    expect(screen.getByText("Invalid recipe output.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Retry failed recipes" }));
+    expect(onRetryFailed).toHaveBeenCalledOnce();
+  });
+
+  it("confirms start over, defaults focus to Cancel, and restores trigger focus", async () => {
+    const user = userEvent.setup();
+    const onReset = vi.fn();
+    render(
+      <RecipesScreen
+        recipes={{ [recipe.optionId]: recipe }}
+        failures={{}}
+        options={[]}
+        confirmedIngredients={confirmedIngredients}
+        activeRecipeId={recipe.optionId}
+        completedSteps={{ [recipe.optionId]: [1] }}
+        onSetActiveRecipe={vi.fn()}
+        onToggleStep={vi.fn()}
+        onRetryFailed={vi.fn()}
+        onBack={vi.fn()}
+        onReset={onReset}
+      />,
+    );
+    const trigger = screen.getByRole("button", {
+      name: "Start over with a new photo",
+    });
+
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", {
+      name: "Start over with a new photo?",
+    });
+    expect(
+      within(dialog).getByText(/clears all recipes, chosen ideas, and checked steps/),
+    ).toBeVisible();
+    expect(within(dialog).getByText(/pantry defaults are kept/)).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(onReset).not.toHaveBeenCalled();
+
+    await user.click(trigger);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: "Start over" }));
+    expect(onReset).toHaveBeenCalledOnce();
   });
 });

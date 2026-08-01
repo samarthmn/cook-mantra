@@ -16,7 +16,7 @@ The interface must preserve these rules on every screen:
 1. Nothing counts as available until the user confirms it.
 2. Every ingredient shows its source: detected, pantry, or added by you.
 3. Missing and optional ingredients remain visible.
-4. Generated dish art always says **AI illustration**.
+4. Generated dish photography always carries the visible label **AI image**.
 5. Nutrition always says **estimate** and never presents medical advice.
 6. Parallel recipe work stays visible as one agent row per selected dish.
 7. Local previews and simulated states are labelled before they can be mistaken
@@ -33,7 +33,8 @@ These rules apply to new components as well as the four-step recipe flow.
 - Keep every corner square. The running-status spinner is the sole rounded
   product container.
 - Use shadows only for selected cards and true overlay elevation.
-- Render content photography in grayscale. Never tint it.
+- Render food photography in vibrant, natural color. Do not tint it or apply a
+  grayscale treatment.
 - Use Lucide icons with `currentColor`; use a 2px stroke below 32px and a 1.5px
   stroke at larger display sizes.
 - Avoid gradients, decorative blur, ornamental motion, centered hero copy, and
@@ -152,7 +153,8 @@ Build mobile-first layouts with intrinsic grids and flex wrapping:
 - `.option-grid` uses auto-fill cards with a 280px preferred minimum.
 - `.recipe-layout` wraps a 420px ingredient rail beside the flexible method.
 - `.recipe-notes-grid` uses auto-fit 240px notes.
-- `.progress-stepper` and `.recipe-tabs` scroll horizontally when needed.
+- `.progress-stepper` keeps all four steps visible without scrolling at 360px;
+  `.recipe-tabs` scroll horizontally when needed.
 - `.sticky-action-inner` wraps actions and includes the bottom safe-area inset.
 
 Prefer `minmax(min(100%, <preferred width>), 1fr)`, flex wrapping, and `clamp()`
@@ -169,7 +171,7 @@ action or create horizontal page scroll.
 - `.text-subtle`: stronger secondary text.
 - `.kicker`: red screen-step label.
 - `.visually-hidden`: accessible-only content.
-- `.grayscale` or `.grayscale-media`: image treatment.
+- `.option-card-image`: vibrant generated food photography with natural color.
 
 ### Buttons
 
@@ -306,17 +308,53 @@ Pantry rows depend on this sibling order for checked and focus styling:
 
 All pantry entries start unchecked. The whole row remains the click target.
 
-Preferences use `.preferences`, `.preferences-trigger`,
-`.preferences-summary`, `.preferences-chevron`, `.preferences-panel`, and
-`.preferences-grid`. The trigger must set `aria-expanded` and `aria-controls`.
-The chevron rotates from that semantic state.
+Place `.preferences` below `.confirm-grid` as an always-visible, full-width
+section. Compose it with `.preferences-header`, `.preferences-panel`,
+`.preferences-grid`, `.preference-group`, and `.preference-group-title`. Keep
+diet, spice, servings and ideas, allergens, and special instructions in named
+groups; do not collapse them into an accordion or place them inside either
+ingredient column.
+
+#### Chip groups
+
+Use `.preference-chips` as a labelled group of native buttons. Toggle chips use
+`.preference-chip`, expose `aria-pressed`, and carry a selected fill that does
+not replace the accessible state. A custom value that performs removal uses
+`.preference-chip-custom`, a visible X affordance, and an accessible name such
+as “Remove mustard allergen”; it must not look identical to a toggle.
+
+In the diet group, keep identity and additive constraints separate. Render
+**Style** as a single-select `.seg` with native radio inputs; its first option is
+the unqualified diet (`Vegetarian` for Veg and `Any` for Non-Veg). Render
+**Also apply** as a multi-select chip group for Keto and No onion or garlic.
+
+#### Confidence dots
+
+Use `.confidence-indicator`, `.confidence-button`, `.confidence-dot`, and
+`.confidence-popover` for detected ingredients. Confidence is high at `>= 0.8`,
+medium at `>= 0.6`, and low below `0.6`; map those levels to semantic success
+green, warning amber, and danger red. Keep the level and percentage in the
+button's accessible name, associate an open popover with `aria-describedby`,
+and dismiss it with Escape or an outside press without moving focus from the
+button. Flip the popover above when the sticky action bar leaves too little
+space below.
+
+#### Pantry selection and defaults
+
+Start pantry staples unchecked. Put a select-all row before the individual
+rows, use a native checkbox with an indeterminate state for partial selection,
+and show the selected count in a neutral tag. The defaults editor is an inline
+section controlled by “Edit defaults”; only set `aria-controls` while that
+section exists. Move focus to its first field on open, return focus to the
+trigger after save or cancel, and after removing a row focus the previous
+field—or the add field when no previous row remains.
 
 ### Recipe option cards
 
 Use a native button with `.option-card` whenever possible. Set `aria-pressed`
 for multi-selection. Compose each card with:
 
-- `.option-card-media` and a grayscale `.option-card-image`
+- `.option-card-media` and a vibrant `.option-card-image`
 - `.option-card-ai-label`
 - `.option-card-selected-mark`
 - `.option-card-content`
@@ -414,7 +452,8 @@ pixel measurements.
 - Keep labels and button copy concrete.
 - Show assumptions, missing ingredients, allergens, and estimates plainly.
 - Preserve user state when returning to an earlier completed step.
-- Use grayscale, correctly cropped imagery with an AI label.
+- Use vibrant, correctly cropped generated food photography with an **AI image**
+  label.
 
 ### Don't
 
@@ -423,6 +462,7 @@ pixel measurements.
 - Replace structural rules with floating white cards.
 - Add a second accent hue, a gradient, glass effects, or ornamental animation.
 - Hide a missing ingredient or silently assume a pantry staple.
-- Present generated art as a photograph of the finished dish.
+- Present a generated image as an actual photograph of the user's finished
+  dish.
 - Present nutrition as exact or medical guidance.
 - Use emoji or improvised symbols in place of Lucide icons.

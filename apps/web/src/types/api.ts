@@ -56,12 +56,14 @@ export interface ManualSessionRequest {
 }
 
 export interface RecipePreferences {
-  dietary_preferences?: string[];
-  allergens?: string[];
-  preferred_cuisines?: string[];
-  max_total_minutes?: number | null;
-  servings?: number;
-  option_count?: number;
+  dietary_preferences: string[];
+  allergens: string[];
+  preferred_cuisines: string[];
+  max_total_minutes: number | null;
+  servings: number;
+  option_count: number;
+  spice_level: "mild" | "medium" | "hot" | "extra-hot" | null;
+  special_instructions: string;
 }
 
 export type RecipeDifficulty = "easy" | "medium" | "hard";
@@ -84,7 +86,7 @@ export interface NutritionEstimate {
 
 export interface DishPreview {
   artifact_id: string;
-  label: "AI-generated illustration";
+  label: "AI-generated image";
 }
 
 export interface RecipeOptionResponse {

@@ -47,21 +47,23 @@ describe("Cook Mantra API types", () => {
     } | null>();
     expectTypeOf<RecipeOptionResponse["preview"]>().toEqualTypeOf<{
       artifact_id: string;
-      label: "AI-generated illustration";
+      label: "AI-generated image";
     } | null>();
     expectTypeOf<
       CompleteRecipeResponse["ingredients"][number]["availability"]
     >().toEqualTypeOf<"available" | "missing" | "optional">();
   });
 
-  it("models optional recipe preferences and job lifecycle fields", () => {
-    expectTypeOf<RecipePreferences>().toMatchTypeOf<{
-      dietary_preferences?: string[];
-      allergens?: string[];
-      preferred_cuisines?: string[];
-      max_total_minutes?: number | null;
-      servings?: number;
-      option_count?: number;
+  it("models recipe preferences and job lifecycle fields", () => {
+    expectTypeOf<RecipePreferences>().toEqualTypeOf<{
+      dietary_preferences: string[];
+      allergens: string[];
+      preferred_cuisines: string[];
+      max_total_minutes: number | null;
+      servings: number;
+      option_count: number;
+      spice_level: "mild" | "medium" | "hot" | "extra-hot" | null;
+      special_instructions: string;
     }>();
     expectTypeOf<JobResponse["status"]>().toEqualTypeOf<
       "queued" | "running" | "succeeded" | "failed"
