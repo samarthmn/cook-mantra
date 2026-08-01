@@ -14,6 +14,7 @@ import { StickyActionBar } from "@/components/layout/StickyActionBar";
 
 import {
   confirmedIngredientCount,
+  MAX_CUISINE_PREFERENCES,
   type IngredientView,
   type PreferenceView,
 } from "../model/cook-session-state";
@@ -86,6 +87,19 @@ const BASE_ALLERGENS = [
   "Sesame",
 ] as const;
 
+const BASE_CUISINES = [
+  "Indian",
+  "Chinese",
+  "American",
+  "Mediterranean",
+  "Mexican",
+  "Italian",
+  "Thai",
+  "Japanese",
+  "Korean",
+  "Middle Eastern",
+] as const;
+
 const SERVING_OPTIONS = [
   ["1", "1"],
   ["2", "2"],
@@ -129,6 +143,7 @@ export function ConfirmScreen({
 }: ConfirmScreenProps) {
   const [newIngredient, setNewIngredient] = useState("");
   const [customAllergen, setCustomAllergen] = useState("");
+  const [customCuisine, setCustomCuisine] = useState("");
   const [pantryEditorOpen, setPantryEditorOpen] = useState(false);
   const [pantryDraft, setPantryDraft] = useState<string[]>([]);
   const [newPantryStaple, setNewPantryStaple] = useState("");
@@ -161,6 +176,14 @@ export function ConfirmScreen({
           baseAllergen.toLocaleLowerCase() === allergen.toLocaleLowerCase(),
       ),
   );
+  const customCuisines = preferences.cuisines.filter(
+    (cuisine) =>
+      !BASE_CUISINES.some(
+        (baseCuisine) =>
+          baseCuisine.toLocaleLowerCase() === cuisine.toLocaleLowerCase(),
+      ),
+  );
+  const cuisineLimitReached = preferences.cuisines.length >= MAX_CUISINE_PREFERENCES;
 
   useEffect(() => {
     if (selectAllPantryRef.current) {
@@ -195,12 +218,22 @@ export function ConfirmScreen({
     setNewIngredient("");
   }
 
-  function toggleListPreference(key: "dietAddOns" | "allergens", value: string) {
+  function toggleListPreference(
+    key: "dietAddOns" | "allergens" | "cuisines",
+    value: string,
+  ) {
     const current = preferences[key];
     const normalizedValue = value.toLocaleLowerCase();
     const existingIndex = current.findIndex(
       (item) => item.toLocaleLowerCase() === normalizedValue,
     );
+    if (
+      existingIndex === -1 &&
+      key === "cuisines" &&
+      current.length >= MAX_CUISINE_PREFERENCES
+    ) {
+      return;
+    }
     const next =
       existingIndex === -1
         ? [...current, value]
@@ -219,6 +252,19 @@ export function ConfirmScreen({
       onPreferenceChange("allergens", [...preferences.allergens, allergen]);
     }
     setCustomAllergen("");
+  }
+
+  function submitCustomCuisine(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cuisine = customCuisine.trim().replaceAll(/\s+/g, " ");
+    if (!cuisine) return;
+    const alreadySelected = preferences.cuisines.some(
+      (selected) => selected.toLocaleLowerCase() === cuisine.toLocaleLowerCase(),
+    );
+    if (!alreadySelected && !cuisineLimitReached) {
+      onPreferenceChange("cuisines", [...preferences.cuisines, cuisine]);
+    }
+    setCustomCuisine("");
   }
 
   function openPantryEditor() {
@@ -631,6 +677,84 @@ export function ConfirmScreen({
 
             <section
               className="preference-group"
+              aria-labelledby="preference-cuisines-title"
+            >
+              <h3 className="preference-group-title" id="preference-cuisines-title">
+                Cuisines
+              </h3>
+              <div className="field">
+                <span className="field-label" id="cuisines-label">
+                  Optional — choose up to {MAX_CUISINE_PREFERENCES}
+                </span>
+                <div
+                  className="preference-chips"
+                  role="group"
+                  aria-labelledby="cuisines-label"
+                >
+                  {BASE_CUISINES.map((cuisine) => {
+                    const selected = preferences.cuisines.some(
+                      (value) =>
+                        value.toLocaleLowerCase() === cuisine.toLocaleLowerCase(),
+                    );
+                    return (
+                      <button
+                        className="preference-chip"
+                        data-selected={selected ? "true" : undefined}
+                        type="button"
+                        aria-pressed={selected}
+                        disabled={!selected && cuisineLimitReached}
+                        key={cuisine}
+                        onClick={() => toggleListPreference("cuisines", cuisine)}
+                      >
+                        {cuisine}
+                      </button>
+                    );
+                  })}
+                </div>
+                <form className="preference-add-form" onSubmit={submitCustomCuisine}>
+                  <label className="visually-hidden" htmlFor="custom-cuisine">
+                    Custom cuisine
+                  </label>
+                  <input
+                    className="input"
+                    id="custom-cuisine"
+                    aria-label="Custom cuisine"
+                    placeholder="Add another cuisine…"
+                    value={customCuisine}
+                    maxLength={80}
+                    disabled={cuisineLimitReached}
+                    onChange={(event) => setCustomCuisine(event.target.value)}
+                  />
+                  <button
+                    className="btn btn-secondary"
+                    type="submit"
+                    disabled={cuisineLimitReached}
+                  >
+                    <Plus aria-hidden="true" size={16} />
+                    Add
+                  </button>
+                </form>
+                {customCuisines.length > 0 ? (
+                  <div className="custom-preference-list" aria-label="Custom cuisines">
+                    {customCuisines.map((cuisine) => (
+                      <button
+                        className="preference-chip preference-chip-custom"
+                        type="button"
+                        aria-label={`Remove ${cuisine} cuisine`}
+                        key={cuisine.toLocaleLowerCase()}
+                        onClick={() => toggleListPreference("cuisines", cuisine)}
+                      >
+                        {cuisine}
+                        <X aria-hidden="true" size={14} />
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section
+              className="preference-group"
               aria-labelledby="preference-spice-title"
             >
               <h3 className="preference-group-title" id="preference-spice-title">
@@ -720,7 +844,7 @@ export function ConfirmScreen({
                     );
                   })}
                 </div>
-                <form className="allergen-add-form" onSubmit={submitCustomAllergen}>
+                <form className="preference-add-form" onSubmit={submitCustomAllergen}>
                   <label className="visually-hidden" htmlFor="custom-allergen">
                     Custom allergen
                   </label>
@@ -739,7 +863,7 @@ export function ConfirmScreen({
                   </button>
                 </form>
                 {customAllergens.length > 0 ? (
-                  <div className="custom-allergen-list" aria-label="Custom allergens">
+                  <div className="custom-preference-list" aria-label="Custom allergens">
                     {customAllergens.map((allergen) => (
                       <button
                         className="preference-chip preference-chip-custom"

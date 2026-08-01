@@ -6,7 +6,10 @@ import type {
   RecipePreferences,
 } from "@/types/api";
 
-import { LOCAL_PANTRY_INGREDIENT_ID_PREFIX } from "./cook-session-state";
+import {
+  LOCAL_PANTRY_INGREDIENT_ID_PREFIX,
+  MAX_CUISINE_PREFERENCES,
+} from "./cook-session-state";
 
 import type {
   CompleteRecipeView,
@@ -70,6 +73,10 @@ function normalizedIngredientName(name: string): string {
 
 export function preferencesToApi(preferences: PreferenceView): RecipePreferences {
   const allergens = uniqueNormalizedValues(preferences.allergens, false);
+  const cuisines = uniqueNormalizedValues(preferences.cuisines, false).slice(
+    0,
+    MAX_CUISINE_PREFERENCES,
+  );
   const dietaryPreferences = uniqueNormalizedValues(
     [
       preferences.diet,
@@ -82,7 +89,7 @@ export function preferencesToApi(preferences: PreferenceView): RecipePreferences
   return {
     dietary_preferences: dietaryPreferences,
     allergens,
-    preferred_cuisines: [],
+    preferred_cuisines: cuisines,
     max_total_minutes: null,
     servings: preferences.servings,
     option_count: preferences.optionCount,
@@ -151,9 +158,22 @@ export function recipeFromApi(recipe: CompleteRecipeResponse): CompleteRecipeVie
       number: step.number,
       instruction: step.instruction,
       durationMinutes: step.duration_minutes,
+      doneWhen: step.done_when ?? undefined,
+      heatLevel: step.heat_level ?? undefined,
     })),
     tips: recipe.tips,
     substitutions: recipe.substitutions,
+    nutrition: recipe.nutrition
+      ? {
+          caloriesKcal: recipe.nutrition.calories_kcal,
+          proteinG: recipe.nutrition.protein_g,
+          carbohydratesG: recipe.nutrition.carbohydrates_g,
+          fatG: recipe.nutrition.fat_g,
+          dietTags: recipe.nutrition.diet_tags,
+          allergenWarnings: recipe.nutrition.allergen_warnings,
+          disclaimer: recipe.nutrition.disclaimer,
+        }
+      : null,
     nutritionNotice: recipe.nutrition_notice,
     allergenNotice: recipe.allergen_notice,
     assumptions: recipe.assumptions,

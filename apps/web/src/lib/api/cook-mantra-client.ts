@@ -102,10 +102,12 @@ export class ApiTimeoutError extends Error {
 
 export class ApiNetworkError extends Error {
   readonly retryable = true;
+  readonly url: string | null;
 
-  constructor() {
+  constructor(url: string | null = null) {
     super("Check your connection and try again.");
     this.name = "ApiNetworkError";
+    this.url = url;
   }
 }
 
@@ -283,7 +285,7 @@ export class CookMantraClient {
         throw callerSignal.reason ?? error;
       }
       if (error instanceof TypeError) {
-        throw new ApiNetworkError();
+        throw new ApiNetworkError(this.endpoint(segments));
       }
       throw error;
     }

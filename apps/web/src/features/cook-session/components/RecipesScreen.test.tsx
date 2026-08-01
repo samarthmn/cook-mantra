@@ -2,7 +2,11 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CompleteRecipeView, IngredientView } from "../model/cook-session-state";
+import type {
+  CompleteRecipeView,
+  IngredientView,
+  RecipeOptionView,
+} from "../model/cook-session-state";
 import { RecipesScreen } from "./RecipesScreen";
 
 const recipe: CompleteRecipeView = {
@@ -22,6 +26,7 @@ const recipe: CompleteRecipeView = {
   steps: [{ number: 1, instruction: "Season the curry.", durationMinutes: null }],
   tips: [],
   substitutions: [],
+  nutrition: null,
   nutritionNotice: "Estimated values; not medical advice.",
   allergenNotice: "Check ingredient labels for allergens.",
   assumptions: [],
@@ -38,15 +43,42 @@ const confirmedIngredients: IngredientView[] = [
   },
 ];
 
+function optionWithNutrition(
+  nutrition: NonNullable<RecipeOptionView["nutrition"]>,
+): RecipeOptionView {
+  return {
+    id: recipe.optionId,
+    name: recipe.name,
+    summary: "",
+    cuisine: recipe.cuisine,
+    totalMinutes: recipe.totalMinutes,
+    difficulty: "easy",
+    usedIngredients: [],
+    missingIngredients: [],
+    optionalIngredients: [],
+    nutrition,
+    previewArtifactId: null,
+    previewLabel: null,
+    warnings: [],
+    batchNumber: 1,
+  };
+}
+
 afterEach(cleanup);
 
-function renderRecipe(recipeView: CompleteRecipeView) {
+function renderRecipe(
+  recipeView: CompleteRecipeView,
+  {
+    ingredients = confirmedIngredients,
+    options = [],
+  }: { ingredients?: IngredientView[]; options?: RecipeOptionView[] } = {},
+) {
   return render(
     <RecipesScreen
       recipes={{ [recipeView.optionId]: recipeView }}
       failures={{}}
-      options={[]}
-      confirmedIngredients={confirmedIngredients}
+      options={options}
+      confirmedIngredients={ingredients}
       activeRecipeId={recipeView.optionId}
       completedSteps={{}}
       onSetActiveRecipe={vi.fn()}
@@ -69,7 +101,8 @@ describe("RecipesScreen", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows ingredient-level substitution guidance", () => {
+  it("shows ingredient-level substitution guidance", async () => {
+    const user = userEvent.setup();
     renderRecipe({
       ...recipe,
       ingredients: [
@@ -80,9 +113,144 @@ describe("RecipesScreen", () => {
       ],
     });
 
+    await user.click(screen.getByRole("button", { name: "Ingredients (1)" }));
     expect(
       screen.getByText("Substitute: lime juice and a pinch of salt"),
     ).toBeVisible();
+  });
+
+  it("collapses only the ingredient list and exposes its count", async () => {
+    const user = userEvent.setup();
+    const recipeWithNutrition = {
+      ...recipe,
+      ingredients: [
+        ...recipe.ingredients,
+        {
+          name: "carrot whole",
+          quantity: "2 medium carrots, peeled and sliced 1/4-inch thick",
+          availability: "available" as const,
+          substitution: null,
+        },
+      ],
+    };
+    const option = optionWithNutrition({
+      caloriesKcal: 420,
+      proteinG: 12,
+      carbohydratesG: 54,
+      fatG: 16,
+      dietTags: [],
+      allergenWarnings: [],
+      disclaimer: "Estimated values; not medical advice.",
+    });
+
+    renderRecipe(recipeWithNutrition, { options: [option] });
+
+    const disclosure = screen.getByRole("button", { name: "Ingredients (2)" });
+    const list = document.getElementById(
+      disclosure.getAttribute("aria-controls") as string,
+    );
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(list).not.toBeVisible();
+    expect(screen.getByText("420")).toBeVisible();
+    expect(screen.getByText("Per serving — estimate")).toBeVisible();
+
+    await user.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    expect(list).toBeVisible();
+
+    await user.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(list).not.toBeVisible();
+    expect(screen.getByText("420")).toBeVisible();
+  });
+
+  it("prefers recipe-stage nutrition over the option estimate", () => {
+    const option = optionWithNutrition({
+      caloriesKcal: 420,
+      proteinG: 12,
+      carbohydratesG: 54,
+      fatG: 16,
+      dietTags: [],
+      allergenWarnings: [],
+      disclaimer: "Estimated values; not medical advice.",
+    });
+
+    renderRecipe(
+      {
+        ...recipe,
+        nutrition: {
+          caloriesKcal: 515,
+          proteinG: 19,
+          carbohydratesG: 61,
+          fatG: 21,
+          dietTags: [],
+          allergenWarnings: [],
+          disclaimer: "Estimated values; not medical advice.",
+        },
+      },
+      { options: [option] },
+    );
+
+    expect(screen.getByText("515")).toBeVisible();
+    expect(screen.queryByText("420")).not.toBeInTheDocument();
+  });
+
+  it("falls back to option nutrition when recipe nutrition is absent", () => {
+    const option = optionWithNutrition({
+      caloriesKcal: 420,
+      proteinG: 12,
+      carbohydratesG: 54,
+      fatG: 16,
+      dietTags: [],
+      allergenWarnings: [],
+      disclaimer: "Estimated values; not medical advice.",
+    });
+
+    renderRecipe({ ...recipe, nutrition: null }, { options: [option] });
+
+    expect(screen.getByText("420")).toBeVisible();
+    expect(screen.getByText("Per serving — estimate")).toBeVisible();
+  });
+
+  it("keeps long quantities, ingredient names, and source tags in separate row areas", async () => {
+    const user = userEvent.setup();
+    const quantity = "2 medium carrots, peeled and sliced 1/4-inch thick";
+    renderRecipe(
+      {
+        ...recipe,
+        ingredients: [
+          {
+            name: "carrot whole",
+            quantity,
+            availability: "available",
+            substitution: null,
+          },
+        ],
+      },
+      {
+        ingredients: [
+          ...confirmedIngredients,
+          {
+            id: "detected-carrot",
+            name: "carrot whole",
+            source: "detected",
+            confidence: 0.94,
+            confirmed: true,
+          },
+        ],
+      },
+    );
+
+    await user.click(screen.getByRole("button", { name: "Ingredients (1)" }));
+    const row = screen.getByText(quantity).closest(".recipe-ingredient-row");
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText(quantity)).toHaveClass(
+      "recipe-ingredient-quantity",
+    );
+    expect(within(row as HTMLElement).getByText("carrot whole")).toHaveClass(
+      "recipe-ingredient-name",
+    );
+    expect(within(row as HTMLElement).getByText("detected")).toHaveClass("tag-neutral");
   });
 
   it("shows the duration supplied for a method step", () => {
@@ -93,6 +261,41 @@ describe("RecipesScreen", () => {
 
     const methodStep = screen.getByRole("button", { name: /Season the curry/ });
     expect(within(methodStep).getByText("3 min")).toBeVisible();
+  });
+
+  it("shows a doneness cue and heat level in the method step metadata", () => {
+    renderRecipe({
+      ...recipe,
+      steps: [
+        {
+          ...recipe.steps[0],
+          durationMinutes: 3,
+          doneWhen: "the oil shimmers but does not smoke",
+          heatLevel: "medium-high",
+        },
+      ],
+    });
+
+    const methodStep = screen.getByRole("button", { name: /Season the curry/ });
+    const doneWhen = within(methodStep).getByText(
+      "Done when — the oil shimmers but does not smoke",
+    );
+    const duration = within(methodStep).getByText("3 min");
+    const heatLevel = within(methodStep).getByText("medium-high heat");
+
+    expect(doneWhen).toBeVisible();
+    expect(doneWhen).toHaveClass("method-step-done-when");
+    expect(duration.parentElement).toBe(heatLevel.parentElement);
+    expect(duration.parentElement).toHaveClass("method-step-meta");
+  });
+
+  it("omits doneness and heat metadata when a method step has neither", () => {
+    renderRecipe(recipe);
+
+    const methodStep = screen.getByRole("button", { name: /Season the curry/ });
+    expect(within(methodStep).queryByText(/^Done when/)).not.toBeInTheDocument();
+    expect(within(methodStep).queryByText(/ heat$/)).not.toBeInTheDocument();
+    expect(methodStep.querySelector(".method-step-meta")).toBeNull();
   });
 
   it("exposes recipe warnings as a labelled status list", () => {
@@ -153,7 +356,8 @@ describe("RecipesScreen", () => {
     expect(screen.getByText("Use lemon.")).toBeVisible();
   });
 
-  it("shows detected, pantry, user-added, and unmatched availability provenance", () => {
+  it("shows detected, pantry, user-added, and unmatched availability provenance", async () => {
+    const user = userEvent.setup();
     render(
       <RecipesScreen
         recipes={{
@@ -196,6 +400,7 @@ describe("RecipesScreen", () => {
       />,
     );
 
+    await user.click(screen.getByRole("button", { name: "Ingredients (4)" }));
     for (const [name, provenance] of [
       ["Tomato", "detected"],
       ["Salt", "pantry"],

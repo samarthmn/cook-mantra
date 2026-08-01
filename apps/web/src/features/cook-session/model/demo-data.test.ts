@@ -15,6 +15,7 @@ const preferences: PreferenceView = {
   servings: 2,
   optionCount: 4,
   allergens: [],
+  cuisines: [],
   spiceLevel: "medium",
   specialInstructions: "",
 };
@@ -102,6 +103,38 @@ describe("demo data", () => {
     ]);
   });
 
+  it("filters demo options by a sample cuisine preference", () => {
+    const options = createDemoOptions({
+      preferences: { ...preferences, cuisines: ["Indian"] },
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients: [...demoDetectedIngredients(), ...demoPantryIngredients()],
+    });
+
+    expect(options.map((option) => option.name)).toEqual([
+      "Palak Paneer",
+      "Paneer Bhurji",
+      "Tomato Rasam",
+      "Spinach Tomato Dal",
+    ]);
+  });
+
+  it("falls back to eligible demo options when no fixture matches the cuisine", () => {
+    const options = createDemoOptions({
+      preferences: { ...preferences, cuisines: ["Thai"] },
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients: [...demoDetectedIngredients(), ...demoPantryIngredients()],
+    });
+
+    expect(options.map((option) => option.name)).toEqual([
+      "Palak Paneer",
+      "Paneer Bhurji",
+      "Tomato Rasam",
+      "Chilli Paneer",
+    ]);
+  });
+
   it("creates unchecked demo pantry rows from custom defaults", () => {
     expect(demoPantryIngredients(["Sea salt", "Olive oil"])).toEqual([
       {
@@ -159,6 +192,44 @@ describe("demo data", () => {
     expect(
       recipe.ingredients.find((ingredient) => ingredient.name === "onion"),
     ).toMatchObject({ availability: "missing" });
+  });
+
+  it("includes doneness and heat guidance in sample recipe steps", () => {
+    const ingredients = [...demoDetectedIngredients(), ...demoPantryIngredients()];
+    const options = createDemoOptions({
+      preferences,
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients,
+    });
+    const recipe = createDemoRecipes([options[0]], ingredients, 2)[options[0].id];
+
+    expect(recipe.steps[2]).toMatchObject({
+      doneWhen: "the onion is soft and translucent with no raw garlic smell",
+      heatLevel: "medium",
+    });
+    expect(recipe.steps[3]).toMatchObject({
+      doneWhen: "the tomatoes are jammy and oil separates at the edges",
+      heatLevel: "medium-high",
+    });
+  });
+
+  it("includes recipe-stage nutrition in a sample recipe", () => {
+    const ingredients = [...demoDetectedIngredients(), ...demoPantryIngredients()];
+    const options = createDemoOptions({
+      preferences,
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients,
+    });
+    const recipe = createDemoRecipes([options[0]], ingredients, 2)[options[0].id];
+
+    expect(recipe.nutrition).toMatchObject({
+      caloriesKcal: 438,
+      proteinG: 21,
+      carbohydratesG: 17,
+      fatG: 32,
+    });
   });
 
   it("marks a pantry staple available only after the user confirms it", () => {

@@ -13,6 +13,7 @@ const preferences: PreferenceView = {
   servings: 2,
   optionCount: 4,
   allergens: [],
+  cuisines: [],
   spiceLevel: "medium",
   specialInstructions: "",
 };
@@ -237,6 +238,76 @@ describe("ConfirmScreen layout and preferences", () => {
     });
     expect(custom).toHaveClass("preference-chip-custom");
     expect(custom).not.toHaveAttribute("aria-pressed");
+  });
+
+  it("renders cuisine chips in the supported preset order", () => {
+    renderConfirmScreen();
+    const cuisineGroup = screen.getByRole("group", {
+      name: "Optional — choose up to 20",
+    });
+
+    expect(
+      within(cuisineGroup)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual([
+      "Indian",
+      "Chinese",
+      "American",
+      "Mediterranean",
+      "Mexican",
+      "Italian",
+      "Thai",
+      "Japanese",
+      "Korean",
+      "Middle Eastern",
+    ]);
+  });
+
+  it("toggles cuisine preset chips independently", async () => {
+    const user = userEvent.setup();
+    render(<PreferenceHarness />);
+    const indian = screen.getByRole("button", { name: "Indian" });
+
+    expect(indian).toHaveAttribute("aria-pressed", "false");
+    await user.click(indian);
+    expect(indian).toHaveAttribute("aria-pressed", "true");
+    await user.click(indian);
+    expect(indian).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("adds a normalized custom cuisine and lets the user remove it", async () => {
+    const user = userEvent.setup();
+    render(<PreferenceHarness />);
+    const input = screen.getByRole("textbox", { name: "Custom cuisine" });
+
+    await user.type(input, "Caribbean   fusion{Enter}");
+
+    const customCuisine = screen.getByRole("button", {
+      name: "Remove Caribbean fusion cuisine",
+    });
+    expect(customCuisine).toHaveClass("preference-chip-custom");
+    expect(input).toHaveValue("");
+
+    await user.click(customCuisine);
+    expect(
+      screen.queryByRole("button", { name: "Remove Caribbean fusion cuisine" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("prevents new cuisine selections after twenty choices", () => {
+    renderConfirmScreen({
+      preferenceValues: {
+        ...preferences,
+        cuisines: Array.from({ length: 20 }, (_, index) => `Custom ${index + 1}`),
+      },
+    });
+
+    expect(screen.getByRole("button", { name: "Indian" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Custom cuisine" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Remove Custom 1 cuisine" }),
+    ).toBeEnabled();
   });
 
   it("keeps diet style single-select and add-ons selected across a diet switch", async () => {

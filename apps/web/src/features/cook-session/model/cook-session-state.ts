@@ -8,6 +8,7 @@ export type DietStyle = "vegan" | "eggetarian" | "jain" | "halal" | "kosher";
 export type SpiceLevel = "mild" | "medium" | "hot" | "extra-hot";
 export type RecipeDifficulty = "easy" | "medium" | "hard";
 export type IngredientAvailability = "available" | "missing" | "optional";
+export type RecipeHeatLevel = "low" | "medium" | "medium-high" | "high";
 
 export interface IngredientView {
   id: string;
@@ -24,6 +25,7 @@ export interface PreferenceView {
   servings: 1 | 2 | 4;
   optionCount: 3 | 4 | 6;
   allergens: string[];
+  cuisines: string[];
   spiceLevel: SpiceLevel;
   specialInstructions: string;
 }
@@ -72,6 +74,8 @@ export interface RecipeStepView {
   number: number;
   instruction: string;
   durationMinutes: number | null;
+  doneWhen?: string;
+  heatLevel?: RecipeHeatLevel;
 }
 
 export interface CompleteRecipeView {
@@ -84,6 +88,7 @@ export interface CompleteRecipeView {
   steps: RecipeStepView[];
   tips: string[];
   substitutions: string[];
+  nutrition: NutritionView | null;
   nutritionNotice: string;
   allergenNotice: string;
   assumptions: string[];
@@ -182,6 +187,7 @@ export type CookSessionAction =
   | { type: "reset" };
 
 const MAX_RECIPE_SELECTIONS = 6;
+export const MAX_CUISINE_PREFERENCES = 20;
 export const LOCAL_PANTRY_INGREDIENT_ID_PREFIX = "local-pantry-";
 
 const VALID_DIET_STYLES: Record<DietPreference, ReadonlySet<DietStyle>> = {
@@ -210,6 +216,7 @@ export function createInitialCookSessionState(
       servings: 2,
       optionCount: 4,
       allergens: [],
+      cuisines: [],
       spiceLevel: "medium",
       specialInstructions: "",
     },
@@ -427,6 +434,13 @@ function nextPreferences(
         ...preferences,
         allergens: normalizedUniqueNames(action.value as PreferenceView["allergens"]),
       };
+    case "cuisines":
+      return {
+        ...preferences,
+        cuisines: normalizedUniqueNames(
+          action.value as PreferenceView["cuisines"],
+        ).slice(0, MAX_CUISINE_PREFERENCES),
+      };
     case "specialInstructions":
       return {
         ...preferences,
@@ -460,6 +474,7 @@ function preferencesEqual(left: PreferenceView, right: PreferenceView): boolean 
     left.servings === right.servings &&
     left.optionCount === right.optionCount &&
     arraysEqual(left.allergens, right.allergens) &&
+    arraysEqual(left.cuisines, right.cuisines) &&
     left.spiceLevel === right.spiceLevel &&
     left.specialInstructions === right.specialInstructions
   );

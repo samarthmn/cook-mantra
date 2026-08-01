@@ -3,7 +3,9 @@ import {
   type CompleteRecipeView,
   type IngredientAvailability,
   type IngredientView,
+  type NutritionView,
   type PreferenceView,
+  type RecipeHeatLevel,
   type RecipeOptionView,
 } from "./cook-session-state";
 import { normalizePantryStaples, PANTRY_STAPLES } from "./pantry-staples";
@@ -340,6 +342,22 @@ function preferenceAllergens(value: readonly string[]): string[] {
   return value.map((allergen) => allergen.trim().toLocaleLowerCase()).filter(Boolean);
 }
 
+function matchesCuisinePreference(
+  cuisine: string,
+  preferences: readonly string[],
+): boolean {
+  if (preferences.length === 0) return true;
+  const normalizedCuisine = cuisine.trim().toLocaleLowerCase();
+  return preferences.some((preference) => {
+    const normalizedPreference = preference.trim().toLocaleLowerCase();
+    return (
+      normalizedPreference.length > 0 &&
+      (normalizedCuisine.includes(normalizedPreference) ||
+        normalizedPreference.includes(normalizedCuisine))
+    );
+  });
+}
+
 export function createDemoOptions({
   preferences,
   batchNumber,
@@ -349,7 +367,7 @@ export function createDemoOptions({
   const excluded = new Set(excludedIds);
   const avoidedAllergens = preferenceAllergens(preferences.allergens);
 
-  return optionFixtures
+  const eligibleOptions = optionFixtures
     .filter((option) => !excluded.has(option.id))
     .filter((option) => {
       if (preferences.diet === "non-vegetarian") {
@@ -370,42 +388,46 @@ export function createDemoOptions({
     )
     .filter((option) =>
       option.usedIngredients.some((name) => ingredientIsConfirmed(name, ingredients)),
-    )
-    .slice(0, preferences.optionCount)
-    .map((option) => ({
-      id: option.id,
-      name: option.name,
-      summary: option.summary,
-      cuisine: option.cuisine,
-      totalMinutes: option.totalMinutes,
-      difficulty: option.difficulty,
-      usedIngredients: option.usedIngredients.filter((name) =>
-        ingredientIsConfirmed(name, ingredients),
-      ),
-      missingIngredients: missingIngredientNames(option, ingredients).map((name) => ({
-        name,
-        reason: "Needed to complete the intended dish.",
-        substitution: null,
-      })),
-      optionalIngredients: option.optional.map((name) => ({
-        name,
-        reason: "Adds a useful finishing touch.",
-        substitution: null,
-      })),
-      nutrition: {
-        caloriesKcal: option.caloriesKcal,
-        proteinG: option.proteinG,
-        carbohydratesG: option.carbohydratesG,
-        fatG: option.fatG,
-        dietTags: option.dietTags,
-        allergenWarnings: option.allergens,
-        disclaimer: "Estimated values; not medical advice.",
-      },
-      previewArtifactId: null,
-      previewLabel: "AI-generated image",
-      warnings: [],
-      batchNumber,
-    }));
+    );
+  const cuisineMatches = eligibleOptions.filter((option) =>
+    matchesCuisinePreference(option.cuisine, preferences.cuisines),
+  );
+  const preferredOptions = cuisineMatches.length > 0 ? cuisineMatches : eligibleOptions;
+
+  return preferredOptions.slice(0, preferences.optionCount).map((option) => ({
+    id: option.id,
+    name: option.name,
+    summary: option.summary,
+    cuisine: option.cuisine,
+    totalMinutes: option.totalMinutes,
+    difficulty: option.difficulty,
+    usedIngredients: option.usedIngredients.filter((name) =>
+      ingredientIsConfirmed(name, ingredients),
+    ),
+    missingIngredients: missingIngredientNames(option, ingredients).map((name) => ({
+      name,
+      reason: "Needed to complete the intended dish.",
+      substitution: null,
+    })),
+    optionalIngredients: option.optional.map((name) => ({
+      name,
+      reason: "Adds a useful finishing touch.",
+      substitution: null,
+    })),
+    nutrition: {
+      caloriesKcal: option.caloriesKcal,
+      proteinG: option.proteinG,
+      carbohydratesG: option.carbohydratesG,
+      fatG: option.fatG,
+      dietTags: option.dietTags,
+      allergenWarnings: option.allergens,
+      disclaimer: "Estimated values; not medical advice.",
+    },
+    previewArtifactId: null,
+    previewLabel: "AI-generated image",
+    warnings: [],
+    batchNumber,
+  }));
 }
 
 type RawAvailability = "have" | "pantry" | "missing" | "optional";
@@ -417,6 +439,10 @@ interface DemoRecipeFixture {
   assumptions: string[];
   ingredients: Array<[quantity: string, name: string, availability: RawAvailability]>;
   steps: string[];
+  stepDetails?: Partial<
+    Record<number, { doneWhen?: string; heatLevel?: RecipeHeatLevel }>
+  >;
+  nutrition?: NutritionView;
   tips: string[];
   substitutions: string[];
 }
@@ -449,6 +475,29 @@ const recipeFixtures: Record<string, DemoRecipeFixture> = {
       "Fold in paneer cubes and cook 3 more minutes without boiling hard.",
       "Finish with cream — or whisked curd, since cream is missing — and coriander if you have it.",
     ],
+    stepDetails: {
+      3: {
+        doneWhen: "the onion is soft and translucent with no raw garlic smell",
+        heatLevel: "medium",
+      },
+      4: {
+        doneWhen: "the tomatoes are jammy and oil separates at the edges",
+        heatLevel: "medium-high",
+      },
+      6: {
+        doneWhen: "the paneer is hot through but still soft",
+        heatLevel: "low",
+      },
+    },
+    nutrition: {
+      caloriesKcal: 438,
+      proteinG: 21,
+      carbohydratesG: 17,
+      fatG: 32,
+      dietTags: ["Vegetarian", "Gluten-free"],
+      allergenWarnings: ["dairy"],
+      disclaimer: "Estimated values; not medical advice.",
+    },
     tips: [
       "Cold water after blanching keeps the gravy bright green.",
       "Soak paneer in warm salted water for 10 minutes to keep it soft.",
@@ -784,11 +833,13 @@ export function createDemoRecipes(
           number: index + 1,
           instruction,
           durationMinutes: null,
+          ...fixture.stepDetails?.[index + 1],
         })),
         tips: fixture.tips,
         substitutions: fixture.substitutions.map((substitution) =>
           contextualizeSubstitution(substitution, ingredients),
         ),
+        nutrition: fixture.nutrition ?? null,
         nutritionNotice: "Estimated values; not medical advice.",
         allergenNotice: option.nutrition?.allergenWarnings.length
           ? `May contain ${allergenListFormat.format(option.nutrition.allergenWarnings)}.`

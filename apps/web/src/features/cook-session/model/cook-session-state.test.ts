@@ -79,6 +79,7 @@ function stateWithGeneratedContent(): CookSessionState {
         steps: [],
         tips: [],
         substitutions: [],
+        nutrition: null,
         nutritionNotice: "Estimated values; not medical advice.",
         allergenNotice: "Check ingredient labels for allergens.",
         assumptions: [],
@@ -89,6 +90,10 @@ function stateWithGeneratedContent(): CookSessionState {
 }
 
 describe("cookSessionReducer", () => {
+  it("starts with no cuisine preference", () => {
+    expect(createInitialCookSessionState().preferences.cuisines).toEqual([]);
+  });
+
   it("starts manual entry with an empty confirmed list and unchecked pantry", () => {
     const state = cookSessionReducer(createInitialCookSessionState(), {
       type: "start-manual-entry",
@@ -340,6 +345,7 @@ describe("cookSessionReducer", () => {
         servings: 4 as const,
         optionCount: 6 as const,
         allergens: ["Peanuts"],
+        cuisines: ["Indian"],
         spiceLevel: "hot" as const,
         specialInstructions: "Use a pressure cooker.",
       },
@@ -889,6 +895,26 @@ describe("cookSessionReducer", () => {
     expect(withSpice.preferences.spiceLevel).toBe("extra-hot");
   });
 
+  it("normalizes, deduplicates, and caps cuisine preferences", () => {
+    const state = cookSessionReducer(stateWithGeneratedContent(), {
+      type: "set-preference",
+      key: "cuisines",
+      value: [
+        " Indian ",
+        "indian",
+        "Middle   Eastern",
+        ...Array.from({ length: 25 }, (_, index) => `Cuisine ${index + 1}`),
+      ],
+    });
+
+    expect(state.preferences.cuisines).toHaveLength(20);
+    expect(state.preferences.cuisines.slice(0, 3)).toEqual([
+      "Indian",
+      "Middle Eastern",
+      "Cuisine 1",
+    ]);
+  });
+
   it("invalidates generated content when any recipe preference changes", () => {
     const changes: Array<Extract<CookSessionAction, { type: "set-preference" }>> = [
       { type: "set-preference", key: "diet", value: "non-vegetarian" },
@@ -897,6 +923,7 @@ describe("cookSessionReducer", () => {
       { type: "set-preference", key: "servings", value: 4 },
       { type: "set-preference", key: "optionCount", value: 6 },
       { type: "set-preference", key: "allergens", value: ["dairy"] },
+      { type: "set-preference", key: "cuisines", value: ["Indian"] },
       { type: "set-preference", key: "spiceLevel", value: "hot" },
       {
         type: "set-preference",
@@ -949,6 +976,23 @@ describe("cookSessionReducer", () => {
       type: "set-preference",
       key: "diet",
       value: "vegetarian",
+    });
+
+    expect(next).toBe(state);
+  });
+
+  it("treats normalized-equivalent cuisine preferences as unchanged", () => {
+    const state: CookSessionState = {
+      ...stateWithGeneratedContent(),
+      preferences: {
+        ...stateWithGeneratedContent().preferences,
+        cuisines: ["Middle Eastern"],
+      },
+    };
+    const next = cookSessionReducer(state, {
+      type: "set-preference",
+      key: "cuisines",
+      value: ["  Middle   Eastern ", "middle eastern"],
     });
 
     expect(next).toBe(state);

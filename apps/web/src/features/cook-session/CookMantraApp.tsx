@@ -1042,6 +1042,12 @@ function logOperationFailure(error: unknown, state: CookSessionState): void {
       details: error.jobError?.details ?? null,
       retryable: error.retryable,
     });
+  } else if (error instanceof ApiNetworkError) {
+    Object.assign(diagnostic, {
+      source: "network",
+      url: error.url,
+      pageOrigin: typeof window !== "undefined" ? window.location.origin : null,
+    });
   }
 
   console.error("[cook-mantra] operation failed", diagnostic);

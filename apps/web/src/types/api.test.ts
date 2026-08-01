@@ -5,6 +5,7 @@ import type {
   CompleteRecipeResponse,
   IngredientReviewRequest,
   JobResponse,
+  RecipeStep,
   RecipeOptionResponse,
   RecipePreferences,
   SessionResponse,
@@ -52,6 +53,26 @@ describe("Cook Mantra API types", () => {
     expectTypeOf<
       CompleteRecipeResponse["ingredients"][number]["availability"]
     >().toEqualTypeOf<"available" | "missing" | "optional">();
+    expectTypeOf<CompleteRecipeResponse["nutrition"]>().toEqualTypeOf<
+      | {
+          calories_kcal: number;
+          protein_g: number;
+          carbohydrates_g: number;
+          fat_g: number;
+          diet_tags: string[];
+          allergen_warnings: string[];
+          disclaimer: "Estimated values; not medical advice.";
+        }
+      | null
+      | undefined
+    >();
+    expectTypeOf<RecipeStep>().toEqualTypeOf<{
+      number: number;
+      instruction: string;
+      duration_minutes: number | null;
+      done_when?: string | null;
+      heat_level?: "low" | "medium" | "medium-high" | "high" | null;
+    }>();
   });
 
   it("models recipe preferences and job lifecycle fields", () => {

@@ -164,13 +164,14 @@ describe("API view mappers", () => {
         servings: 2,
         optionCount: 4,
         allergens: ["dairy", "Shellfish"],
+        cuisines: [" Indian ", "indian", "Middle   Eastern"],
         spiceLevel: "medium",
         specialInstructions: "  kid friendly  ",
       }),
     ).toEqual({
       dietary_preferences: ["vegetarian", "vegan", "keto"],
       allergens: ["dairy", "Shellfish"],
-      preferred_cuisines: [],
+      preferred_cuisines: ["Indian", "Middle Eastern"],
       max_total_minutes: null,
       servings: 2,
       option_count: 4,
@@ -187,6 +188,7 @@ describe("API view mappers", () => {
       servings: 2,
       optionCount: 4,
       allergens: ["dairy", "Dairy", "SOY", "soy", ""],
+      cuisines: [],
       spiceLevel: "extra-hot",
       specialInstructions: "",
     });
@@ -201,6 +203,26 @@ describe("API view mappers", () => {
     expect(preferences.special_instructions).toBe("");
   });
 
+  it("caps normalized cuisine preferences at the backend limit", () => {
+    const cuisines = Array.from({ length: 22 }, (_, index) => ` Cuisine ${index + 1} `);
+    const preferences = preferencesToApi({
+      diet: "vegetarian",
+      dietStyle: null,
+      dietAddOns: [],
+      servings: 2,
+      optionCount: 4,
+      allergens: [],
+      cuisines: ["Cuisine 1", ...cuisines, "cuisine 2"],
+      spiceLevel: "medium",
+      specialInstructions: "",
+    });
+
+    expect(preferences.preferred_cuisines).toHaveLength(20);
+    expect(preferences.preferred_cuisines).toEqual(
+      Array.from({ length: 20 }, (_, index) => `Cuisine ${index + 1}`),
+    );
+  });
+
   it("maps an unqualified non-vegetarian preference without extra constraints", () => {
     const preferences = preferencesToApi({
       diet: "non-vegetarian",
@@ -209,6 +231,7 @@ describe("API view mappers", () => {
       servings: 2,
       optionCount: 4,
       allergens: [],
+      cuisines: [],
       spiceLevel: "medium",
       specialInstructions: "",
     });
@@ -258,9 +281,31 @@ describe("API view mappers", () => {
           substitution: "Use noodles",
         },
       ],
-      steps: [{ number: 1, instruction: "Boil the pasta.", duration_minutes: 10 }],
+      steps: [
+        {
+          number: 1,
+          instruction: "Boil the pasta.",
+          duration_minutes: 10,
+          done_when: "pasta is tender with a firm bite",
+          heat_level: "high",
+        },
+        {
+          number: 2,
+          instruction: "Drain the pasta.",
+          duration_minutes: null,
+        },
+      ],
       tips: ["Reserve pasta water."],
       substitutions: ["Pasta → noodles"],
+      nutrition: {
+        calories_kcal: 545,
+        protein_g: 22,
+        carbohydrates_g: 82,
+        fat_g: 16,
+        diet_tags: ["vegetarian"],
+        allergen_warnings: ["wheat"],
+        disclaimer: "Estimated values; not medical advice.",
+      },
       nutrition_notice: "Estimated values; not medical advice.",
       allergen_notice: "Check ingredient labels for allergens.",
       assumptions: [],
@@ -283,7 +328,32 @@ describe("API view mappers", () => {
           substitution: "Use noodles",
         },
       ],
-      steps: [{ number: 1, instruction: "Boil the pasta.", durationMinutes: 10 }],
+      steps: [
+        {
+          number: 1,
+          instruction: "Boil the pasta.",
+          durationMinutes: 10,
+          doneWhen: "pasta is tender with a firm bite",
+          heatLevel: "high",
+        },
+        {
+          number: 2,
+          instruction: "Drain the pasta.",
+          durationMinutes: null,
+          doneWhen: undefined,
+          heatLevel: undefined,
+        },
+      ],
+      nutrition: {
+        caloriesKcal: 545,
+        proteinG: 22,
+        carbohydratesG: 82,
+        fatG: 16,
+        dietTags: ["vegetarian"],
+        allergenWarnings: ["wheat"],
+        disclaimer: "Estimated values; not medical advice.",
+      },
     });
+    expect(recipeFromApi({ ...recipe, nutrition: undefined }).nutrition).toBeNull();
   });
 });

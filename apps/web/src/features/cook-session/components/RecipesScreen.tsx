@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Check,
+  ChevronDown,
   Clock3,
   RefreshCw,
   UsersRound,
@@ -50,6 +51,7 @@ export function RecipesScreen({
   onBack,
   onReset,
 }: RecipesScreenProps) {
+  const [ingredientsExpanded, setIngredientsExpanded] = useState(false);
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const startOverButtonRef = useRef<HTMLButtonElement>(null);
   const cancelResetButtonRef = useRef<HTMLButtonElement>(null);
@@ -121,7 +123,9 @@ export function RecipesScreen({
   }
 
   const activeOption = options.find((option) => option.id === activeRecipe.optionId);
+  const activeNutrition = activeRecipe.nutrition ?? activeOption?.nutrition;
   const completeSteps = completedSteps[activeRecipe.optionId] ?? [];
+  const ingredientListId = `recipe-ingredients-list-${activeRecipe.optionId}`;
 
   function moveRecipeTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
     let nextIndex: number | null = null;
@@ -230,10 +234,27 @@ export function RecipesScreen({
 
         <div className="recipe-layout">
           <aside className="recipe-ingredients" aria-labelledby="ingredients-heading">
-            <h3 className="panel-heading" id="ingredients-heading">
-              Ingredients
+            <h3
+              className="panel-heading recipe-ingredients-heading"
+              id="ingredients-heading"
+            >
+              <span className="recipe-ingredients-heading-static">Ingredients</span>
+              <button
+                className="recipe-ingredients-disclosure"
+                type="button"
+                aria-controls={ingredientListId}
+                aria-expanded={ingredientsExpanded}
+                onClick={() => setIngredientsExpanded((expanded) => !expanded)}
+              >
+                <span>Ingredients ({activeRecipe.ingredients.length})</span>
+                <ChevronDown aria-hidden="true" size={18} />
+              </button>
             </h3>
-            <div className="recipe-ingredient-list">
+            <div
+              className="recipe-ingredient-list"
+              id={ingredientListId}
+              hidden={!ingredientsExpanded}
+            >
               {activeRecipe.ingredients.map((ingredient, index) => {
                 const status = ingredientStatus(ingredient, confirmedIngredients);
                 return (
@@ -258,26 +279,20 @@ export function RecipesScreen({
               })}
             </div>
 
-            {activeOption?.nutrition ? (
+            {activeNutrition ? (
               <div className="recipe-nutrition">
                 <h3 className="panel-heading">Per serving — estimate</h3>
                 <div className="nutrition-strip">
+                  <NutritionItem value={activeNutrition.caloriesKcal} label="kcal" />
                   <NutritionItem
-                    value={activeOption.nutrition.caloriesKcal}
-                    label="kcal"
-                  />
-                  <NutritionItem
-                    value={`${activeOption.nutrition.proteinG}g`}
+                    value={`${activeNutrition.proteinG}g`}
                     label="protein"
                   />
                   <NutritionItem
-                    value={`${activeOption.nutrition.carbohydratesG}g`}
+                    value={`${activeNutrition.carbohydratesG}g`}
                     label="carbs"
                   />
-                  <NutritionItem
-                    value={`${activeOption.nutrition.fatG}g`}
-                    label="fat"
-                  />
+                  <NutritionItem value={`${activeNutrition.fatG}g`} label="fat" />
                 </div>
               </div>
             ) : null}
@@ -310,10 +325,24 @@ export function RecipesScreen({
                     </span>
                     <span className="method-step-copy">
                       <span className="method-step-text">{step.instruction}</span>
-                      {step.durationMinutes ? (
-                        <span className="method-step-duration">
-                          <Clock3 aria-hidden="true" size={13} />
-                          {step.durationMinutes} min
+                      {step.doneWhen ? (
+                        <span className="method-step-done-when">
+                          Done when — {step.doneWhen}
+                        </span>
+                      ) : null}
+                      {step.durationMinutes || step.heatLevel ? (
+                        <span className="method-step-meta">
+                          {step.durationMinutes ? (
+                            <span className="method-step-duration">
+                              <Clock3 aria-hidden="true" size={13} />
+                              {step.durationMinutes} min
+                            </span>
+                          ) : null}
+                          {step.heatLevel ? (
+                            <span className="method-step-heat">
+                              {step.heatLevel} heat
+                            </span>
+                          ) : null}
                         </span>
                       ) : null}
                     </span>

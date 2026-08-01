@@ -105,6 +105,7 @@ export interface RecipeOptionResponse {
 }
 
 export type IngredientAvailability = "available" | "missing" | "optional";
+export type RecipeHeatLevel = "low" | "medium" | "medium-high" | "high";
 
 export interface RecipeIngredient {
   name: string;
@@ -117,6 +118,8 @@ export interface RecipeStep {
   number: number;
   instruction: string;
   duration_minutes: number | null;
+  done_when?: string | null;
+  heat_level?: RecipeHeatLevel | null;
 }
 
 export interface CompleteRecipeResponse {
@@ -129,6 +132,7 @@ export interface CompleteRecipeResponse {
   steps: RecipeStep[];
   tips: string[];
   substitutions: string[];
+  nutrition?: NutritionEstimate | null;
   nutrition_notice: "Estimated values; not medical advice.";
   allergen_notice: "Check ingredient labels for allergens.";
   assumptions: string[];
