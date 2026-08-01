@@ -2,6 +2,7 @@ import asyncio
 import json
 from copy import deepcopy
 
+import httpx
 import pytest
 from pydantic import BaseModel
 from tests.tracing_support import enabled_tracing
@@ -204,6 +205,45 @@ def constructed_recipe(**updates: object) -> CompleteRecipe:
     return CompleteRecipe.model_construct(**values)
 
 
+def test_recipe_model_output_rejects_one_step_for_45_minutes() -> None:
+    with pytest.raises(ValueError, match="at least two steps"):
+        RecipeModelOutput.model_validate(
+            recipe_model_output(
+                total_minutes=45,
+                steps=[
+                    {
+                        "number": 1,
+                        "instruction": "Rinse the lentils.",
+                        "duration_minutes": 5,
+                    }
+                ],
+            )
+        )
+
+
+def test_recipe_model_output_accepts_one_step_for_10_minutes() -> None:
+    result = RecipeModelOutput.model_validate(
+        recipe_model_output(
+            total_minutes=10,
+            steps=[
+                {
+                    "number": 1,
+                    "instruction": "Toss and serve.",
+                    "duration_minutes": 10,
+                }
+            ],
+        )
+    )
+
+    assert len(result.steps) == 1
+
+
+def test_recipe_model_output_accepts_two_steps_for_45_minutes() -> None:
+    result = RecipeModelOutput.model_validate(recipe_model_output(total_minutes=45))
+
+    assert len(result.steps) == 2
+
+
 @pytest.mark.asyncio
 async def test_agent_defers_model_construction_and_forwards_exact_settings(
     monkeypatch: pytest.MonkeyPatch,
@@ -216,18 +256,26 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
     )
     factory = StructuredModelFactory(recipe_model_output())
     calls: list[
-        tuple[Agent, bool | str | None, int | None, int | None, Settings | None]
+        tuple[
+            Agent,
+            float,
+            bool | str | None,
+            int | None,
+            int | None,
+            Settings | None,
+        ]
     ] = []
 
     def capture_model(
         agent: Agent,
         *,
+        temperature: float,
         thinking: bool | str | None = None,
         num_predict: int | None = None,
         num_ctx: int | None = None,
         settings: Settings | None,
     ) -> StructuredModelFactory:
-        calls.append((agent, thinking, num_predict, num_ctx, settings))
+        calls.append((agent, temperature, thinking, num_predict, num_ctx, settings))
         return factory
 
     monkeypatch.setattr(specialized_recipe_module, "get_model", capture_model)
@@ -244,7 +292,7 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
     assert result.name == recipe_option().name
     # GPT-OSS needs a bounded reasoning level: True/unbounded fills the context
     # window mid-JSON, False returns an empty content channel.
-    assert calls == [(Agent.SPECIALIZED_RECIPE, "low", 12_288, 16_384, settings)]
+    assert calls == [(Agent.SPECIALIZED_RECIPE, 0.0, "low", 12_288, 16_384, settings)]
     assert factory.schema is not None
     assert {
         "option_id",
@@ -259,6 +307,58 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
         "ingredients",
         "steps",
     } <= factory.schema.model_fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_model_output_invalid_builds_temperature_point_three_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid = recipe_model_output(
+        steps=[
+            {
+                "number": 2,
+                "instruction": "Start at the wrong number.",
+                "duration_minutes": 5,
+            }
+        ]
+    )
+    factories = {
+        0.0: StructuredModelFactory(invalid),
+        0.3: StructuredModelFactory(recipe_model_output()),
+    }
+    calls: list[tuple[float, str, int, int]] = []
+
+    def capture_model(
+        agent: Agent,
+        *,
+        temperature: float,
+        thinking: str,
+        num_predict: int,
+        num_ctx: int,
+        settings: Settings | None,
+    ) -> StructuredModelFactory:
+        assert agent is Agent.SPECIALIZED_RECIPE
+        assert settings is None
+        calls.append((temperature, thinking, num_predict, num_ctx))
+        return factories[temperature]
+
+    monkeypatch.setattr(specialized_recipe_module, "get_model", capture_model)
+
+    result = await OllamaSpecializedRecipeAgent().generate(
+        recipe_option(),
+        ["Tomato, ripe"],
+        preferences(),
+    )
+
+    assert result.option_id == recipe_option().id
+    assert calls == [
+        (0.0, "low", 12_288, 16_384),
+        (0.3, "low", 12_288, 16_384),
+    ]
+    assert factories[0.0].model is not None
+    assert factories[0.0].model.attempts == 1
+    assert factories[0.3].model is not None
+    assert factories[0.3].model.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -312,6 +412,46 @@ async def test_specialized_recipe_passes_only_current_job_trace_metadata() -> No
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_traced_retry_passes_identical_config_to_both_models() -> None:
+    invalid = recipe_model_output(
+        steps=[
+            {
+                "number": 2,
+                "instruction": "Start at the wrong number.",
+                "duration_minutes": 5,
+            }
+        ]
+    )
+    model = ValidatingStructuredModel([invalid])
+    retry_model = ValidatingStructuredModel([recipe_model_output()])
+    tracing, _ = enabled_tracing()
+    recipe_agent = OllamaSpecializedRecipeAgent(
+        model=model,
+        retry_model=retry_model,
+        tracing=tracing,
+    )
+
+    with log_context(session_id="session-1", job_id="job-1"):
+        result = await recipe_agent.generate(
+            recipe_option(),
+            ["Tomato, ripe"],
+            preferences(),
+        )
+
+    expected_config = {
+        "tags": ["cook-mantra", "specialized_recipe"],
+        "metadata": {
+            "agent": "specialized_recipe",
+            "model": AGENT_MODELS[Agent.SPECIALIZED_RECIPE].value,
+            "session_id": "session-1",
+            "job_id": "job-1",
+        },
+    }
+    assert result.option_id == recipe_option().id
+    assert model.configs == retry_model.configs == [expected_config]
 
 
 @pytest.mark.asyncio
@@ -387,6 +527,9 @@ async def test_prompt_contains_every_input_fact_and_complete_recipe_constraint()
         "substitution text, or drop any of these names" in prompt_lower
     )
     assert "add further ingredients only under new names" in prompt_lower
+    assert "if a used_ingredients entry is an accompaniment" in prompt_lower
+    assert 'name "steamed rice for serving"' in prompt_lower
+    assert 'quantity "1 cup"' in prompt_lower
     assert "each normalized ingredient name must appear exactly once" in prompt_lower
     assert (
         'put the split in quantity, for example "3 tbsp - 2 for tempering, 1 to '
@@ -468,9 +611,15 @@ async def test_invalid_server_owned_values_are_rejected_after_merge(
     model = UntrustedStructuredModel(
         [RecipeModelOutput.model_validate(recipe_model_output())]
     )
+    retry_model = UntrustedStructuredModel(
+        [RecipeModelOutput.model_validate(recipe_model_output())]
+    )
 
     with pytest.raises(AppError) as raised:
-        await OllamaSpecializedRecipeAgent(model=model).generate(
+        await OllamaSpecializedRecipeAgent(
+            model=model,
+            retry_model=retry_model,
+        ).generate(
             option,
             ["Tomato, ripe"],
             user_preferences,
@@ -483,6 +632,7 @@ async def test_invalid_server_owned_values_are_rejected_after_merge(
     assert error.retryable is True
     assert error.details == {}
     assert model.attempts == 1
+    assert retry_model.attempts == 1
 
 
 def invalid_constructed_recipes() -> list[CompleteRecipe]:
@@ -506,9 +656,13 @@ async def test_constructed_recipe_instances_are_explicitly_revalidated(
     invalid_recipe: CompleteRecipe,
 ) -> None:
     model = UntrustedStructuredModel([invalid_recipe])
+    retry_model = UntrustedStructuredModel([invalid_recipe])
 
     with pytest.raises(AppError) as raised:
-        await OllamaSpecializedRecipeAgent(model=model).generate(
+        await OllamaSpecializedRecipeAgent(
+            model=model,
+            retry_model=retry_model,
+        ).generate(
             recipe_option(),
             ["Tomato, ripe"],
             preferences(),
@@ -521,6 +675,7 @@ async def test_constructed_recipe_instances_are_explicitly_revalidated(
     assert error.retryable is True
     assert error.details == {}
     assert model.attempts == 1
+    assert retry_model.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -536,9 +691,13 @@ async def test_non_model_and_unserializable_results_map_to_safe_error(
     unsafe_result: object,
 ) -> None:
     model = UntrustedStructuredModel([unsafe_result])
+    retry_model = UntrustedStructuredModel([unsafe_result])
 
     with pytest.raises(AppError) as raised:
-        await OllamaSpecializedRecipeAgent(model=model).generate(
+        await OllamaSpecializedRecipeAgent(
+            model=model,
+            retry_model=retry_model,
+        ).generate(
             recipe_option(),
             ["Tomato, ripe"],
             preferences(),
@@ -552,14 +711,20 @@ async def test_non_model_and_unserializable_results_map_to_safe_error(
     assert error.details == {}
     assert "PRIVATE_MODEL_PAYLOAD" not in str(error)
     assert model.attempts == 1
+    assert retry_model.attempts == 1
 
 
 @pytest.mark.asyncio
 async def test_server_owned_fields_from_an_untrusted_model_are_rejected() -> None:
-    model = UntrustedStructuredModel([CompleteRecipe.model_validate(recipe_output())])
+    invalid = CompleteRecipe.model_validate(recipe_output())
+    model = UntrustedStructuredModel([invalid])
+    retry_model = UntrustedStructuredModel([invalid])
 
     with pytest.raises(AppError) as raised:
-        await OllamaSpecializedRecipeAgent(model=model).generate(
+        await OllamaSpecializedRecipeAgent(
+            model=model,
+            retry_model=retry_model,
+        ).generate(
             recipe_option(),
             ["Tomato, ripe"],
             preferences(),
@@ -567,6 +732,7 @@ async def test_server_owned_fields_from_an_untrusted_model_are_rejected() -> Non
 
     assert raised.value.code is ErrorCode.MODEL_OUTPUT_INVALID
     assert model.attempts == 1
+    assert retry_model.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -586,11 +752,15 @@ async def test_server_owned_fields_from_an_untrusted_model_are_rejected() -> Non
     ],
     ids=["unexpected-field", "invalid-step-numbering"],
 )
-async def test_invalid_model_output_uses_only_shared_two_attempt_boundary(
+async def test_both_invalid_full_path_attempts_propagate_model_output_invalid(
     invalid_output: dict[str, object],
 ) -> None:
-    model = ValidatingStructuredModel([invalid_output, invalid_output])
-    recipe_agent = OllamaSpecializedRecipeAgent(model=model)
+    model = ValidatingStructuredModel([invalid_output])
+    retry_model = ValidatingStructuredModel([invalid_output])
+    recipe_agent = OllamaSpecializedRecipeAgent(
+        model=model,
+        retry_model=retry_model,
+    )
 
     with pytest.raises(AppError) as raised:
         await recipe_agent.generate(
@@ -602,11 +772,12 @@ async def test_invalid_model_output_uses_only_shared_two_attempt_boundary(
     assert raised.value.code is ErrorCode.MODEL_OUTPUT_INVALID
     assert raised.value.status_code == 502
     assert raised.value.retryable is True
-    assert model.attempts == 2
+    assert model.attempts == 1
+    assert retry_model.attempts == 1
 
 
 @pytest.mark.asyncio
-async def test_shared_retry_can_recover_once_without_an_adapter_retry_layer() -> None:
+async def test_invalid_first_attempt_uses_injected_retry_model_and_recovers() -> None:
     invalid = recipe_model_output(
         steps=[
             {
@@ -616,9 +787,64 @@ async def test_shared_retry_can_recover_once_without_an_adapter_retry_layer() ->
             }
         ]
     )
-    model = ValidatingStructuredModel([invalid, recipe_model_output()])
+    model = ValidatingStructuredModel([invalid])
+    retry_model = ValidatingStructuredModel([recipe_model_output()])
 
-    result = await OllamaSpecializedRecipeAgent(model=model).generate(
+    result = await OllamaSpecializedRecipeAgent(
+        model=model,
+        retry_model=retry_model,
+    ).generate(
+        recipe_option(),
+        ["Tomato, ripe"],
+        preferences(),
+    )
+
+    assert result.option_id == recipe_option().id
+    assert model.attempts == 1
+    assert retry_model.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_trusted_option_time_rejects_short_model_recipe_and_retries() -> None:
+    incomplete = recipe_model_output(
+        total_minutes=10,
+        steps=[
+            {
+                "number": 1,
+                "instruction": "Rinse the lentils.",
+                "duration_minutes": 5,
+            }
+        ],
+    )
+    model = ValidatingStructuredModel([incomplete])
+    retry_model = ValidatingStructuredModel([recipe_model_output()])
+
+    result = await OllamaSpecializedRecipeAgent(
+        model=model,
+        retry_model=retry_model,
+    ).generate(
+        recipe_option(),
+        ["Tomato, ripe"],
+        preferences(),
+    )
+
+    assert result.total_minutes == 35
+    assert len(result.steps) == 2
+    assert model.attempts == 1
+    assert retry_model.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_retries_primary_model_not_injected_retry() -> None:
+    model = ValidatingStructuredModel(
+        [httpx.ConnectError("model unavailable"), recipe_model_output()]
+    )
+    retry_model = ValidatingStructuredModel([recipe_model_output()])
+
+    result = await OllamaSpecializedRecipeAgent(
+        model=model,
+        retry_model=retry_model,
+    ).generate(
         recipe_option(),
         ["Tomato, ripe"],
         preferences(),
@@ -626,6 +852,9 @@ async def test_shared_retry_can_recover_once_without_an_adapter_retry_layer() ->
 
     assert result.option_id == recipe_option().id
     assert model.attempts == 2
+    assert retry_model.attempts == 0
+    assert retry_model.messages == []
+    assert retry_model.configs == []
 
 
 @pytest.mark.asyncio
@@ -677,59 +906,71 @@ async def test_server_marks_unconfirmed_model_ingredient_missing() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "ingredients",
+    ("ingredients", "omitted_name"),
     [
-        [
-            {
-                "name": "Tomato, ripe",
-                "quantity": "3 medium",
-                "availability": "available",
-            },
-            {
-                "name": "Coriander",
-                "quantity": "1 tablespoon",
-                "availability": "optional",
-            },
-        ],
-        [
-            {
-                "name": "Tomato, ripe",
-                "quantity": "3 medium",
-                "availability": "available",
-            },
-            {
-                "name": "Mustard seeds",
-                "quantity": "1 teaspoon",
-                "availability": "missing",
-            },
-        ],
+        (
+            [
+                {
+                    "name": "Tomato, ripe",
+                    "quantity": "3 medium",
+                    "availability": "available",
+                },
+                {
+                    "name": "Coriander",
+                    "quantity": "1 tablespoon",
+                    "availability": "optional",
+                },
+            ],
+            "Mustard seeds",
+        ),
+        (
+            [
+                {
+                    "name": "Tomato, ripe",
+                    "quantity": "3 medium",
+                    "availability": "available",
+                },
+                {
+                    "name": "Mustard seeds",
+                    "quantity": "1 teaspoon",
+                    "availability": "missing",
+                },
+            ],
+            "Coriander",
+        ),
     ],
     ids=["omitted-known-missing", "omitted-known-optional"],
 )
-async def test_known_missing_and_optional_items_cannot_disappear(
+async def test_absent_missing_or_optional_item_adds_server_warning(
     ingredients: list[dict[str, object]],
+    omitted_name: str,
 ) -> None:
     model = ValidatingStructuredModel([recipe_model_output(ingredients=ingredients)])
 
-    with pytest.raises(AppError) as raised:
-        await OllamaSpecializedRecipeAgent(model=model).generate(
-            recipe_option(),
-            ["Tomato, ripe"],
-            preferences(),
-        )
+    result = await OllamaSpecializedRecipeAgent(model=model).generate(
+        recipe_option(),
+        ["Tomato, ripe"],
+        preferences(),
+    )
 
-    assert raised.value.code is ErrorCode.MODEL_OUTPUT_INVALID
-    assert raised.value.status_code == 502
-    assert raised.value.retryable is True
+    assert result.warnings == (
+        "Use care around hot oil.",
+        f"Not included from the option: {omitted_name}",
+    )
     assert model.attempts == 1
 
 
 @pytest.mark.asyncio
-async def test_used_option_ingredient_cannot_disappear() -> None:
+async def test_absent_used_option_ingredients_add_server_warning() -> None:
     model = ValidatingStructuredModel(
         [
             recipe_model_output(
                 ingredients=[
+                    {
+                        "name": "Tomato, ripe",
+                        "quantity": "3 medium",
+                        "availability": "available",
+                    },
                     {
                         "name": "Mustard seeds",
                         "quantity": "1 teaspoon",
@@ -744,17 +985,54 @@ async def test_used_option_ingredient_cannot_disappear() -> None:
             )
         ]
     )
+    option = recipe_option().model_copy(
+        update={"used_ingredients": ["Tomato, ripe", "Rice", "Toor dal"]}
+    )
+
+    result = await OllamaSpecializedRecipeAgent(model=model).generate(
+        option,
+        ["Tomato, ripe", "Rice", "Toor dal"],
+        preferences(),
+    )
+
+    assert result.warnings == (
+        "Use care around hot oil.",
+        "Not used from your selection: Rice, Toor dal",
+    )
+    assert model.attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("ingredient_name", "wrong_availability"),
+    [
+        ("Tomato, ripe", IngredientAvailability.MISSING),
+        ("Mustard seeds", IngredientAvailability.OPTIONAL),
+        ("Coriander", IngredientAvailability.MISSING),
+    ],
+    ids=["confirmed-mismatch", "missing-mismatch", "optional-mismatch"],
+)
+def test_present_ingredient_with_wrong_availability_is_rejected(
+    ingredient_name: str,
+    wrong_availability: IngredientAvailability,
+) -> None:
+    recipe = CompleteRecipe.model_validate(recipe_output())
+    wrong_ingredients = tuple(
+        ingredient.model_copy(update={"availability": wrong_availability})
+        if ingredient.name == ingredient_name
+        else ingredient
+        for ingredient in recipe.ingredients
+    )
+    wrong_recipe = recipe.model_copy(update={"ingredients": wrong_ingredients})
 
     with pytest.raises(AppError) as raised:
-        await OllamaSpecializedRecipeAgent(model=model).generate(
+        specialized_recipe_module._validate_ingredient_availability(
+            wrong_recipe,
             recipe_option(),
             ["Tomato, ripe"],
-            preferences(),
         )
 
     assert raised.value.code is ErrorCode.MODEL_OUTPUT_INVALID
     assert raised.value.message == "The model returned invalid ingredient availability."
-    assert model.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -816,9 +1094,15 @@ async def test_duplicate_normalized_recipe_ingredient_names_are_rejected(
         }
     )
     model = ValidatingStructuredModel([recipe_model_output(ingredients=ingredients)])
+    retry_model = ValidatingStructuredModel(
+        [recipe_model_output(ingredients=ingredients)]
+    )
 
     with pytest.raises(AppError) as raised:
-        await OllamaSpecializedRecipeAgent(model=model).generate(
+        await OllamaSpecializedRecipeAgent(
+            model=model,
+            retry_model=retry_model,
+        ).generate(
             recipe_option(),
             ["Tomato, ripe"],
             preferences(),
@@ -831,6 +1115,7 @@ async def test_duplicate_normalized_recipe_ingredient_names_are_rejected(
     assert error.retryable is True
     assert error.details == {}
     assert model.attempts == 1
+    assert retry_model.attempts == 1
 
 
 @pytest.mark.asyncio

@@ -111,6 +111,11 @@ async def test_master_chef_prompts_with_confirmed_inputs_and_constraints() -> No
     assert (
         "copy every used_ingredients entry character-for-character" in normalized_prompt
     )
+    assert "only ingredients the dish genuinely cooks with" in normalized_prompt
+    assert "never serving accompaniments" in normalized_prompt
+    assert "near-duplicate names for the same ingredient" in normalized_prompt
+    assert '"garlic" and "garlic bulb"' in normalized_prompt
+    assert "choose exactly one and never list both" in normalized_prompt
     assert "missing_ingredients or optional_ingredients" in normalized_prompt
     assert "preferences.spice_level" in normalized_prompt
     assert "preferences.special_instructions" in normalized_prompt

@@ -58,6 +58,15 @@ class RecipeModelOutput(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_step_count_for_total_time(self) -> "RecipeModelOutput":
+        """Reject implausibly incomplete instructions for longer recipes."""
+        if self.total_minutes >= 15 and len(self.steps) < 2:
+            raise ValueError(
+                "Recipes taking 15 minutes or longer must include at least two steps."
+            )
+        return self
+
 
 class OllamaSpecializedRecipeAgent:
     """Generate complete recipes with the configured specialized Ollama model."""
@@ -65,10 +74,12 @@ class OllamaSpecializedRecipeAgent:
     def __init__(
         self,
         model: StructuredModel[RecipeModelOutput] | None = None,
+        retry_model: StructuredModel[RecipeModelOutput] | None = None,
         settings: Settings | None = None,
         tracing: TracingService | None = None,
     ) -> None:
         self._model = model
+        self._retry_model = retry_model
         self._settings = settings
         self._tracing = tracing
 
@@ -79,21 +90,7 @@ class OllamaSpecializedRecipeAgent:
         preferences: RecipePreferences,
     ) -> CompleteRecipe:
         """Return one validated recipe with honest ingredient availability."""
-        model = self._model
-        if model is None:
-            model = get_model(
-                Agent.SPECIALIZED_RECIPE,
-                # Bounded reasoning for GPT-OSS: True/unbounded fills the context
-                # window and truncates mid-JSON; False returns an empty content
-                # channel. "low" is the only setting that holds for both this and
-                # a future non-reasoning model swap.
-                thinking="low",
-                # Rich sensory guidance increases the structured JSON size, so
-                # retain a bounded cap with enough room to finish the recipe.
-                num_predict=12_288,
-                num_ctx=16_384,
-                settings=self._settings,
-            ).with_structured_output(RecipeModelOutput)
+        model = self._model or self._build_model(temperature=0.0)
 
         normalized_confirmed = _normalize_confirmed_names(confirmed_ingredients)
         messages = [
@@ -102,25 +99,100 @@ class OllamaSpecializedRecipeAgent:
             )
         ]
 
-        async def invoke(config: RunnableConfig) -> RecipeModelOutput:
-            return await invoke_structured(model, messages, config=config)
+        async def invoke(config: RunnableConfig) -> CompleteRecipe:
+            try:
+                return await self._generate_once(
+                    model,
+                    messages,
+                    option,
+                    normalized_confirmed,
+                    preferences,
+                    config,
+                )
+            except AppError as error:
+                if error.code is ErrorCode.MODEL_OUTPUT_INVALID:
+                    retry_model = self._retry_model or self._build_model(
+                        temperature=0.3
+                    )
+                elif error.code in {
+                    ErrorCode.OLLAMA_UNAVAILABLE,
+                    ErrorCode.OPERATION_TIMED_OUT,
+                }:
+                    retry_model = model
+                else:
+                    raise
+                return await self._generate_once(
+                    retry_model,
+                    messages,
+                    option,
+                    normalized_confirmed,
+                    preferences,
+                    config,
+                )
 
         if self._tracing is None:
-            model_result = await invoke_structured(model, messages)
-        else:
-            model_result = await self._tracing.invoke_text(
-                Agent.SPECIALIZED_RECIPE,
-                invoke,
-            )
+            return await invoke({})
+        return await self._tracing.invoke_text(
+            Agent.SPECIALIZED_RECIPE,
+            invoke,
+        )
+
+    def _build_model(
+        self,
+        *,
+        temperature: float,
+    ) -> StructuredModel[RecipeModelOutput]:
+        return get_model(
+            Agent.SPECIALIZED_RECIPE,
+            temperature=temperature,
+            # Bounded reasoning for GPT-OSS: True/unbounded fills the context
+            # window and truncates mid-JSON; False returns an empty content
+            # channel. "low" is the only setting that holds for both this and
+            # a future non-reasoning model swap.
+            thinking="low",
+            # Rich sensory guidance increases the structured JSON size, so
+            # retain a bounded cap with enough room to finish the recipe.
+            num_predict=12_288,
+            num_ctx=16_384,
+            settings=self._settings,
+        ).with_structured_output(RecipeModelOutput)
+
+    async def _generate_once(
+        self,
+        model: StructuredModel[RecipeModelOutput],
+        messages: list[HumanMessage],
+        option: RecipeOption,
+        confirmed_ingredients: list[str],
+        preferences: RecipePreferences,
+        config: RunnableConfig,
+    ) -> CompleteRecipe:
+        model_result = await invoke_structured(
+            model,
+            messages,
+            max_attempts=1,
+            config=config,
+        )
         recipe = _revalidate_model_recipe(model_result)
         recipe = _derive_ingredient_availability(
             recipe,
             option,
-            normalized_confirmed,
+            confirmed_ingredients,
         )
         recipe = _merge_server_owned_fields(recipe, option, preferences)
-        _validate_ingredient_availability(recipe, option, normalized_confirmed)
-        return recipe
+        if option.total_minutes >= 15 and len(recipe.steps) < 2:
+            raise _invalid_model_output_error()
+        omitted_used_ingredients, omitted_option_ingredients = (
+            _validate_ingredient_availability(
+                recipe,
+                option,
+                confirmed_ingredients,
+            )
+        )
+        return _append_omitted_ingredient_warnings(
+            recipe,
+            omitted_used_ingredients,
+            omitted_option_ingredients,
+        )
 
 
 def _normalize_name(name: str) -> str:
@@ -199,6 +271,9 @@ Reproduce every used_ingredients string and the `name` field of every
 missing_ingredients and optional_ingredients entry character-for-character. Do not
 translate, pluralize, abbreviate, re-describe, merge in reason or substitution text,
 or drop any of these names. Add further ingredients only under new names.
+If a used_ingredients entry is an accompaniment, include it with a quantity, for
+example, include it as its own ingredient entry with name "steamed rice for serving"
+and quantity "1 cup".
 Each normalized ingredient name must appear exactly once. If used at multiple stages,
 use one entry and put the split in quantity, for example
 "3 tbsp - 2 for tempering, 1 to finish".
@@ -296,7 +371,7 @@ def _validate_ingredient_availability(
     recipe: CompleteRecipe,
     option: RecipeOption,
     confirmed_ingredients: list[str],
-) -> None:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     confirmed_keys = {
         _normalize_name(ingredient).casefold() for ingredient in confirmed_ingredients
     }
@@ -312,10 +387,12 @@ def _validate_ingredient_availability(
         if is_confirmed != is_available:
             raise _invalid_availability_error()
 
-    for used_ingredient in option.used_ingredients:
-        key = _normalize_name(used_ingredient).casefold()
-        if key not in availability_by_name:
-            raise _invalid_availability_error()
+    omitted_used_ingredients = tuple(
+        used_ingredient
+        for used_ingredient in option.used_ingredients
+        if _normalize_name(used_ingredient).casefold() not in availability_by_name
+    )
+    omitted_option_ingredients: list[str] = []
 
     for requirement in option.missing_ingredients:
         key = _normalize_name(requirement.name).casefold()
@@ -324,7 +401,9 @@ def _validate_ingredient_availability(
             if key in confirmed_keys
             else IngredientAvailability.MISSING
         )
-        if availability_by_name.get(key) is not expected:
+        if key not in availability_by_name:
+            omitted_option_ingredients.append(requirement.name)
+        elif availability_by_name[key] is not expected:
             raise _invalid_availability_error()
 
     for requirement in option.optional_ingredients:
@@ -334,8 +413,31 @@ def _validate_ingredient_availability(
             if key in confirmed_keys
             else IngredientAvailability.OPTIONAL
         )
-        if availability_by_name.get(key) is not expected:
+        if key not in availability_by_name:
+            omitted_option_ingredients.append(requirement.name)
+        elif availability_by_name[key] is not expected:
             raise _invalid_availability_error()
+
+    return omitted_used_ingredients, tuple(omitted_option_ingredients)
+
+
+def _append_omitted_ingredient_warnings(
+    recipe: CompleteRecipe,
+    omitted_used_ingredients: tuple[str, ...],
+    omitted_option_ingredients: tuple[str, ...],
+) -> CompleteRecipe:
+    warnings = list(recipe.warnings)
+    if omitted_used_ingredients:
+        warnings.append(
+            f"Not used from your selection: {', '.join(omitted_used_ingredients)}"
+        )
+    if omitted_option_ingredients:
+        warnings.append(
+            f"Not included from the option: {', '.join(omitted_option_ingredients)}"
+        )
+    if len(warnings) == len(recipe.warnings):
+        return recipe
+    return recipe.model_copy(update={"warnings": tuple(warnings)})
 
 
 def _invalid_model_output_error() -> AppError:

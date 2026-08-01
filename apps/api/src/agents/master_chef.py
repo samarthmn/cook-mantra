@@ -162,6 +162,10 @@ A short confirmed_ingredients list is normal and is never a reason to return few
 options: build each dish around what is confirmed and list everything else the dish
 needs in missing_ingredients.
 Copy every used_ingredients entry character-for-character from confirmed_ingredients.
+Include only ingredients the dish genuinely cooks with in used_ingredients, never
+serving accompaniments. When confirmed_ingredients contains near-duplicate names for
+the same ingredient, such as "Garlic" and "garlic bulb", choose exactly one and never
+list both.
 Put every needed ingredient absent from confirmed_ingredients in missing_ingredients
 or optional_ingredients, never in used_ingredients. Give missing ingredients a
 substitution when feasible.

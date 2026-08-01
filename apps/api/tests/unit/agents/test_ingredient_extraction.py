@@ -54,6 +54,11 @@ async def test_extractor_sends_visible_ingredient_multimodal_message() -> None:
     assert "do not infer pantry items" in prompt
     assert "confidence from 0.0 to 1.0" in prompt
     assert "including uncertain ones" in prompt
+    assert "short canonical culinary names" in prompt
+    assert "without container, location, plating, or quantity descriptors" in prompt
+    assert "blueberries, not blueberries in bowl" in prompt
+    assert "avocado, not avocado slice" in prompt
+    assert "grapefruit, not grapefruit half" in prompt
     assert "below 0.5 instead of omitting" in prompt
     assert "empty detected list only when the image contains no food" in prompt
 
