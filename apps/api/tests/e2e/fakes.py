@@ -3,7 +3,7 @@
 from base64 import b64decode
 
 from core.errors import AppError, ErrorCode
-from domain.images import GeneratedImage, ImageGenerationRequest
+from domain.images import ImageGenerationRequest, VerifiedRaster
 from domain.ingredients import DetectedIngredient, ExtractionResult
 from domain.recipe_options import (
     Difficulty,
@@ -112,16 +112,20 @@ class DeterministicNutritionAgent:
 class DeterministicImageGenerator:
     """Return one valid PNG while exercising progress reporting."""
 
+    def __init__(self) -> None:
+        self.requests: list[ImageGenerationRequest] = []
+
     async def generate(
         self,
         request: ImageGenerationRequest,
         progress: ProgressCallback,
-    ) -> GeneratedImage:
+    ) -> VerifiedRaster:
+        self.requests.append(request)
         if not request.prompt:
             raise AssertionError("Dish previews require a prompt.")
         await progress(35)
         await progress(100)
-        return GeneratedImage(
+        return VerifiedRaster(
             data=PNG_BYTES,
             media_type="image/png",
             width=2,

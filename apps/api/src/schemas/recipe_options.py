@@ -2,7 +2,6 @@
 
 from pydantic import ConfigDict
 
-from domain.images import DishPreview
 from domain.recipe_options import RecipeOption
 
 RECIPE_OPTION_EXAMPLE = {
@@ -36,11 +35,6 @@ RECIPE_OPTION_EXAMPLE = {
         "allergen_warnings": ["wheat"],
         "disclaimer": "Estimated values; not medical advice.",
     },
-    "preview": {
-        "artifact_id": "artifact-preview-123",
-        "label": "AI-generated image",
-    },
-    "warnings": [],
 }
 
 
@@ -51,5 +45,3 @@ class RecipeOptionResponse(RecipeOption):
         from_attributes=True,
         json_schema_extra={"examples": [RECIPE_OPTION_EXAMPLE]},
     )
-
-    preview: DishPreview | None = None

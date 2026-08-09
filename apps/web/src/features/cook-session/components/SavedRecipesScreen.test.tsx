@@ -69,6 +69,8 @@ const recipe: CompleteRecipeView = {
   allergenNotice: "Check ingredient labels for allergens.",
   assumptions: [],
   warnings: [],
+  previewArtifactId: null,
+  previewLabel: null,
 };
 
 const secondRecipe: CompleteRecipeView = {
@@ -169,13 +171,13 @@ function RemovalHarness({
 function renderRemovalHarness(initialEntries = entries) {
   window.localStorage.setItem(
     SAVED_RECIPES_STORAGE_KEY,
-    JSON.stringify({ version: 2, entries: initialEntries }),
+    JSON.stringify({ version: 3, entries: initialEntries }),
   );
   return render(<RemovalHarness initialEntries={initialEntries} />);
 }
 
 describe("SavedRecipesScreen", () => {
-  it("renders saved recipe summaries with time, servings, and nutrition", () => {
+  it("renders saved recipe summaries with time and servings but no nutrition", () => {
     render(
       <SavedRecipesScreen
         entries={entries}
@@ -193,7 +195,7 @@ describe("SavedRecipesScreen", () => {
     ).toBeVisible();
     expect(screen.getByText(formatSavedAt(entries[0].savedAt))).toBeVisible();
     expect(screen.getAllByText("2 servings")).toHaveLength(2);
-    expect(screen.getAllByText("420 kcal · 12g protein")).toHaveLength(2);
+    expect(screen.queryByText("420 kcal · 12g protein")).toBeNull();
   });
 
   it("renders entries newest-first without changing the input array", () => {
@@ -244,6 +246,7 @@ describe("SavedRecipesScreen", () => {
     ).toHaveAttribute("src", photo);
     expect(screen.getByText("AI image")).toBeVisible();
     expect(screen.getByText("1 of 2 steps done")).toBeVisible();
+    expect(document.querySelector('img[src*="/artifacts/"]')).toBeNull();
   });
 
   it("keeps separate snapshots of the same recipe distinguishable by time", () => {

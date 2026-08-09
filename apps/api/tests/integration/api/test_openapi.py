@@ -4,9 +4,12 @@ from fastapi.testclient import TestClient
 
 from api.app import create_app
 from core.config import Settings
+from domain.model_runtime import AgentRole
+from schemas.health import ReadinessResponse, RuntimeStatusResponse
 
 EXPECTED_OPERATIONS = {
     ("GET", "/api/v1/health"): "getHealth",
+    ("GET", "/api/v1/runtime-status"): "getRuntimeStatus",
     ("GET", "/api/v1/ready"): "getReadiness",
     ("GET", "/api/v1/jobs/{job_id}"): "getJob",
     ("POST", "/api/v1/sessions"): "createSession",
@@ -30,9 +33,9 @@ EXPECTED_OPERATIONS = {
 }
 
 EXPECTED_ERROR_RESPONSES = {
-    ("GET", "/api/v1/ready"): {"503"},
+    ("GET", "/api/v1/ready"): {"401", "402", "429", "502", "503", "504"},
     ("GET", "/api/v1/jobs/{job_id}"): {"404"},
-    ("POST", "/api/v1/sessions"): {"422", "503"},
+    ("POST", "/api/v1/sessions"): {"409", "422", "503"},
     ("POST", "/api/v1/sessions/manual"): {"422"},
     ("GET", "/api/v1/sessions/{session_id}"): {"404"},
     ("PUT", "/api/v1/sessions/{session_id}/ingredients"): {"404", "409", "422"},
@@ -132,9 +135,9 @@ def test_openapi_documents_error_envelopes_examples_and_binary_artifacts(
         "ErrorDetail",
         "ErrorResponse",
         "HealthResponse",
-        "BeastStatus",
         "OllamaStatus",
         "ReadinessResponse",
+        "RuntimeStatusResponse",
         "JobErrorResponse",
         "JobResponse",
         "IngredientResponse",
@@ -159,6 +162,145 @@ def test_openapi_documents_error_envelopes_examples_and_binary_artifacts(
             "type": "string",
             "format": "binary",
         }
+
+
+def test_openapi_documents_the_safe_read_only_runtime_status_contract(
+    project_tmp_path: Path,
+) -> None:
+    document = _document(project_tmp_path)
+    operation = document["paths"]["/api/v1/runtime-status"]["get"]
+
+    assert "parameters" not in operation
+    assert "requestBody" not in operation
+    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/RuntimeStatusResponse"
+    }
+    assert operation["responses"]["200"]["headers"] == {
+        "Cache-Control": {
+            "description": "Prevents caching of the process-local runtime snapshot.",
+            "schema": {"const": "no-store", "type": "string"},
+        }
+    }
+
+    schemas = document["components"]["schemas"]
+    runtime_status = schemas["RuntimeStatusResponse"]
+    assert runtime_status["additionalProperties"] is False
+    assert runtime_status["required"] == [
+        "status",
+        "runtime_revision",
+        "model_runtime",
+    ]
+    assert runtime_status["properties"].keys() == {
+        "status",
+        "runtime_revision",
+        "model_runtime",
+    }
+    assert runtime_status["properties"]["status"] == {
+        "enum": ["ok", "attention"],
+        "title": "Status",
+        "type": "string",
+    }
+    assert runtime_status["properties"]["runtime_revision"] == {
+        "maxLength": 128,
+        "minLength": 32,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "title": "Runtime Revision",
+        "type": "string",
+    }
+    assert runtime_status["properties"]["model_runtime"] == {
+        "$ref": "#/components/schemas/ModelRuntimeReadiness"
+    }
+    runtime_example = runtime_status["examples"][0]
+    RuntimeStatusResponse.model_validate(runtime_example)
+    enabled_role_needs_attention = any(
+        role["enabled"] and not role["ready"]
+        for role in runtime_example["model_runtime"]["roles"].values()
+    )
+    expected_status = (
+        "attention"
+        if not runtime_example["model_runtime"]["ready"] or enabled_role_needs_attention
+        else "ok"
+    )
+    assert runtime_example["status"] == expected_status
+    for example in schemas["ReadinessResponse"].get("examples", []):
+        ReadinessResponse.model_validate(example)
+
+    role_readiness = schemas["RoleReadiness"]
+    assert role_readiness["additionalProperties"] is False
+    assert role_readiness["required"] == [
+        "role",
+        "provider",
+        "model",
+        "enabled",
+        "ready",
+        "required_capabilities",
+        "available_capabilities",
+    ]
+    assert role_readiness["properties"].keys() == {
+        "role",
+        "provider",
+        "model",
+        "enabled",
+        "ready",
+        "required_capabilities",
+        "available_capabilities",
+        "error",
+    }
+
+    runtime_readiness = schemas["ModelRuntimeReadiness"]
+    roles = runtime_readiness["properties"]["roles"]
+    assert roles["minProperties"] == len(AgentRole)
+    assert roles["maxProperties"] == len(AgentRole)
+    assert roles["propertyNames"] == {"$ref": "#/components/schemas/AgentRole"}
+
+
+def test_openapi_assigns_preview_only_to_complete_recipes(
+    project_tmp_path: Path,
+) -> None:
+    schemas = _document(project_tmp_path)["components"]["schemas"]
+
+    option_schema = schemas["RecipeOptionResponse"]
+    assert "preview" not in option_schema["properties"]
+    assert "warnings" not in option_schema["properties"]
+    assert option_schema["additionalProperties"] is False
+
+    complete_recipe_schema = schemas["CompleteRecipeResponse"]
+    assert "preview" in complete_recipe_schema["properties"]
+    assert "preview" in complete_recipe_schema["required"]
+    assert complete_recipe_schema["properties"]["preview"] == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/DishPreview"},
+            {"type": "null"},
+        ]
+    }
+
+    label_schema = schemas["DishPreview"]["properties"]["label"]
+    assert label_schema["const"] == "AI-generated image"
+
+
+def test_openapi_documents_the_conditional_browser_revision_header(
+    project_tmp_path: Path,
+) -> None:
+    document = _document(project_tmp_path)
+    operation = document["paths"]["/api/v1/sessions"]["post"]
+    revision_parameters = [
+        parameter
+        for parameter in operation.get("parameters", [])
+        if parameter["name"] == "X-Cook-Mantra-Runtime-Revision"
+    ]
+
+    assert len(revision_parameters) == 1
+    parameter = revision_parameters[0]
+    assert parameter["in"] == "header"
+    assert parameter["required"] is False
+    assert "Origin" in parameter["description"]
+    assert "direct API clients" in parameter["description"]
+    assert "not consent" in parameter["description"]
+    assert operation["responses"]["409"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+    error_codes = document["components"]["schemas"]["ErrorCode"]["enum"]
+    assert "runtime_status_stale" in error_codes
 
 
 def test_docs_are_enabled_without_redoc(project_tmp_path: Path) -> None:

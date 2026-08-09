@@ -16,7 +16,6 @@ from domain.recipe_option_service import (
 from domain.recipe_options import (
     Difficulty,
     IngredientRequirement,
-    NutritionEstimate,
     RecipeOption,
     RecipeOptionDraft,
     RecipePreferences,
@@ -36,15 +35,6 @@ def option_draft(name: str) -> RecipeOptionDraft:
         total_minutes=30,
         difficulty=Difficulty.EASY,
         used_ingredients=["Tomato"],
-    )
-
-
-def nutrition_estimate(calories_kcal: int = 240) -> NutritionEstimate:
-    return NutritionEstimate(
-        calories_kcal=calories_kcal,
-        protein_g=8,
-        carbohydrates_g=32,
-        fat_g=9,
     )
 
 
@@ -276,7 +266,6 @@ def test_stale_context_cannot_commit_a_newer_same_mode_attempt() -> None:
         commit_option_batch(
             generating,
             [option_draft("Tomato Curry")],
-            [nutrition_estimate()],
             stale_context,
         )
 
@@ -317,9 +306,7 @@ def test_first_commit_replaces_options_despite_a_stale_nonzero_batch_count() -> 
         more=False,
     )
     drafts = [option_draft("Tomato Curry"), option_draft("Onion Soup")]
-    nutrition = [nutrition_estimate(), nutrition_estimate(180)]
-
-    committed = commit_option_batch(generating, drafts, nutrition, context)
+    committed = commit_option_batch(generating, drafts, context)
 
     assert committed.stage is SessionStage.OPTIONS_READY
     assert committed.option_generation_id is None
@@ -331,7 +318,7 @@ def test_first_commit_replaces_options_despite_a_stale_nonzero_batch_count() -> 
     option_ids = [option.id for option in committed.recipe_options]
     assert len(set(option_ids)) == 2
     assert all(str(UUID(option_id)) == option_id for option_id in option_ids)
-    assert committed.recipe_options[0].nutrition == nutrition[0]
+    assert committed.recipe_options[0].nutrition is None
     assert committed.excluded_recipe_names == {"tomato curry", "onion soup"}
 
 
@@ -352,7 +339,6 @@ def test_more_commit_appends_despite_an_inconsistent_zero_batch_count() -> None:
     committed = commit_option_batch(
         generating,
         [option_draft("Onion Soup")],
-        [nutrition_estimate()],
         context,
     )
 
@@ -388,7 +374,6 @@ def test_commit_rejects_duplicates_before_changing_the_session() -> None:
         commit_option_batch(
             generating,
             [option_draft(" tomato  CURRY ")],
-            [nutrition_estimate()],
             context,
         )
 
@@ -415,7 +400,6 @@ def test_commit_rejects_used_ingredients_not_copied_from_confirmed_names(
         commit_option_batch(
             generating,
             [draft],
-            [nutrition_estimate()],
             context,
         )
 
@@ -439,7 +423,6 @@ def test_commit_accepts_confirmed_names_despite_model_casing() -> None:
     committed = commit_option_batch(
         generating,
         [draft],
-        [nutrition_estimate()],
         context,
     )
 
@@ -473,7 +456,6 @@ def test_commit_rejects_repeated_ingredient_names_before_persisting() -> None:
         commit_option_batch(
             generating,
             [draft],
-            [nutrition_estimate()],
             context,
         )
 
@@ -548,11 +530,10 @@ def test_option_generation_operations_do_not_mutate_input_sessions() -> None:
     committed = commit_option_batch(
         generating,
         [option_draft("Tomato Curry")],
-        [nutrition_estimate()],
         context,
     )
 
-    committed.recipe_options[0].warnings.append("Changed after commit.")
+    committed.recipe_options[0].used_ingredients.append("Changed after commit.")
 
     assert session.stage is SessionStage.INGREDIENTS_CONFIRMED
     assert session.recipe_options == []

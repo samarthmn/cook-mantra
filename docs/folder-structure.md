@@ -1,6 +1,6 @@
 # Folder Structure
 
-Cook Mantra uses a monorepo with two deployable applications: a Next.js web app and a backend API. Keeping both applications in one repository makes local development and API changes easier while preserving a clear deployment boundary.
+Cook Mantra uses a monorepo with two locally run applications: a Next.js web app and a FastAPI backend. Keeping both in one repository makes source installation and coordinated API changes straightforward.
 
 ```text
 cook-mantra/
@@ -9,11 +9,12 @@ cook-mantra/
 │   │   ├── src/
 │   │   │   ├── app/               # Routes and layouts
 │   │   │   ├── components/        # Reusable UI components
-│   │   │   ├── features/          # Ingredient and recipe features
+│   │   │   ├── features/          # Cook-session and design-guide features
 │   │   │   ├── lib/api/           # Backend API client
 │   │   │   └── types/             # Frontend-only types
 │   │   ├── public/                 # Static assets
 │   │   └── tests/
+│   │       └── setup.ts            # Shared Vitest setup
 │   │
 │   └── api/                        # Backend service
 │       ├── src/
@@ -21,19 +22,23 @@ cook-mantra/
 │       │   ├── orchestration/      # Multi-agent workflows
 │       │   ├── agents/             # Individual AI agents
 │       │   ├── domain/             # Ingredients and recipe rules
-│       │   ├── services/           # AI, storage, and database adapters
+│       │   ├── services/           # Providers, tracing, jobs, and artifacts
 │       │   ├── schemas/            # Request and response validation
-│       │   ├── repositories/       # Database access
+│       │   ├── repositories/       # In-memory session and job stores
 │       │   └── core/               # Configuration, logging, and errors
 │       └── tests/
 │           ├── unit/
-│           └── integration/
+│           ├── integration/
+│           ├── e2e/
+│           └── live/               # Explicitly opt-in provider smoke checks
 │
-├── packages/
-│   └── api-client/                 # Generated API client and shared types
+├── config/                          # Provider/model/agent-role YAML
 ├── docs/                           # Product and architecture documents
-├── scripts/                        # Development and deployment scripts
+├── design_handoff_cook_mantra_ui/  # Superseded prototype reference
+├── tmp/                            # Ignored task/runtime scratch data
 ├── example.env                     # Safe environment-variable reference
+├── LICENSE                         # MIT license
+├── package.json                    # Root development and verification commands
 └── README.md
 ```
 
@@ -41,8 +46,10 @@ cook-mantra/
 
 - `api/routes/` accepts HTTP requests and delegates work.
 - `orchestration/` coordinates complete workflows across agents.
-- `agents/` contains the Ingredient Extraction, Master Chef, Nutrition, Image, and Specialized Recipe agents.
+- `agents/` contains the Ingredient Extraction, Master Chef, and Recipe Writer agents.
+- `config/cook-mantra.yaml` selects providers and models for every runtime role; secrets remain in environment variables.
 - `domain/` enforces business rules, including ingredient source and confirmation requirements.
-- `services/` and `repositories/` isolate external AI providers, storage, and database code.
+- `services/` isolates external model providers, tracing, job execution, and temporary artifact storage.
+- `repositories/` owns the in-memory session and job stores; there is no database in the local product.
 
-Start with `apps/web`, `apps/api`, and `docs`. Add `packages/api-client` when the backend contract exists; avoid creating other shared packages until repeated code justifies them.
+Start with `apps/web/src/features`, `apps/api/src`, `config`, and `docs`. Web behavior tests stay beside their source, while `apps/web/tests/setup.ts` owns shared Vitest setup. Backend tests live under `apps/api/tests/unit`, `apps/api/tests/integration`, `apps/api/tests/e2e`, and the explicitly opt-in `apps/api/tests/live` suite. Add a shared package only when repeated production code justifies one.

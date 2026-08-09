@@ -7,6 +7,7 @@ import type {
   QueuedJobResponse,
   RecipePreferences,
   RecipeSelectionRequest,
+  RuntimeStatusResponse,
   SessionResponse,
   TerminalJobResponse,
 } from "@/types/api";
@@ -26,7 +27,17 @@ const API_ERROR_CODES = new Set<ApiErrorCode>([
   "invalid_session_transition",
   "ingredients_not_confirmed",
   "recipe_duplicate",
+  "runtime_status_stale",
+  "model_configuration_invalid",
+  "provider_unavailable",
+  "provider_authentication_failed",
+  "provider_rate_limited",
+  "provider_payment_required",
+  "model_capability_missing",
+  "provider_protocol_error",
   "ollama_unavailable",
+  "image_provider_unavailable",
+  "nutrition_provider_unavailable",
   "model_not_found",
   "model_output_invalid",
   "operation_timed_out",
@@ -43,6 +54,10 @@ export interface CookMantraClientOptions {
 
 export interface ApiRequestOptions {
   signal?: AbortSignal;
+}
+
+export interface CreateSessionOptions extends ApiRequestOptions {
+  runtimeRevision: string;
 }
 
 export interface PollJobOptions extends ApiRequestOptions {
@@ -125,14 +140,28 @@ export class CookMantraClient {
 
   async createSession(
     image: Blob,
-    options: ApiRequestOptions = {},
+    options: CreateSessionOptions,
   ): Promise<QueuedJobResponse> {
     const body = new FormData();
     body.append("image", image);
     return this.request<QueuedJobResponse>(["sessions"], {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json",
+        "X-Cook-Mantra-Runtime-Revision": options.runtimeRevision,
+      },
       body,
+      signal: options.signal,
+    });
+  }
+
+  async getRuntimeStatus(
+    options: ApiRequestOptions = {},
+  ): Promise<RuntimeStatusResponse> {
+    return this.request<RuntimeStatusResponse>(["runtime-status"], {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
       signal: options.signal,
     });
   }

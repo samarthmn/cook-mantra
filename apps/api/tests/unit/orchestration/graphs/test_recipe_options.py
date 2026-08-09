@@ -2,18 +2,15 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 from langgraph_api.asyncio import as_asynccontextmanager
 from tests.tracing_support import enabled_tracing
 
 from agents.master_chef import OllamaMasterChef
-from agents.nutrition import OllamaNutritionAgent
 from core.config import Agent
 from core.errors import AppError, ErrorCode
 from core.logging import log_context
-from domain.images import DishPreview
 from domain.ingredients import Ingredient, IngredientSource
 from domain.recipe_option_service import (
     OptionGenerationContext,
@@ -21,7 +18,6 @@ from domain.recipe_option_service import (
 )
 from domain.recipe_options import (
     Difficulty,
-    NutritionEstimate,
     RecipeOption,
     RecipeOptionDraft,
     RecipePreferences,
@@ -44,15 +40,6 @@ def draft(name: str) -> RecipeOptionDraft:
         total_minutes=30,
         difficulty=Difficulty.EASY,
         used_ingredients=["Tomato"],
-    )
-
-
-def estimate(calories_kcal: int = 240) -> NutritionEstimate:
-    return NutritionEstimate(
-        calories_kcal=calories_kcal,
-        protein_g=8,
-        carbohydrates_g=32,
-        fat_g=9,
     )
 
 
@@ -83,58 +70,6 @@ class FakeMasterChef:
         return [option.model_copy(deep=True) for option in response]
 
 
-class FakeNutritionAgent:
-    def __init__(
-        self,
-        results: dict[str, NutritionEstimate | BaseException] | None = None,
-    ) -> None:
-        self.results = results or {}
-        self.completed_names: list[str] = []
-
-    async def estimate(
-        self,
-        option: RecipeOptionDraft,
-        preferences: RecipePreferences,
-    ) -> NutritionEstimate:
-        assert preferences.option_count >= 1
-        result = self.results.get(option.name, estimate())
-        self.completed_names.append(option.name)
-        if isinstance(result, BaseException):
-            raise result
-        return result.model_copy(deep=True)
-
-
-class FakeDishPreviewService:
-    def __init__(
-        self,
-        results: dict[str, DishPreview | BaseException] | None = None,
-    ) -> None:
-        self.results = results or {}
-        self.completed_names: list[str] = []
-        self.deleted_artifact_ids: list[str] = []
-
-    async def generate(
-        self,
-        session_id: str,
-        option: RecipeOptionDraft,
-        progress: Callable[[int], Awaitable[None]],
-    ) -> DishPreview:
-        assert session_id
-        result = self.results.get(
-            option.name,
-            DishPreview(
-                artifact_id=f"preview-{option.name.casefold().replace(' ', '-')}"
-            ),
-        )
-        self.completed_names.append(option.name)
-        if isinstance(result, BaseException):
-            raise result
-        return result.model_copy(deep=True)
-
-    async def delete(self, artifact_id: str) -> None:
-        self.deleted_artifact_ids.append(artifact_id)
-
-
 class TraceCapturingMasterChef(FakeMasterChef):
     def __init__(self) -> None:
         super().__init__([[draft("Tomato Curry")]])
@@ -154,24 +89,6 @@ class TraceCapturingMasterChef(FakeMasterChef):
         return await super().generate(ingredients, preferences, excluded_names)
 
 
-class TraceCapturingNutrition(FakeNutritionAgent):
-    def __init__(self) -> None:
-        super().__init__()
-        self.tracing, _ = enabled_tracing()
-        self.configs: list[dict[str, object]] = []
-
-    async def estimate(
-        self,
-        option: RecipeOptionDraft,
-        preferences: RecipePreferences,
-    ) -> NutritionEstimate:
-        async def capture(config: dict[str, object]) -> None:
-            self.configs.append(config)
-
-        await self.tracing.invoke_text(Agent.NUTRITION, capture)
-        return await super().estimate(option, preferences)
-
-
 class CountingLimiter(ModelCallLimiter):
     def __init__(self, max_concurrent_calls: int) -> None:
         super().__init__(max_concurrent_calls)
@@ -180,29 +97,6 @@ class CountingLimiter(ModelCallLimiter):
     async def run[T](self, operation: Callable[[], Awaitable[T]]) -> T:
         self.call_count += 1
         return await super().run(operation)
-
-
-class ConcurrentNutritionAgent:
-    def __init__(self) -> None:
-        self.active = 0
-        self.maximum_active = 0
-        self.two_started = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def estimate(
-        self,
-        option: RecipeOptionDraft,
-        preferences: RecipePreferences,
-    ) -> NutritionEstimate:
-        self.active += 1
-        self.maximum_active = max(self.maximum_active, self.active)
-        if self.active == 2:
-            self.two_started.set()
-        try:
-            await self.release.wait()
-        finally:
-            self.active -= 1
-        return estimate(200 if option.name == "Tomato Curry" else 180)
 
 
 class BlockingMasterChef:
@@ -342,31 +236,21 @@ async def make_generation(
 def graph_for(
     fixture: GenerationFixture,
     chef: FakeMasterChef | BlockingMasterChef,
-    nutrition: FakeNutritionAgent | ConcurrentNutritionAgent,
     *,
-    previews: FakeDishPreviewService | None = None,
     limiter: ModelCallLimiter | None = None,
     progress: Callable[[int], Awaitable[None]] | None = None,
-    dish_previews_enabled: bool = True,
 ):
-    resolved_previews = previews or FakeDishPreviewService()
     dependencies = RecipeOptionDependencies(
         master_chef=chef,
-        nutrition_agent=nutrition,
-        dish_previews=resolved_previews,
         session_store=fixture.store,
         model_call_limiter=limiter or ModelCallLimiter(max_concurrent_calls=2),
-        dish_previews_enabled=dish_previews_enabled,
     )
     if progress is not None:
         dependencies = RecipeOptionDependencies(
             master_chef=chef,
-            nutrition_agent=nutrition,
-            dish_previews=resolved_previews,
             session_store=fixture.store,
             model_call_limiter=dependencies.model_call_limiter,
             progress=progress,
-            dish_previews_enabled=dish_previews_enabled,
         )
     return build_recipe_options_graph(dependencies)
 
@@ -381,18 +265,9 @@ def invocation(fixture: GenerationFixture) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_workflow_enriches_every_option_and_commits_completion_atomically() -> (
-    None
-):
+async def test_workflow_commits_text_options_atomically() -> None:
     fixture = await make_generation(option_count=2)
     chef = FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Rice")]])
-    nutrition = FakeNutritionAgent(
-        {
-            "Tomato Curry": estimate(240),
-            "Tomato Rice": RuntimeError("nutrition unavailable"),
-        }
-    )
-    previews = FakeDishPreviewService()
     limiter = CountingLimiter(max_concurrent_calls=2)
     progress_updates: list[int] = []
     observed_before_commit: Session | None = None
@@ -406,11 +281,10 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
     graph = graph_for(
         fixture,
         chef,
-        nutrition,
-        previews=previews,
         limiter=limiter,
         progress=record_progress,
     )
+    assert "enrich_previews" not in graph.get_graph().nodes
 
     result = await graph.ainvoke(invocation(fixture))
 
@@ -422,17 +296,14 @@ async def test_workflow_enriches_every_option_and_commits_completion_atomically(
         "Tomato Curry",
         "Tomato Rice",
     ]
-    assert saved.recipe_options[0].nutrition == estimate(240)
+    assert saved.recipe_options[0].nutrition is None
     assert saved.recipe_options[1].nutrition is None
-    assert saved.recipe_options[0].preview is not None
-    assert saved.recipe_options[1].preview is not None
-    assert saved.recipe_options[1].warnings == ["Nutrition estimate unavailable."]
+    assert "preview" not in RecipeOption.model_fields
+    assert "warnings" not in RecipeOption.model_fields
     assert saved.excluded_recipe_names == {"tomato curry", "tomato rice"}
-    assert nutrition.completed_names == ["Tomato Curry", "Tomato Rice"]
-    assert previews.completed_names == ["Tomato Curry", "Tomato Rice"]
-    assert limiter.call_count == 3
+    assert limiter.call_count == 1
     assert progress_updates == sorted(progress_updates)
-    assert progress_updates == [10, 15, 45, 80]
+    assert progress_updates == [10, 15, 80]
     assert observed_before_commit is not None
     assert observed_before_commit.stage is SessionStage.GENERATING_OPTIONS
 
@@ -465,7 +336,6 @@ async def test_duplicate_retries_report_progress_and_log_each_retry(
     graph = graph_for(
         fixture,
         chef,
-        FakeNutritionAgent(),
         limiter=limiter,
         progress=record_progress,
     )
@@ -507,32 +377,6 @@ async def test_duplicate_retries_report_progress_and_log_each_retry(
 
 
 @pytest.mark.asyncio
-async def test_nutrition_enrichment_fans_out_within_the_shared_limiter() -> None:
-    fixture = await make_generation(option_count=2)
-    nutrition = ConcurrentNutritionAgent()
-    graph = graph_for(
-        fixture,
-        FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Rice")]]),
-        nutrition,
-        limiter=ModelCallLimiter(max_concurrent_calls=2),
-    )
-    graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
-
-    try:
-        await asyncio.wait_for(nutrition.two_started.wait(), timeout=1)
-        assert nutrition.maximum_active == 2
-        nutrition.release.set()
-        await graph_task
-    finally:
-        nutrition.release.set()
-        if not graph_task.done():
-            graph_task.cancel()
-        await asyncio.gather(graph_task, return_exceptions=True)
-
-    assert nutrition.maximum_active == 2
-
-
-@pytest.mark.asyncio
 async def test_more_appends_using_context_even_when_batch_number_is_zero() -> None:
     previous_option = stored_option("Tomato Curry")
     fixture = await make_generation(
@@ -545,7 +389,6 @@ async def test_more_appends_using_context_even_when_batch_number_is_zero() -> No
     graph = graph_for(
         fixture,
         FakeMasterChef([[draft("Tomato Rice")]]),
-        FakeNutritionAgent(),
     )
 
     result = await graph.ainvoke(invocation(fixture))
@@ -583,7 +426,6 @@ async def test_fatal_failure_restores_the_complete_context_snapshot() -> None:
     graph = graph_for(
         fixture,
         FakeMasterChef([RuntimeError("chef unavailable")]),
-        FakeNutritionAgent(),
     )
 
     with pytest.raises(RuntimeError, match="chef unavailable"):
@@ -604,7 +446,7 @@ async def test_fatal_failure_restores_the_complete_context_snapshot() -> None:
 async def test_stale_attempt_cannot_commit_or_restore_over_a_newer_attempt() -> None:
     fixture = await make_generation(option_count=1)
     chef = BlockingMasterChef()
-    graph = graph_for(fixture, chef, FakeNutritionAgent())
+    graph = graph_for(fixture, chef)
     stale_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
 
     try:
@@ -645,7 +487,7 @@ async def test_cancellation_waits_for_safe_rollback_before_propagating() -> None
         previous_batch_number=4,
     )
     chef = BlockingMasterChef()
-    graph = graph_for(fixture, chef, FakeNutritionAgent())
+    graph = graph_for(fixture, chef)
     store.pause_rollbacks = True
     graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
 
@@ -682,7 +524,6 @@ async def test_cancellation_wins_when_pending_commit_later_fails() -> None:
     graph = graph_for(
         fixture,
         FakeMasterChef([[draft("Tomato Curry")]]),
-        FakeNutritionAgent(),
     )
     store.fail_ready_commits = True
     graph_task = asyncio.create_task(graph.ainvoke(invocation(fixture)))
@@ -718,8 +559,6 @@ async def test_bound_runner_uses_the_persisted_attempt_and_reports_progress() ->
 
     dependencies = RecipeOptionDependencies(
         master_chef=FakeMasterChef([[draft("Tomato Curry")]]),
-        nutrition_agent=FakeNutritionAgent(),
-        dish_previews=FakeDishPreviewService(),
         session_store=fixture.store,
         model_call_limiter=ModelCallLimiter(max_concurrent_calls=2),
     )
@@ -734,14 +573,13 @@ async def test_bound_runner_uses_the_persisted_attempt_and_reports_progress() ->
     )
 
     assert result["stage"] is SessionStage.OPTIONS_READY
-    assert progress_updates == [10, 15, 45, 80]
+    assert progress_updates == [10, 15, 80]
 
 
 @pytest.mark.asyncio
 async def test_graph_attaches_the_target_batch_to_each_text_model_call() -> None:
     fixture = await make_generation(option_count=1)
     master_chef = TraceCapturingMasterChef()
-    nutrition = TraceCapturingNutrition()
     limiter = CountingLimiter(max_concurrent_calls=2)
     progress_updates: list[int] = []
 
@@ -751,8 +589,6 @@ async def test_graph_attaches_the_target_batch_to_each_text_model_call() -> None
     graph = build_recipe_options_graph(
         RecipeOptionDependencies(
             master_chef=master_chef,
-            nutrition_agent=nutrition,
-            dish_previews=FakeDishPreviewService(),
             session_store=fixture.store,
             model_call_limiter=limiter,
             progress=record_progress,
@@ -770,23 +606,13 @@ async def test_graph_attaches_the_target_batch_to_each_text_model_call() -> None
         )
 
     assert master_chef.configs[0]["metadata"]["batch_number"] == 1
-    assert nutrition.configs[0]["metadata"]["batch_number"] == 1
     assert result["stage"] is SessionStage.OPTIONS_READY
-    assert progress_updates == [10, 15, 45, 80]
-    assert limiter.call_count == 2
+    assert progress_updates == [10, 15, 80]
+    assert limiter.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_development_factory_is_stable_and_uses_one_settings_object(
-    monkeypatch: pytest.MonkeyPatch,
-    project_tmp_path: Path,
-) -> None:
-    # The development runtime takes an exclusive lock on its artifact root, so
-    # point it at a private one. Sharing the default root would make this test
-    # fail whenever a local API process is running.
-    monkeypatch.setenv("ARTIFACT_ROOT", str(project_tmp_path / "development"))
-    monkeypatch.setenv("BEAST_BASE_URL", "http://beast.test:4900")
-    monkeypatch.setenv("BEAST_API_KEY", "test-key")
+async def test_development_factory_is_stable_and_uses_one_settings_object() -> None:
     option_graph.get_development_recipe_options_runtime.cache_clear()
 
     runtime = option_graph.get_development_recipe_options_runtime()
@@ -798,16 +624,10 @@ async def test_development_factory_is_stable_and_uses_one_settings_object(
         ) as configured_graph:
             assert configured_graph is runtime.graph
         assert isinstance(runtime.dependencies.master_chef, OllamaMasterChef)
-        assert isinstance(runtime.dependencies.nutrition_agent, OllamaNutritionAgent)
         assert runtime.dependencies.master_chef._settings is runtime.settings
-        assert runtime.dependencies.nutrition_agent._settings is runtime.settings
-        assert (
-            runtime.dependencies.master_chef._tracing
-            is runtime.dependencies.nutrition_agent._tracing
-        )
         assert runtime.dependencies.master_chef._tracing.enabled is False
+        assert not hasattr(runtime.dependencies, "dish_previews")
+        assert not hasattr(runtime.dependencies, "dish_previews_enabled")
         assert runtime.graph.get_graph().nodes
     finally:
-        if not runtime.image_generator._client.is_closed:
-            await runtime.shutdown()
         option_graph.get_development_recipe_options_runtime.cache_clear()

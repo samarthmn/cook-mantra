@@ -17,10 +17,11 @@ The interface must preserve these rules on every screen:
 2. Every ingredient shows its source: detected, pantry, or added by you.
 3. Missing and optional ingredients remain visible.
 4. Generated dish photography always carries the visible label **AI image**.
-5. Nutrition always says **estimate** and never presents medical advice.
-6. Parallel recipe work stays visible as one agent row per selected dish.
-7. Local previews and simulated states are labelled before they can be mistaken
+5. Parallel recipe work stays visible as one agent row per selected dish.
+6. Local previews and simulated states are labelled before they can be mistaken
    for live API output.
+7. A remote ingredient-photo destination is named exactly before the user can
+   send the photo.
 
 These rules apply to new components as well as the four-step recipe flow.
 
@@ -152,6 +153,8 @@ Build mobile-first layouts with intrinsic grids and flex wrapping:
 - `.preferences-grid` uses auto-fit columns with a 220px preferred minimum.
 - `.option-grid` uses auto-fill cards with a 280px preferred minimum.
 - `.recipe-layout` wraps a 420px ingredient rail beside the flexible method.
+- `.recipe-preview-figure` stays in its own block above the recipe detail so it
+  cannot crowd recipe actions.
 - `.recipe-notes-grid` uses auto-fit 240px notes.
 - `.progress-stepper` keeps all four steps visible without scrolling at 360px;
   `.recipe-tabs` scroll horizontally when needed.
@@ -171,7 +174,8 @@ action or create horizontal page scroll.
 - `.text-subtle`: stronger secondary text.
 - `.kicker`: red screen-step label.
 - `.visually-hidden`: accessible-only content.
-- `.option-card-image`: vibrant generated food photography with natural color.
+- `.recipe-preview-image`: a natural-color, correctly cropped completed-dish
+  preview fetched directly from its private no-store artifact route.
 
 ### Buttons
 
@@ -247,6 +251,35 @@ The Confirm and Choose screens use `.sticky-action-bar` with:
 Keep one primary action in this bar. Its disabled state and hint must explain
 what the user needs to do next.
 
+### Local model status
+
+Place `.runtime-status-panel` on the photo screen before the upload area. Compose
+it with `.runtime-status-header`, `.runtime-ledger`, `.runtime-ledger-row`,
+`.runtime-ledger-caption`, `.runtime-status-guidance`, and
+`.runtime-status-warning`. It is a concise setup ledger, not a monitoring
+dashboard.
+
+Read the no-store `/runtime-status` snapshot on screen entry, explicit refresh,
+and before each photo attempt. Always show these four rows in this order:
+
+1. Ingredient recognition
+2. Recipe ideas
+3. Recipe writing
+4. Dish preview
+
+Each row names the selected provider and model and ends with exactly one status:
+**Ready**, **Needs attention**, or **Disabled**. Put provider and model strings in
+separate `<bdi>` elements and allow long or hostile identifiers to wrap without
+creating horizontal page scroll. Never expose endpoints, commands, credentials,
+provider tags, or raw provider diagnostics.
+
+If Ingredient recognition, Recipe ideas, or Recipe writing needs attention,
+block the related model work and keep typed ingredient entry available. A Dish
+preview row that needs attention is non-blocking; state plainly that recipes can
+still be created. The refresh action re-reads status, while the guidance explains
+that model setting changes take effect only after the local API restarts. If
+status cannot be read, do not send a photo and offer manual entry.
+
 ### Upload area
 
 Use `.upload-zone` for the dashed 720px photo area. Compose it with
@@ -256,6 +289,36 @@ Use `.upload-zone` for the dashed 720px photo area. Compose it with
 Camera and gallery inputs need visible labels, file-type validation, and clear
 permission or read errors. Do not claim an image stays on-device if the current
 deployment sends it to a remote service.
+
+### Remote ingredient-photo disclosure
+
+When the selected ingredient-recognition provider is OpenRouter or Codex and no
+matching acknowledgement exists, hold the photo unsent and open
+`.dialog-backdrop` with `.dialog.privacy-dialog`. Ollama ingredient-recognition
+endpoints are loopback-only and do not use this remote-media dialog.
+
+The dialog title is exactly **This photo will leave your device**. Explain only
+that Cook Mantra will send this photo to the named destination to identify
+ingredients for the current cooking session; do not invent a provider-retention
+promise. Show Provider and Model in `.privacy-dialog-destination`, and wrap each
+untrusted value in a `<bdi>` carrying `.privacy-dialog-provider`. Long values
+must wrap inside the dialog.
+
+Use `.dialog-actions` for these three concrete choices:
+
+- **Keep photo on this device** — the safe default and initial focus.
+- **Continue and send photo** — persist the acknowledgement before upload.
+- **Type ingredients instead** — discard the pending photo path and continue
+  without media.
+
+Trap Tab and Shift+Tab within all three actions. Escape and a press on the
+backdrop perform the safe decline action, then return focus to the invoking
+control. Store acknowledgement only for the exact provider, model, and
+disclosure version; ask again when any of them changes. If browser storage
+cannot persist and verify that choice, keep the dialog open with an alert and do
+not upload. The runtime revision accompanying the eventual browser upload is
+concurrency metadata, not consent; on `runtime_status_stale`, refetch status and
+re-evaluate this disclosure instead of replaying the photo automatically.
 
 ### Agent checklist
 
@@ -268,8 +331,13 @@ Use `.job-shell`, `.job-list`, and `.job-row`. Set `data-status` to `pending`,
 
 Use `.job-label`, `.job-detail`, and the neutral `agent` tag for each row. Put
 the checklist in a polite live region and expose a textual status; motion alone
-must never communicate progress. Start all Specialized Recipe Agent rows in
-parallel, then run the collection row.
+must never communicate progress. Start all Recipe Writer Agent rows in
+parallel, then run the collection row. When the cached image role is enabled
+and ready, add one dish-preview row per recipe and state that it starts after
+that recipe is written. Because progress does not expose an individual writer
+milestone, keep preview rows pending until the combined workers have settled;
+never imply that preview work started early. Option-generation jobs never
+mention image or preview work.
 
 Only show Cancel when the underlying operation can actually be cancelled. If a
 server job has no cancellation endpoint, replace interruption controls with a
@@ -354,21 +422,19 @@ field—or the add field when no previous row remains.
 Use a native button with `.option-card` whenever possible. Set `aria-pressed`
 for multi-selection. Compose each card with:
 
-- `.option-card-media` and a vibrant `.option-card-image`
-- `.option-card-ai-label`
+- `.option-card-masthead` and an aria-hidden `.option-card-masthead-icon`
+- `.option-card-index` for the padded option and batch notation
 - `.option-card-selected-mark`
 - `.option-card-content`
 - `.option-card-heading`, `.option-card-cuisine`, and `.option-card-title`
 - `.option-card-summary` and `.option-card-meta`
-- `.nutrition-strip`, `.nutrition-value`, and `.nutrition-label`
 - `.option-card-tags`
-- `.option-card-missing`, `.option-card-optional`, and
-  `.option-card-allergens`
-- `.option-card-warnings` for backend or model caveats
+- `.option-card-missing` and `.option-card-optional`
 
 The selected state uses a 2px accent outline, red check, and `--shadow-md`.
-Missing, optional, and allergen rows stay visible even when they make an option
-less appealing.
+Missing and optional rows stay visible even when they make an option less
+appealing. Option cards are text-first folios: never add a photo surface,
+generated-image label, placeholder, skeleton, or `next/image` dependency.
 
 ### Complete recipe
 
@@ -379,14 +445,25 @@ arrow navigation. Associate the visible recipe with a tabpanel.
 Use `.recipe-title-row`, `.recipe-meta`, and `.recipe-assumptions` above
 `.recipe-layout`. The ingredient rail uses `.recipe-ingredient-list`,
 `.recipe-ingredient-row`, `.recipe-ingredient-quantity`, and
-`.recipe-ingredient-name`. Keep the estimate and disclaimer together in
-`.recipe-nutrition`.
+`.recipe-ingredient-name`.
+
+When the active complete recipe owns a preview artifact, render a bordered
+`.recipe-preview-figure` with a native `.recipe-preview-image`, exact alt text
+`<dish>, AI-generated image`, and the visible caption **AI image**. Fetch the
+opaque process-private URL directly so its `Cache-Control: no-store` response is
+not copied through the Next.js image optimizer. Use natural color and
+`object-fit: cover`; do not add tint, blur, gradient, rounded corners, or shadow.
+An image load failure hides only that artifact's figure. Tabs, warnings, save,
+download, ingredients, and method remain usable, and another tab's preview is
+independent. Saving may capture a bounded durable data-URL thumbnail, but the
+process-private artifact ID and label must never enter saved-recipe storage; a
+capture failure still saves the text with no photo.
 
 When `.recipe-layout` stacks at 40rem or below, replace the static Ingredients
 label with a native disclosure button showing the ingredient count. Set
-`aria-expanded` and `aria-controls`, default the list to collapsed, and keep the
-nutrition estimate and notices visible outside the controlled list. Above that
-threshold, hide the disclosure control and always present the ingredient rail.
+`aria-expanded` and `aria-controls`, and default the list to collapsed. Above
+that threshold, hide the disclosure control and always present the ingredient
+rail.
 
 Method rows use `.method-list`, `.method-step`, `.method-step-number`, and
 `.method-step-text`. Set `aria-pressed` on every step. Completed steps receive a
@@ -435,7 +512,7 @@ Before adding a shared component or screen, check each item:
 - [ ] Use a 2px rule for sections and a 1px rule for rows.
 - [ ] Keep corners square and avoid decorative shadows.
 - [ ] Give the screen one clear primary action.
-- [ ] Show ingredient source, missing inputs, AI imagery, and nutrition estimates
+- [ ] Show ingredient source, missing inputs, and AI imagery
       wherever relevant.
 - [ ] Define default, hover, active, focus, disabled, loading, empty, error, and
       success states.
@@ -470,5 +547,4 @@ pixel measurements.
 - Hide a missing ingredient or silently assume a pantry staple.
 - Present a generated image as an actual photograph of the user's finished
   dish.
-- Present nutrition as exact or medical guidance.
 - Use emoji or improvised symbols in place of Lucide icons.

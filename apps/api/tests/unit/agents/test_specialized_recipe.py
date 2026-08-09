@@ -9,9 +9,9 @@ from tests.tracing_support import enabled_tracing
 
 from agents import specialized_recipe as specialized_recipe_module
 from agents.specialized_recipe import OllamaSpecializedRecipeAgent, RecipeModelOutput
-from core.config import AGENT_MODELS, PROJECT_ROOT, Agent, Settings
 from core.errors import AppError, ErrorCode
 from core.logging import log_context
+from domain.model_runtime import AgentRole
 from domain.recipe_options import (
     IngredientRequirement,
     RecipeOption,
@@ -23,6 +23,7 @@ from domain.recipes import (
     CompleteRecipe,
     IngredientAvailability,
 )
+from services.providers.ollama import adapt_structured_model
 
 
 def recipe_option() -> RecipeOption:
@@ -55,11 +56,6 @@ def recipe_option() -> RecipeOption:
             "diet_tags": ["vegetarian"],
             "allergen_warnings": ["Check packaged spice blends"],
         },
-        preview={
-            "artifact_id": 'preview-"tomato"',
-            "label": "ignored model label",
-        },
-        warnings=['Option warning, with "quotes"'],
     )
 
 
@@ -179,6 +175,7 @@ class StructuredModelFactory:
         self.output = output
         self.schema: type[BaseModel] | None = None
         self.model: ValidatingStructuredModel | None = None
+        self.roles: list[AgentRole] = []
 
     def with_structured_output(
         self,
@@ -187,6 +184,14 @@ class StructuredModelFactory:
         self.schema = schema
         self.model = ValidatingStructuredModel([self.output])
         return self.model
+
+    def build(
+        self,
+        role: AgentRole,
+        schema: type[BaseModel],
+    ) -> ValidatingStructuredModel:
+        self.roles.append(role)
+        return self.with_structured_output(schema)
 
 
 def prompt_json(prompt: str, label: str) -> object:
@@ -245,43 +250,11 @@ def test_recipe_model_output_accepts_two_steps_for_45_minutes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_defers_model_construction_and_forwards_exact_settings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = Settings(
-        _env_file=None,
-        artifact_root=PROJECT_ROOT / "tmp" / "specialized-recipe-settings-test",
-        ollama_base_url="http://configured-ollama.test:11434",
-        llm_timeout_seconds=17,
-    )
+async def test_agent_defers_model_construction_and_selects_exact_role_schema() -> None:
     factory = StructuredModelFactory(recipe_model_output())
-    calls: list[
-        tuple[
-            Agent,
-            float,
-            bool | str | None,
-            int | None,
-            int | None,
-            Settings | None,
-        ]
-    ] = []
+    recipe_agent = OllamaSpecializedRecipeAgent(model_factory=factory)
 
-    def capture_model(
-        agent: Agent,
-        *,
-        temperature: float,
-        thinking: bool | str | None = None,
-        num_predict: int | None = None,
-        num_ctx: int | None = None,
-        settings: Settings | None,
-    ) -> StructuredModelFactory:
-        calls.append((agent, temperature, thinking, num_predict, num_ctx, settings))
-        return factory
-
-    monkeypatch.setattr(specialized_recipe_module, "get_model", capture_model)
-    recipe_agent = OllamaSpecializedRecipeAgent(settings=settings)
-
-    assert calls == []
+    assert factory.roles == []
 
     result = await recipe_agent.generate(
         recipe_option(),
@@ -290,9 +263,7 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
     )
 
     assert result.name == recipe_option().name
-    # GPT-OSS needs a bounded reasoning level: True/unbounded fills the context
-    # window mid-JSON, False returns an empty content channel.
-    assert calls == [(Agent.SPECIALIZED_RECIPE, 0.0, "low", 12_288, 16_384, settings)]
+    assert factory.roles == [AgentRole.RECIPE_WRITER]
     assert factory.schema is not None
     assert {
         "option_id",
@@ -301,6 +272,7 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
         "servings",
         "nutrition_notice",
         "allergen_notice",
+        "preview",
     }.isdisjoint(factory.schema.model_fields)
     assert {
         "total_minutes",
@@ -310,9 +282,7 @@ async def test_agent_defers_model_construction_and_forwards_exact_settings(
 
 
 @pytest.mark.asyncio
-async def test_model_output_invalid_builds_temperature_point_three_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_model_output_invalid_retry_keeps_yaml_adapter_tuning() -> None:
     invalid = recipe_model_output(
         steps=[
             {
@@ -322,43 +292,37 @@ async def test_model_output_invalid_builds_temperature_point_three_retry(
             }
         ]
     )
-    factories = {
-        0.0: StructuredModelFactory(invalid),
-        0.3: StructuredModelFactory(recipe_model_output()),
-    }
-    calls: list[tuple[float, str, int, int]] = []
+    factories = [
+        StructuredModelFactory(invalid),
+        StructuredModelFactory(recipe_model_output()),
+    ]
 
-    def capture_model(
-        agent: Agent,
-        *,
-        temperature: float,
-        thinking: str,
-        num_predict: int,
-        num_ctx: int,
-        settings: Settings | None,
-    ) -> StructuredModelFactory:
-        assert agent is Agent.SPECIALIZED_RECIPE
-        assert settings is None
-        calls.append((temperature, thinking, num_predict, num_ctx))
-        return factories[temperature]
+    class SequentialFactory:
+        def __init__(self) -> None:
+            self.calls: list[AgentRole] = []
 
-    monkeypatch.setattr(specialized_recipe_module, "get_model", capture_model)
+        def build(
+            self,
+            role: AgentRole,
+            schema: type[BaseModel],
+        ) -> ValidatingStructuredModel:
+            self.calls.append(role)
+            return factories[len(self.calls) - 1].with_structured_output(schema)
 
-    result = await OllamaSpecializedRecipeAgent().generate(
+    factory = SequentialFactory()
+
+    result = await OllamaSpecializedRecipeAgent(model_factory=factory).generate(
         recipe_option(),
         ["Tomato, ripe"],
         preferences(),
     )
 
     assert result.option_id == recipe_option().id
-    assert calls == [
-        (0.0, "low", 12_288, 16_384),
-        (0.3, "low", 12_288, 16_384),
-    ]
-    assert factories[0.0].model is not None
-    assert factories[0.0].model.attempts == 1
-    assert factories[0.3].model is not None
-    assert factories[0.3].model.attempts == 1
+    assert factory.calls == [AgentRole.RECIPE_WRITER, AgentRole.RECIPE_WRITER]
+    assert factories[0].model is not None
+    assert factories[0].model.attempts == 1
+    assert factories[1].model is not None
+    assert factories[1].model.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -380,9 +344,10 @@ async def test_agent_builds_server_owned_recipe_fields_around_model_output() -> 
     assert result.cuisine == option.cuisine
     assert result.servings == preferences().servings
     assert result.nutrition == option.nutrition
-    assert result.nutrition is not option.nutrition
+    assert result.nutrition is None
     assert result.nutrition_notice == NUTRITION_NOTICE
     assert result.allergen_notice == ALLERGEN_NOTICE
+    assert result.preview is None
     assert len(result.ingredients) == 3
     assert len(result.steps) == 2
 
@@ -406,7 +371,6 @@ async def test_specialized_recipe_passes_only_current_job_trace_metadata() -> No
             "tags": ["cook-mantra", "specialized_recipe"],
             "metadata": {
                 "agent": "specialized_recipe",
-                "model": AGENT_MODELS[Agent.SPECIALIZED_RECIPE].value,
                 "session_id": "session-1",
                 "job_id": "job-1",
             },
@@ -445,7 +409,6 @@ async def test_traced_retry_passes_identical_config_to_both_models() -> None:
         "tags": ["cook-mantra", "specialized_recipe"],
         "metadata": {
             "agent": "specialized_recipe",
-            "model": AGENT_MODELS[Agent.SPECIALIZED_RECIPE].value,
             "session_id": "session-1",
             "job_id": "job-1",
         },
@@ -472,9 +435,10 @@ async def test_prompt_contains_every_input_fact_and_complete_recipe_constraint()
     second_prompt = model.messages[1][0].content
     assert isinstance(first_prompt, str)
     assert first_prompt == second_prompt
-    assert prompt_json(first_prompt, "Selected option JSON") == option.model_dump(
-        mode="json"
-    )
+    selected_option_payload = prompt_json(first_prompt, "Selected option JSON")
+    assert selected_option_payload == option.model_dump(mode="json")
+    assert "preview" not in selected_option_payload
+    assert "warnings" not in selected_option_payload
     assert prompt_json(first_prompt, "Confirmed ingredients JSON") == [
         "Tomato, ripe",
         'Onion "red"',
@@ -740,6 +704,7 @@ async def test_server_owned_fields_from_an_untrusted_model_are_rejected() -> Non
     "invalid_output",
     [
         recipe_model_output(unexpected_field="must be rejected"),
+        recipe_model_output(preview={"artifact_id": "model-owned-preview"}),
         recipe_model_output(
             steps=[
                 {
@@ -750,7 +715,7 @@ async def test_server_owned_fields_from_an_untrusted_model_are_rejected() -> Non
             ]
         ),
     ],
-    ids=["unexpected-field", "invalid-step-numbering"],
+    ids=["unexpected-field", "server-owned-preview", "invalid-step-numbering"],
 )
 async def test_both_invalid_full_path_attempts_propagate_model_output_invalid(
     invalid_output: dict[str, object],
@@ -791,7 +756,7 @@ async def test_invalid_first_attempt_uses_injected_retry_model_and_recovers() ->
     retry_model = ValidatingStructuredModel([recipe_model_output()])
 
     result = await OllamaSpecializedRecipeAgent(
-        model=model,
+        model=adapt_structured_model(model),
         retry_model=retry_model,
     ).generate(
         recipe_option(),
@@ -842,7 +807,7 @@ async def test_transient_failure_retries_primary_model_not_injected_retry() -> N
     retry_model = ValidatingStructuredModel([recipe_model_output()])
 
     result = await OllamaSpecializedRecipeAgent(
-        model=model,
+        model=adapt_structured_model(model),
         retry_model=retry_model,
     ).generate(
         recipe_option(),
@@ -855,6 +820,30 @@ async def test_transient_failure_retries_primary_model_not_injected_retry() -> N
     assert retry_model.attempts == 0
     assert retry_model.messages == []
     assert retry_model.configs == []
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_recipe_writer_retries_once_then_succeeds() -> None:
+    model = ValidatingStructuredModel(
+        [
+            AppError(
+                code=ErrorCode.PROVIDER_RATE_LIMITED,
+                message="The selected model provider is rate limited.",
+                status_code=429,
+                retryable=True,
+            ),
+            recipe_model_output(),
+        ]
+    )
+
+    result = await OllamaSpecializedRecipeAgent(model=model).generate(
+        recipe_option(),
+        ["Tomato, ripe"],
+        preferences(),
+    )
+
+    assert result.option_id == recipe_option().id
+    assert model.attempts == 2
 
 
 @pytest.mark.asyncio
@@ -1273,17 +1262,7 @@ async def test_empty_confirmed_list_allows_only_missing_or_optional_items() -> N
 
 
 @pytest.mark.asyncio
-async def test_injected_model_never_constructs_an_ollama_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_model_construction(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("Injected tests must not construct a network model.")
-
-    monkeypatch.setattr(
-        specialized_recipe_module,
-        "get_model",
-        fail_model_construction,
-    )
+async def test_injected_model_never_constructs_a_provider_client() -> None:
     model = ValidatingStructuredModel([recipe_model_output()])
 
     result = await OllamaSpecializedRecipeAgent(model=model).generate(

@@ -61,39 +61,7 @@ export function recipeToMarkdown(recipe: CompleteRecipeView): string {
   appendListSection(lines, "Assumptions", recipe.assumptions);
   appendListSection(lines, "Warnings", recipe.warnings);
 
-  if (recipe.nutrition) {
-    const nutrition = recipe.nutrition;
-    lines.push(
-      "",
-      "## Nutrition",
-      "",
-      `- **Calories:** ${nutrition.caloriesKcal} kcal`,
-      `- **Protein:** ${nutrition.proteinG} g`,
-      `- **Carbohydrates:** ${nutrition.carbohydratesG} g`,
-      `- **Fat:** ${nutrition.fatG} g`,
-    );
-
-    if (nutrition.dietTags.length > 0) {
-      lines.push(`- **Diet tags:** ${nutrition.dietTags.map(singleLine).join(", ")}`);
-    }
-
-    if (nutrition.allergenWarnings.length > 0) {
-      lines.push(
-        `- **Allergen warnings:** ${nutrition.allergenWarnings.map(singleLine).join(", ")}`,
-      );
-    }
-
-    if (nutrition.disclaimer) {
-      lines.push(`- **Disclaimer:** ${singleLine(nutrition.disclaimer)}`);
-    }
-  }
-
-  lines.push(
-    "",
-    `> **Nutrition notice:** ${singleLine(recipe.nutritionNotice)}`,
-    ">",
-    `> **Allergen notice:** ${singleLine(recipe.allergenNotice)}`,
-  );
+  lines.push("", `> **Allergen notice:** ${singleLine(recipe.allergenNotice)}`);
 
   return `${lines.join("\n")}\n`;
 }

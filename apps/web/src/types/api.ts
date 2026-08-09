@@ -4,7 +4,17 @@ export type ApiErrorCode =
   | "invalid_session_transition"
   | "ingredients_not_confirmed"
   | "recipe_duplicate"
+  | "runtime_status_stale"
+  | "model_configuration_invalid"
+  | "provider_unavailable"
+  | "provider_authentication_failed"
+  | "provider_rate_limited"
+  | "provider_payment_required"
+  | "model_capability_missing"
+  | "provider_protocol_error"
   | "ollama_unavailable"
+  | "image_provider_unavailable"
+  | "nutrition_provider_unavailable"
   | "model_not_found"
   | "model_output_invalid"
   | "operation_timed_out"
@@ -100,8 +110,6 @@ export interface RecipeOptionResponse {
   missing_ingredients: IngredientRequirement[];
   optional_ingredients: IngredientRequirement[];
   nutrition: NutritionEstimate | null;
-  preview: DishPreview | null;
-  warnings: string[];
 }
 
 export type IngredientAvailability = "available" | "missing" | "optional";
@@ -137,6 +145,7 @@ export interface CompleteRecipeResponse {
   allergen_notice: "Check ingredient labels for allergens.";
   assumptions: string[];
   warnings: string[];
+  preview: DishPreview | null;
 }
 
 export interface RecipeFailureResponse {
@@ -219,5 +228,42 @@ export interface OllamaStatus {
 
 export interface ReadinessResponse {
   status: "ok";
+  model_runtime: ModelRuntimeReadiness;
   ollama: OllamaStatus;
+}
+
+export interface RuntimeStatusResponse {
+  status: "ok" | "attention";
+  runtime_revision: string;
+  model_runtime: ModelRuntimeReadiness;
+}
+
+export type ModelProvider = "ollama" | "openrouter" | "codex";
+export type ModelRole =
+  "ingredient_extractor" | "master_chef" | "recipe_writer" | "image_generator";
+export type ModelCapability = "text" | "vision" | "structured_output" | "image_output";
+
+export interface ModelRoleReadiness {
+  role: ModelRole;
+  provider: ModelProvider | null;
+  model: string | null;
+  enabled: boolean;
+  ready: boolean;
+  required_capabilities: ModelCapability[];
+  available_capabilities: ModelCapability[];
+  error?:
+    | "unavailable"
+    | "authentication_failed"
+    | "rate_limited"
+    | "payment_required"
+    | "capability_missing"
+    | "protocol_error"
+    | "timed_out"
+    | "invalid_output"
+    | null;
+}
+
+export interface ModelRuntimeReadiness {
+  ready: boolean;
+  roles: Record<ModelRole, ModelRoleReadiness>;
 }

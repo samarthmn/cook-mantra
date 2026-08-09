@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "7a4d38d4-4d7b-4d6b-a28c-59394a4a89fd",
     "name": "Cook Mantra API",
-    "description": "Complete local Cook Mantra workflow: upload an ingredient image, review and confirm ingredients, generate recipe options and previews, request more options, and generate complete recipes.\n\nStart the API first, then run requests in numeric order. Background model operations are asynchronous. Repeat the matching Poll request until its `status` is `succeeded` before continuing.\n\nThe collection automatically captures session, job, option, and preview artifact IDs. In request 03, select an ingredient image from your computer before sending.",
+    "description": "Complete local Cook Mantra workflow: upload an ingredient image, review and confirm ingredients, generate recipe options, request more options, generate complete recipes, and optionally inspect a finished-dish preview.\n\nStart the API first, then run requests in numeric order. Background model operations are asynchronous. Repeat the matching Poll request until its `status` is `succeeded` before continuing.\n\nThe collection automatically captures session, job, and option IDs. After complete recipes are ready, it also captures the first available preview artifact ID. In request 04, select an ingredient image from your computer before sending.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "event": [
@@ -69,12 +69,17 @@
       "key": "artifact_id",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "runtime_revision",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
     {
       "name": "01 - Service checks",
-      "description": "Confirm that the API is running and Ollama has every configured model.",
+      "description": "Confirm that the API is running and all required model roles are ready, regardless of provider.",
       "item": [
         {
           "name": "01 Health",
@@ -100,7 +105,36 @@
           "response": []
         },
         {
-          "name": "02 Ollama Readiness",
+          "name": "02 Runtime Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('Runtime status is safe and not cached', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store');",
+                  "  pm.expect(['ok', 'attention']).to.include(body.status);",
+                  "  pm.expect(body.runtime_revision).to.be.a('string');",
+                  "  pm.expect(body.runtime_revision.length).to.be.within(32, 128);",
+                  "  pm.expect(Object.keys(body).sort()).to.eql(['model_runtime', 'runtime_revision', 'status']);",
+                  "});",
+                  "pm.collectionVariables.set('runtime_revision', body.runtime_revision);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/v1/runtime-status",
+            "description": "Returns the safe, process-cached status for all four selected roles plus the immutable runtime revision used by local clients. The response is never cached. It includes selected provider/model identity and normalized role readiness, but no credentials, endpoints, commands, provider tags, raw inventories, or raw diagnostics."
+          },
+          "response": []
+        },
+        {
+          "name": "03 Required Model Readiness",
           "event": [
             {
               "listen": "test",
@@ -108,10 +142,10 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test('Readiness returns its documented status', function () {",
-                  "  pm.expect([200, 503]).to.include(pm.response.code);",
+                  "  pm.expect([200, 401, 402, 429, 502, 503, 504]).to.include(pm.response.code);",
                   "});",
-                  "if (pm.response.code === 503) {",
-                  "  console.warn('Ollama is unavailable or required models are missing:', pm.response.json());",
+                  "if (pm.response.code !== 200) {",
+                  "  console.warn('One or more required model roles are unavailable:', pm.response.json());",
                   "}"
                 ]
               }
@@ -120,7 +154,7 @@
           "request": {
             "method": "GET",
             "url": "{{base_url}}/api/v1/ready",
-            "description": "Returns 200 when Ollama is reachable and every required model is installed. A safe 503 response explains unavailable or missing models."
+            "description": "Returns 200 when every required model role is ready, regardless of provider. A safe non-200 response identifies authentication, payment, rate-limit, protocol, timeout, availability, model, or capability failure. The response retains a deprecated safe Ollama inventory for compatibility."
           },
           "response": []
         }
@@ -131,26 +165,44 @@
       "description": "Upload an image, wait for extraction, review the returned ingredients, and confirm at least one.",
       "item": [
         {
-          "name": "03 Create Session - Select Image First",
+          "name": "04 Create Session - Select Image First",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('Ingredient extraction was queued', function () {",
-                  "  pm.response.to.have.status(202);",
-                  "});",
                   "const body = pm.response.json();",
-                  "pm.collectionVariables.set('session_id', body.session_id);",
-                  "pm.collectionVariables.set('job_id', body.job_id);",
-                  "pm.collectionVariables.set('job_status', 'queued');"
+                  "if (pm.response.code === 409) {",
+                  "  pm.test('Stale runtime status is rejected safely', function () {",
+                  "    pm.expect(body.error.code).to.eql('runtime_status_stale');",
+                  "  });",
+                  "  pm.collectionVariables.set('session_id', '');",
+                  "  pm.collectionVariables.set('job_id', '');",
+                  "  pm.collectionVariables.set('job_status', '');",
+                  "  console.warn('Refresh request 02, re-evaluate disclosure, then resend request 04.');",
+                  "} else {",
+                  "  pm.test('Ingredient extraction was queued', function () {",
+                  "    pm.response.to.have.status(202);",
+                  "  });",
+                  "  pm.collectionVariables.set('session_id', body.session_id);",
+                  "  pm.collectionVariables.set('job_id', body.job_id);",
+                  "  pm.collectionVariables.set('job_status', 'queued');",
+                  "}"
                 ]
               }
             }
           ],
           "request": {
             "method": "POST",
+            "header": [
+              {
+                "key": "X-Cook-Mantra-Runtime-Revision",
+                "value": "{{runtime_revision}}",
+                "type": "text",
+                "description": "Required for browser photo uploads. Origin-less direct API clients may omit it and remain responsible for their own disclosure."
+              }
+            ],
             "body": {
               "mode": "formdata",
               "formdata": [
@@ -163,12 +215,12 @@
               ]
             },
             "url": "{{base_url}}/api/v1/sessions",
-            "description": "Before sending, click the image value and select a local ingredient photo. The test script saves `session_id` and `job_id` automatically."
+            "description": "Before sending, click the image value and select a local ingredient photo. Browser uploads send the revision captured by request 02. This process token is concurrency metadata, not consent; users must still review the disclosure. Origin-less direct API clients remain responsible for their own disclosure and may omit the header. A `runtime_status_stale` response means request 02 must be refreshed and disclosure re-evaluated before manually resending; the collection does not blindly replay uploads. On success, the test script saves `session_id` and `job_id` automatically."
           },
           "response": []
         },
         {
-          "name": "04 Poll Ingredient Extraction Job",
+          "name": "05 Poll Ingredient Extraction Job",
           "event": [
             {
               "listen": "test",
@@ -194,12 +246,12 @@
           "request": {
             "method": "GET",
             "url": "{{base_url}}/api/v1/jobs/{{job_id}}",
-            "description": "Repeat until `status` is `succeeded`. Local vision inference may take time."
+            "description": "Repeat until `status` is `succeeded`. The selected vision provider may take time."
           },
           "response": []
         },
         {
-          "name": "05 Get Extracted Ingredients",
+          "name": "06 Get Extracted Ingredients",
           "event": [
             {
               "listen": "test",
@@ -234,7 +286,7 @@
           "response": []
         },
         {
-          "name": "06 Update Ingredient Review",
+          "name": "07 Update Ingredient Review",
           "event": [
             {
               "listen": "test",
@@ -268,12 +320,12 @@
               }
             },
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}/ingredients",
-            "description": "Sends the review payload prepared by request 05. Inspect or edit the `ingredients_payload` collection variable before sending if you want different names or selections."
+            "description": "Sends the review payload prepared by request 06. Inspect or edit the `ingredients_payload` collection variable before sending if you want different names or selections."
           },
           "response": []
         },
         {
-          "name": "07 Confirm Ingredients",
+          "name": "08 Confirm Ingredients",
           "event": [
             {
               "listen": "test",
@@ -298,11 +350,11 @@
       ]
     },
     {
-      "name": "03 - Recipe options and previews",
-      "description": "Generate the first option batch, inspect its previews, and optionally generate another non-duplicate batch.",
+      "name": "03 - Recipe options",
+      "description": "Generate the first option batch, inspect the choices, and optionally generate another non-duplicate batch.",
       "item": [
         {
-          "name": "08 Generate Recipe Options",
+          "name": "09 Generate Recipe Options",
           "event": [
             {
               "listen": "test",
@@ -343,7 +395,7 @@
           "response": []
         },
         {
-          "name": "09 Poll Recipe Options Job",
+          "name": "10 Poll Recipe Options Job",
           "event": [
             {
               "listen": "test",
@@ -369,12 +421,12 @@
           "request": {
             "method": "GET",
             "url": "{{base_url}}/api/v1/jobs/{{job_id}}",
-            "description": "Repeat until `status` is `succeeded`. Nutrition and image generation make this operation longer than a normal request."
+            "description": "Repeat until `status` is `succeeded`. Recipe option generation runs in the background and may take longer than a normal request."
           },
           "response": []
         },
         {
-          "name": "10 Get Options and Capture IDs",
+          "name": "11 Get Options and Capture IDs",
           "event": [
             {
               "listen": "test",
@@ -390,14 +442,8 @@
                   "const availableIds = body.recipe_options.map(function (option) { return option.id; });",
                   "pm.collectionVariables.set('option_id', availableIds[0]);",
                   "pm.collectionVariables.set('available_option_ids_json', JSON.stringify(availableIds));",
-                  "const firstPreview = body.recipe_options.find(function (option) {",
-                  "  return option.preview && option.preview.artifact_id;",
-                  "});",
-                  "if (firstPreview) {",
-                  "  pm.collectionVariables.set('artifact_id', firstPreview.preview.artifact_id);",
-                  "}",
                   "console.table(body.recipe_options.map(function (option) { return { id: option.id, name: option.name }; }));",
-                  "console.warn('Before request 15, copy only the IDs you want into selected_option_ids_json.');"
+                  "console.warn('Before request 16, copy only the IDs you want into selected_option_ids_json.');"
                 ]
               }
             }
@@ -410,30 +456,7 @@
           "response": []
         },
         {
-          "name": "11 Get First Dish Preview",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('Dish preview was returned', function () {",
-                  "  pm.response.to.have.status(200);",
-                  "  pm.expect(pm.response.headers.get('Content-Type')).to.match(/^image\\/(jpeg|png|webp)$/);",
-                  "});"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "url": "{{base_url}}/api/v1/artifacts/{{artifact_id}}",
-            "description": "Returns the first generated preview as binary image data. Postman renders it in the response preview."
-          },
-          "response": []
-        },
-        {
-          "name": "12 Generate More Recipe Options",
+          "name": "13 Generate More Recipe Options",
           "event": [
             {
               "listen": "test",
@@ -474,7 +497,7 @@
           "response": []
         },
         {
-          "name": "13 Poll More Options Job",
+          "name": "14 Poll More Options Job",
           "event": [
             {
               "listen": "test",
@@ -500,12 +523,12 @@
           "request": {
             "method": "GET",
             "url": "{{base_url}}/api/v1/jobs/{{job_id}}",
-            "description": "If you sent request 12, repeat this request until `status` is `succeeded`."
+            "description": "If you sent request 13, repeat this request until `status` is `succeeded`."
           },
           "response": []
         },
         {
-          "name": "14 Refresh Options and Selected IDs",
+          "name": "15 Refresh Options and Selected IDs",
           "event": [
             {
               "listen": "test",
@@ -521,7 +544,7 @@
                   "pm.collectionVariables.set('option_id', availableIds[0]);",
                   "pm.collectionVariables.set('available_option_ids_json', JSON.stringify(availableIds));",
                   "console.table(body.recipe_options.map(function (option) { return { id: option.id, name: option.name }; }));",
-                  "console.warn('Review selected_option_ids_json before request 15; it is never auto-filled.');"
+                  "console.warn('Review selected_option_ids_json before request 16; it is never auto-filled.');"
                 ]
               }
             }
@@ -537,10 +560,10 @@
     },
     {
       "name": "04 - Complete recipes",
-      "description": "Generate full recipes for the selected option IDs and inspect successes or partial failures.",
+      "description": "Generate full recipes for the selected option IDs, inspect successes or partial failures, and optionally retrieve a finished-dish preview.",
       "item": [
         {
-          "name": "15 Generate Complete Recipes",
+          "name": "16 Generate Complete Recipes",
           "event": [
             {
               "listen": "prerequest",
@@ -550,7 +573,7 @@
                   "const selectedIds = JSON.parse(pm.collectionVariables.get('selected_option_ids_json') || '[]');",
                   "const availableIds = JSON.parse(pm.collectionVariables.get('available_option_ids_json') || '[]');",
                   "if (!Array.isArray(selectedIds) || selectedIds.length < 1 || selectedIds.length > 6) {",
-                  "  console.error('Set selected_option_ids_json to a JSON array containing 1-6 option IDs from request 10 or 14.');",
+                  "  console.error('Set selected_option_ids_json to a JSON array containing 1-6 option IDs from request 11 or 15.');",
                   "  pm.execution.skipRequest();",
                   "}",
                   "const unknownIds = selectedIds.filter(function (id) { return !availableIds.includes(id); });",
@@ -595,12 +618,12 @@
               }
             },
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}/recipes",
-            "description": "Queues full recipe generation only for IDs you manually placed in `selected_option_ids_json`. Request 10 or 14 prints every available option ID and name. Select between one and six IDs."
+            "description": "Queues full recipe generation only for IDs you manually placed in `selected_option_ids_json`. Request 11 or 15 prints every available option ID and name. Select between one and six IDs."
           },
           "response": []
         },
         {
-          "name": "16 Poll Complete Recipes Job",
+          "name": "17 Poll Complete Recipes Job",
           "event": [
             {
               "listen": "test",
@@ -631,7 +654,7 @@
           "response": []
         },
         {
-          "name": "17 Get Final Session and Recipes",
+          "name": "18 Get Final Session and Recipes",
           "event": [
             {
               "listen": "test",
@@ -644,7 +667,14 @@
                   "  pm.expect(body.stage).to.eql('recipes_ready');",
                   "  pm.expect(Object.keys(body.complete_recipes).length).to.be.above(0);",
                   "});",
+                  "pm.collectionVariables.set('artifact_id', '');",
                   "const body = pm.response.json();",
+                  "const firstPreview = Object.values(body.complete_recipes).find(function (recipe) {",
+                  "  return recipe.preview && recipe.preview.artifact_id;",
+                  "});",
+                  "if (firstPreview) {",
+                  "  pm.collectionVariables.set('artifact_id', firstPreview.preview.artifact_id);",
+                  "}",
                   "console.log('Complete recipes:', body.complete_recipes);",
                   "console.log('Per-option failures:', body.recipe_failures);"
                 ]
@@ -655,6 +685,42 @@
             "method": "GET",
             "url": "{{base_url}}/api/v1/sessions/{{session_id}}",
             "description": "Returns complete recipes keyed by option ID plus any per-option failures. Partial success is preserved."
+          },
+          "response": []
+        },
+        {
+          "name": "19 Get First Completed Recipe Preview",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const artifactId = pm.collectionVariables.get('artifact_id');",
+                  "if (!artifactId || !artifactId.trim()) {",
+                  "  console.warn('No completed recipe preview is available; skipping this optional request.');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Completed recipe preview was returned', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.match(/^image\\/(jpeg|png|webp)$/);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/api/v1/artifacts/{{artifact_id}}",
+            "description": "Optional. Returns the first completed recipe preview as binary image data when one was generated. Postman renders it in the response preview."
           },
           "response": []
         }

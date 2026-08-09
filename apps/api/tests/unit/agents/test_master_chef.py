@@ -1,14 +1,12 @@
 import json
-from typing import Literal
 
 import pytest
 from tests.tracing_support import enabled_tracing
 
-from agents import master_chef as master_chef_module
 from agents.master_chef import OllamaMasterChef
-from core.config import AGENT_MODELS, PROJECT_ROOT, Agent, Settings
 from core.errors import AppError, ErrorCode
 from core.logging import log_context
+from domain.model_runtime import AgentRole
 from domain.recipe_options import (
     UNCONFIRMED_INGREDIENT_REASON,
     RecipeOptionBatch,
@@ -37,6 +35,7 @@ class StructuredModelFactory:
     def __init__(self, output: RecipeOptionBatch) -> None:
         self.output = output
         self.schema: type[RecipeOptionBatch] | None = None
+        self.roles: list[AgentRole] = []
 
     def with_structured_output(
         self,
@@ -44,6 +43,14 @@ class StructuredModelFactory:
     ) -> CapturingStructuredModel:
         self.schema = schema
         return CapturingStructuredModel(self.output)
+
+    def build(
+        self,
+        role: AgentRole,
+        schema: type[RecipeOptionBatch],
+    ) -> CapturingStructuredModel:
+        self.roles.append(role)
+        return self.with_structured_output(schema)
 
 
 def recipe_batch(*names: str) -> RecipeOptionBatch:
@@ -293,29 +300,9 @@ async def test_master_chef_rejects_an_option_using_no_confirmed_ingredient() -> 
 
 
 @pytest.mark.asyncio
-async def test_master_chef_structured_schema_pins_only_the_option_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_master_chef_structured_schema_pins_only_the_option_count() -> None:
     factory = StructuredModelFactory(recipe_batch("Tomato masala", "Tomato soup"))
-
-    def capture_model(
-        agent: Agent,
-        *,
-        thinking: Literal["low", "high"],
-        num_ctx: int,
-        settings: Settings | None,
-    ) -> StructuredModelFactory:
-        assert agent is Agent.MASTER_CHEF
-        # Bounded reasoning: unbounded fills the context window and
-        # disabled returns nothing at all on a reasoning-first model.
-        assert thinking == "low"
-        # Four option drafts plus thinking need more than the 8k default.
-        assert num_ctx == 16_384
-        assert settings is None
-        return factory
-
-    monkeypatch.setattr(master_chef_module, "get_model", capture_model)
-    chef = OllamaMasterChef()
+    chef = OllamaMasterChef(model_factory=factory)
     await chef.generate(
         ingredients=["Tomato"],
         preferences=RecipePreferences(option_count=2),
@@ -323,6 +310,7 @@ async def test_master_chef_structured_schema_pins_only_the_option_count(
     )
 
     assert factory.schema is not None
+    assert factory.roles == [AgentRole.MASTER_CHEF]
     options_schema = factory.schema.model_json_schema()["properties"]["options"]
     assert options_schema["minItems"] == 2
     assert options_schema["maxItems"] == 2
@@ -335,33 +323,9 @@ async def test_master_chef_structured_schema_pins_only_the_option_count(
 
 
 @pytest.mark.asyncio
-async def test_master_chef_forwards_its_exact_settings_to_model_factory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = Settings(
-        _env_file=None,
-        artifact_root=PROJECT_ROOT / "tmp" / "master-chef-settings-test",
-        ollama_base_url="http://configured-ollama.test:11434",
-        llm_timeout_seconds=17,
-    )
-    captured_settings: Settings | None = None
-
-    def capture_model(
-        agent: Agent,
-        *,
-        thinking: bool,
-        num_ctx: int,
-        settings: Settings,
-    ) -> StructuredModelFactory:
-        nonlocal captured_settings
-        assert agent is Agent.MASTER_CHEF
-        assert thinking == "low"
-        assert num_ctx == 16_384
-        captured_settings = settings
-        return StructuredModelFactory(recipe_batch("Tomato masala"))
-
-    monkeypatch.setattr(master_chef_module, "get_model", capture_model)
-    chef = OllamaMasterChef(settings=settings)
+async def test_master_chef_leaves_generation_tuning_to_role_adapter() -> None:
+    factory = StructuredModelFactory(recipe_batch("Tomato masala"))
+    chef = OllamaMasterChef(model_factory=factory)
 
     result = await chef.generate(
         ingredients=["Tomato"],
@@ -370,7 +334,7 @@ async def test_master_chef_forwards_its_exact_settings_to_model_factory(
     )
 
     assert result[0].name == "Tomato masala"
-    assert captured_settings is settings
+    assert factory.roles == [AgentRole.MASTER_CHEF]
 
 
 @pytest.mark.asyncio
@@ -391,7 +355,6 @@ async def test_master_chef_passes_only_current_job_trace_metadata() -> None:
             "tags": ["cook-mantra", "master_chef"],
             "metadata": {
                 "agent": "master_chef",
-                "model": AGENT_MODELS[Agent.MASTER_CHEF].value,
                 "session_id": "session-1",
                 "job_id": "job-1",
             },

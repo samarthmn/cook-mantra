@@ -1,8 +1,11 @@
 """Domain models for generated dish preview images."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from domain.model_runtime import ImageTuning
 
 PREVIEW_LABEL = "AI-generated image"
 
@@ -10,17 +13,17 @@ PREVIEW_LABEL = "AI-generated image"
 class ImageGenerationRequest(BaseModel):
     """A bounded request for a generated dish image."""
 
-    prompt: str = Field(min_length=1, max_length=2_000)
-    width: int = Field(default=768, ge=256, le=2_048)
-    height: int = Field(default=768, ge=256, le=2_048)
-    steps: int | None = Field(default=None, ge=1, le=100)
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    prompt: str = Field(min_length=1, max_length=2_000, repr=False)
+    tuning: ImageTuning
 
 
 @dataclass(frozen=True, slots=True)
-class GeneratedImage:
+class VerifiedRaster:
     """Verified image bytes returned by an image generator."""
 
-    data: bytes
+    data: bytes = field(repr=False)
     media_type: str
     width: int
     height: int
@@ -42,7 +45,7 @@ class DishPreview(BaseModel):
     )
 
     artifact_id: str
-    label: str = PREVIEW_LABEL
+    label: Literal["AI-generated image"] = PREVIEW_LABEL
 
     @field_validator("label", mode="before")
     @classmethod

@@ -1,4 +1,4 @@
-"""Ollama model readiness with optional Beast API reachability."""
+"""Ollama model readiness compatibility inventory."""
 
 from typing import Any
 
@@ -16,22 +16,20 @@ class OllamaHealthService:
         base_url: str,
         *,
         timeout_seconds: float,
-        beast_base_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._beast_base_url = (
-            beast_base_url.rstrip("/") if beast_base_url is not None else None
-        )
         self._timeout_seconds = timeout_seconds
         self._transport = transport
 
     async def inspect(self) -> dict[str, object]:
-        """Return text-model readiness and optional Beast health."""
+        """Return the deprecated safe text-model compatibility inventory."""
         try:
             async with httpx.AsyncClient(
                 transport=self._transport,
                 timeout=self._timeout_seconds,
+                trust_env=False,
+                follow_redirects=False,
             ) as client:
                 text_response = await client.get(f"{self._base_url}/api/tags")
                 text_response.raise_for_status()
@@ -51,26 +49,7 @@ class OllamaHealthService:
             "available_models": text_models,
             "missing": missing,
         }
-        if self._beast_base_url is not None:
-            inspection["beast"] = await self._inspect_beast()
         return inspection
-
-    async def _inspect_beast(self) -> dict[str, object]:
-        """Return safe public-health details without authenticating to Beast."""
-        try:
-            async with httpx.AsyncClient(
-                transport=self._transport,
-                timeout=self._timeout_seconds,
-            ) as client:
-                response = await client.get(f"{self._beast_base_url}/health")
-                response.raise_for_status()
-                payload = response.json()
-            status = payload.get("status") if isinstance(payload, dict) else None
-            if not isinstance(status, str):
-                raise ValueError("Beast health response has no status string")
-        except (httpx.HTTPError, ValueError):
-            return {"reachable": False, "status": None}
-        return {"reachable": True, "status": status}
 
 
 def _available_model_names(payload: Any) -> list[str]:

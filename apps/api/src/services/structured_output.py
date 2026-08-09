@@ -2,12 +2,12 @@
 
 from typing import Protocol
 
-import httpx
 from langchain_core.exceptions import OutputParserException
-from ollama import ResponseError
 from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
+from domain.model_runtime import ProviderErrorKind
+from services.provider_errors import ProviderInvocationError
 
 
 class StructuredModel[ResultT](Protocol):
@@ -44,32 +44,37 @@ async def invoke_structured[ResultT](
                     status_code=502,
                     retryable=True,
                 ) from error
-        except (httpx.TimeoutException, TimeoutError) as error:
-            if attempt + 1 == attempt_limit:
-                raise AppError(
-                    code=ErrorCode.OPERATION_TIMED_OUT,
-                    message="The model operation timed out.",
-                    status_code=504,
-                    retryable=True,
-                ) from error
-        except (httpx.HTTPError, ResponseError) as error:
-            if attempt + 1 == attempt_limit:
-                raise AppError(
-                    code=ErrorCode.OLLAMA_UNAVAILABLE,
-                    message="The model server could not be reached.",
-                    status_code=503,
-                    retryable=True,
-                ) from error
-        except ValueError as error:
-            # A model that yields nothing raises a bare ValueError from the
-            # client rather than an HTTP error. Without this it escapes as a
-            # non-retryable internal_error carrying no usable detail.
-            if attempt + 1 == attempt_limit:
-                raise AppError(
-                    code=ErrorCode.OLLAMA_UNAVAILABLE,
-                    message="The model returned an empty response.",
-                    status_code=503,
-                    retryable=True,
-                ) from error
+        except ProviderInvocationError as error:
+            if not error.error.retryable or attempt + 1 == attempt_limit:
+                raise _public_provider_error(error) from error
 
     raise RuntimeError("Structured model invocation completed without a result.")
+
+
+def _public_provider_error(error: ProviderInvocationError) -> AppError:
+    mappings: dict[ProviderErrorKind, tuple[ErrorCode, int]] = {
+        ProviderErrorKind.UNAVAILABLE: (ErrorCode.PROVIDER_UNAVAILABLE, 503),
+        ProviderErrorKind.AUTHENTICATION_FAILED: (
+            ErrorCode.PROVIDER_AUTHENTICATION_FAILED,
+            401,
+        ),
+        ProviderErrorKind.RATE_LIMITED: (ErrorCode.PROVIDER_RATE_LIMITED, 429),
+        ProviderErrorKind.PAYMENT_REQUIRED: (
+            ErrorCode.PROVIDER_PAYMENT_REQUIRED,
+            402,
+        ),
+        ProviderErrorKind.CAPABILITY_MISSING: (
+            ErrorCode.MODEL_CAPABILITY_MISSING,
+            503,
+        ),
+        ProviderErrorKind.PROTOCOL_ERROR: (ErrorCode.PROVIDER_PROTOCOL_ERROR, 502),
+        ProviderErrorKind.TIMED_OUT: (ErrorCode.OPERATION_TIMED_OUT, 504),
+        ProviderErrorKind.INVALID_OUTPUT: (ErrorCode.MODEL_OUTPUT_INVALID, 502),
+    }
+    code, status_code = mappings[error.error.kind]
+    return AppError(
+        code=code,
+        message=error.error.message,
+        status_code=status_code,
+        retryable=error.error.retryable,
+    )

@@ -6,7 +6,7 @@ from collections.abc import Awaitable
 from functools import partial
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, UploadFile, status
 
 from api.dependencies import (
     get_artifact_store,
@@ -14,7 +14,9 @@ from api.dependencies import (
     get_job_runner,
     get_session_store,
     get_upload_validator,
+    require_ingredient_extractor_runtime,
 )
+from api.middleware import RUNTIME_REVISION_HEADER
 from domain.artifacts import ArtifactKind
 from domain.ingredients import assemble_manual_review_ingredients
 from domain.jobs import JobOperation
@@ -46,6 +48,10 @@ logger = logging.getLogger(__name__)
     operation_id="createSession",
     summary="Create a cooking session",
     responses={
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "The browser's local runtime status is stale.",
+        },
         status.HTTP_422_UNPROCESSABLE_CONTENT: {
             "model": ErrorResponse,
             "description": "Invalid ingredient image.",
@@ -66,6 +72,22 @@ async def create_session(
         IngredientExtractionRunner,
         Depends(get_ingredient_extraction_runner),
     ],
+    _runtime_ready: Annotated[
+        None,
+        Depends(require_ingredient_extractor_runtime),
+    ] = None,
+    _runtime_revision: Annotated[
+        str | None,
+        Header(
+            alias=RUNTIME_REVISION_HEADER,
+            description=(
+                "Required when the photo upload includes an Origin header. "
+                "Origin-less direct API clients may omit it and remain responsible "
+                "for their own disclosure. This process revision is concurrency "
+                "metadata, not consent."
+            ),
+        ),
+    ] = None,
 ) -> QueuedJobResponse:
     """Validate an ingredient image and queue extraction."""
     try:

@@ -5,9 +5,16 @@ from typing import Any
 import pytest
 from langsmith import traceable, tracing_context
 
-from core.config import AGENT_MODELS, PROJECT_ROOT, Agent, Model, Settings
+import services.tracing as tracing_module
+from core.config import PROJECT_ROOT, Agent, Settings
 from core.logging import log_context
 from domain.ingredients import ExtractionResult
+from domain.model_runtime import (
+    AgentRole,
+    ModelResult,
+    ModelUsage,
+    ProviderName,
+)
 from services.tracing import TracingService
 
 
@@ -96,7 +103,6 @@ def test_runnable_config_has_only_safe_detached_metadata() -> None:
         "tags": ["cook-mantra", "master_chef"],
         "metadata": {
             "agent": "master_chef",
-            "model": AGENT_MODELS[Agent.MASTER_CHEF].value,
             "session_id": "session-1",
             "job_id": "job-1",
             "batch_number": 2,
@@ -114,7 +120,6 @@ def test_runnable_config_has_only_safe_detached_metadata() -> None:
         "tags": ["cook-mantra", "master_chef"],
         "metadata": {
             "agent": "master_chef",
-            "model": AGENT_MODELS[Agent.MASTER_CHEF].value,
             "session_id": "session-1",
             "job_id": "job-1",
             "batch_number": 2,
@@ -124,14 +129,8 @@ def test_runnable_config_has_only_safe_detached_metadata() -> None:
     assert "test-key" not in repr(second)
 
 
-@pytest.mark.parametrize(
-    ("agent", "model"),
-    [(agent, AGENT_MODELS[agent]) for agent in Agent],
-)
-def test_runnable_config_maps_each_agent_to_its_exact_model(
-    agent: Agent,
-    model: Model,
-) -> None:
+@pytest.mark.parametrize("agent", list(Agent))
+def test_runnable_config_keeps_agent_identity_provider_neutral(agent: Agent) -> None:
     tracing = enabled_tracing(RecordingClient())
 
     config = tracing.runnable_config(
@@ -142,7 +141,6 @@ def test_runnable_config_maps_each_agent_to_its_exact_model(
 
     assert config["metadata"] == {
         "agent": agent.value,
-        "model": model.value,
         "session_id": "session-1",
         "job_id": "job-1",
     }
@@ -155,7 +153,7 @@ async def test_text_invocation_uses_task_local_job_correlation() -> None:
     async def invoke(label: str) -> dict[str, object]:
         with log_context(session_id=f"session-{label}", job_id=f"job-{label}"):
             return await tracing.invoke_text(
-                Agent.NUTRITION,
+                Agent.MASTER_CHEF,
                 lambda config: async_value(config),
             )
 
@@ -189,11 +187,59 @@ async def test_text_trace_uses_configured_client_project_and_metadata() -> None:
     assert created["tags"] == ["cook-mantra", "master_chef"]
     assert created["extra"]["metadata"] == {
         "agent": "master_chef",
-        "model": AGENT_MODELS[Agent.MASTER_CHEF].value,
         "session_id": "session-1",
         "job_id": "job-1",
         "ls_method": "traceable",
     }
+
+
+@pytest.mark.asyncio
+async def test_provider_neutral_text_trace_records_only_safe_identity_and_usage() -> (
+    None
+):
+    client = RecordingClient()
+    tracing = enabled_tracing(client)
+    wrapper = getattr(tracing_module, "invoke_trace_safe_text_model", None)
+    assert callable(wrapper)
+
+    async def invoke(_config: dict[str, object]) -> ModelResult[str]:
+        return await wrapper(
+            role=AgentRole.MASTER_CHEF,
+            provider=ProviderName.OPENROUTER,
+            model="vendor/exact-model",
+            operation=lambda: async_value(
+                ModelResult(
+                    output="private-output-canary",
+                    usage=ModelUsage(input_tokens=7, output_tokens=3),
+                )
+            ),
+        )
+
+    with log_context(session_id="session-1", job_id="job-1"):
+        result = await tracing.invoke_text(Agent.MASTER_CHEF, invoke)
+
+    assert result.output == "private-output-canary"
+    model_create = next(
+        payload
+        for kind, payload in client.calls
+        if kind == "create" and payload["name"] == "model_invocation"
+    )
+    assert model_create["inputs"] == {
+        "role": "master_chef",
+        "provider": "openrouter",
+        "model": "vendor/exact-model",
+    }
+    model_update = next(
+        payload
+        for kind, payload in client.calls
+        if kind == "update" and payload.get("outputs") is not None
+    )
+    assert model_update["outputs"] == {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "total_tokens": 10,
+    }
+    assert "private-output-canary" not in repr(client.calls)
 
 
 def test_vision_trace_summary_contains_no_image_data() -> None:

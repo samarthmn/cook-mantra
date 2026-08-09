@@ -214,7 +214,7 @@ describe("demo data", () => {
     });
   });
 
-  it("includes recipe-stage nutrition in a sample recipe", () => {
+  it("keeps deprecated nutrition fields null throughout the demo path", () => {
     const ingredients = [...demoDetectedIngredients(), ...demoPantryIngredients()];
     const options = createDemoOptions({
       preferences,
@@ -224,12 +224,8 @@ describe("demo data", () => {
     });
     const recipe = createDemoRecipes([options[0]], ingredients, 2)[options[0].id];
 
-    expect(recipe.nutrition).toMatchObject({
-      caloriesKcal: 438,
-      proteinG: 21,
-      carbohydratesG: 17,
-      fatG: 32,
-    });
+    expect(options[0].nutrition).toBeNull();
+    expect(recipe.nutrition).toBeNull();
   });
 
   it("marks a pantry staple available only after the user confirms it", () => {
@@ -446,10 +442,33 @@ describe("demo data", () => {
       "Salt",
       "Coriander",
     ]);
-    expect(option?.previewLabel).toBe("AI-generated image");
+    expect(option).not.toHaveProperty("previewArtifactId");
+    expect(option).not.toHaveProperty("previewLabel");
+    expect(option).not.toHaveProperty("warnings");
   });
 
-  it("formats allergen notices as a natural-language list", () => {
+  it("keeps demo completed-recipe previews explicitly disabled", () => {
+    const ingredients = [
+      ...demoDetectedIngredients(),
+      ...demoPantryIngredients().map((ingredient) => ({
+        ...ingredient,
+        confirmed: true,
+      })),
+    ];
+    const [option] = createDemoOptions({
+      preferences,
+      batchNumber: 1,
+      excludedIds: [],
+      ingredients,
+    });
+
+    expect(createDemoRecipes([option], ingredients, 2)[option.id]).toMatchObject({
+      previewArtifactId: null,
+      previewLabel: null,
+    });
+  });
+
+  it("does not derive allergen copy from deprecated nutrition data", () => {
     const ingredients = [...demoDetectedIngredients(), ...demoPantryIngredients()];
     const [option] = createDemoOptions({
       preferences,
@@ -470,6 +489,6 @@ describe("demo data", () => {
     expect(
       createDemoRecipes([optionWithAllergens], ingredients, 2)[option.id]
         .allergenNotice,
-    ).toBe("May contain dairy, soy, and tree nuts.");
+    ).toBe("Check ingredient labels for allergens.");
   });
 });

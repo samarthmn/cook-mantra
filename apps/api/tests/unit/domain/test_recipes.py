@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from core.errors import ErrorCode
+from domain.images import DishPreview
 from domain.recipes import (
     CompleteRecipe,
     IngredientAvailability,
@@ -12,7 +13,7 @@ from domain.recipes import (
     RecipeStep,
 )
 from domain.sessions import Session, SessionStage
-from schemas.recipes import RecipeSelectionRequest
+from schemas.recipes import CompleteRecipeResponse, RecipeSelectionRequest
 from schemas.sessions import SessionResponse
 
 
@@ -62,6 +63,29 @@ def test_complete_recipe_requires_numbered_steps() -> None:
     recipe = complete_recipe()
 
     assert [step.number for step in recipe.steps] == [1, 2]
+
+
+def test_complete_recipe_defaults_its_preview_to_null() -> None:
+    recipe = complete_recipe()
+
+    assert recipe.preview is None
+    assert CompleteRecipeResponse.model_validate(recipe).preview is None
+    assert "preview" in CompleteRecipeResponse.model_json_schema()["required"]
+
+
+def test_complete_recipe_owns_one_fixed_label_preview() -> None:
+    recipe = complete_recipe(
+        preview={
+            "artifact_id": "artifact-preview-1",
+            "label": "Caller supplied label",
+        }
+    )
+
+    assert recipe.preview == DishPreview(artifact_id="artifact-preview-1")
+    assert CompleteRecipeResponse.model_validate(recipe).model_dump()["preview"] == {
+        "artifact_id": "artifact-preview-1",
+        "label": "AI-generated image",
+    }
 
 
 @pytest.mark.parametrize(
@@ -397,3 +421,16 @@ def test_session_response_exposes_detached_serializable_recipe_results() -> None
     response.recipe_failures.clear()
     assert list(session.complete_recipes) == ["option-1"]
     assert list(session.recipe_failures) == ["option-2"]
+
+
+def test_complete_recipe_discards_deprecated_nutrition_values() -> None:
+    recipe = complete_recipe(
+        nutrition={
+            "calories_kcal": 300,
+            "protein_g": 8,
+            "carbohydrates_g": 40,
+            "fat_g": 10,
+        }
+    )
+
+    assert recipe.nutrition is None

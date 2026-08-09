@@ -273,12 +273,6 @@ function SavedRecipeCard({
               <span className="saved-recipe-saved-at">
                 Saved <time dateTime={entry.savedAt}>{formattedSavedAt}</time>
               </span>
-              {recipe.nutrition ? (
-                <span className="text-muted">
-                  {recipe.nutrition.caloriesKcal} kcal · {recipe.nutrition.proteinG}g
-                  protein
-                </span>
-              ) : null}
               {entry.progress ? (
                 <span className="saved-recipe-progress">
                   {entry.progress.doneStepNumbers.length} of {recipe.steps.length} steps

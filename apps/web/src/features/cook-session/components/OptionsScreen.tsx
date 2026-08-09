@@ -1,9 +1,6 @@
 "use client";
 
-import Image from "next/image";
-import { useState } from "react";
 import {
-  AlertTriangle,
   ArrowLeft,
   ArrowRight,
   Check,
@@ -23,7 +20,6 @@ interface OptionsScreenProps {
   ingredientCount: number;
   ideasExhausted: boolean;
   moreIdeasUnavailableReason?: string | null;
-  previewUrl: (artifactId: string) => string;
   onToggleOption: (id: string) => void;
   onMoreIdeas: () => void;
   onEditIngredients: () => void;
@@ -34,18 +30,12 @@ function plural(value: number, singular: string, pluralForm = `${singular}s`) {
   return value === 1 ? singular : pluralForm;
 }
 
-const allergenListFormat = new Intl.ListFormat("en", {
-  style: "long",
-  type: "conjunction",
-});
-
 export function OptionsScreen({
   options,
   selectedOptionIds,
   ingredientCount,
   ideasExhausted,
   moreIdeasUnavailableReason = null,
-  previewUrl,
   onToggleOption,
   onMoreIdeas,
   onEditIngredients,
@@ -67,19 +57,19 @@ export function OptionsScreen({
         intro={
           isEmpty
             ? "Nothing here yet. A short ingredient list is the usual reason — the agents only suggest dishes they can actually see you cooking."
-            : "Pick one or more. Every photo is AI-generated — your dish may look different. Nutrition is an estimate, not medical advice."
+            : "Pick one or more. After a recipe is written, Cook Mantra may create an AI image of the finished dish."
         }
       />
 
       {options.length ? (
         <div className="option-grid">
-          {options.map((option) => (
+          {options.map((option, index) => (
             <OptionCard
               key={option.id}
               option={option}
+              index={index}
               selected={selectedOptionIds.includes(option.id)}
               ingredientCount={ingredientCount}
-              previewUrl={previewUrl}
               onToggle={() => onToggleOption(option.id)}
             />
           ))}
@@ -207,24 +197,21 @@ function NoIdeasState({
 
 interface OptionCardProps {
   option: RecipeOptionView;
+  index: number;
   selected: boolean;
   ingredientCount: number;
-  previewUrl: (artifactId: string) => string;
   onToggle: () => void;
 }
 
 function OptionCard({
   option,
+  index,
   selected,
   ingredientCount,
-  previewUrl,
   onToggle,
 }: OptionCardProps) {
-  const nutrition = option.nutrition;
-  const [failedPreviewId, setFailedPreviewId] = useState<string | null>(null);
-  const previewArtifactId = option.previewArtifactId;
-  const previewAvailable =
-    previewArtifactId !== null && previewArtifactId !== failedPreviewId;
+  const displayIndex = String(index + 1).padStart(2, "0");
+  const displayBatch = String(option.batchNumber).padStart(2, "0");
 
   return (
     <button
@@ -233,24 +220,13 @@ function OptionCard({
       aria-pressed={selected}
       onClick={onToggle}
     >
-      <span className="option-card-media">
-        {previewAvailable && previewArtifactId ? (
-          <Image
-            className="option-card-image"
-            src={previewUrl(previewArtifactId)}
-            alt={`${option.name}, AI-generated image`}
-            fill
-            sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
-            unoptimized
-            onError={() => setFailedPreviewId(previewArtifactId)}
-          />
-        ) : (
-          <UtensilsCrossed className="option-card-placeholder" aria-hidden="true" />
-        )}
-        {previewAvailable && previewArtifactId ? (
-          <span className="tag tag-neutral option-card-ai-label">AI image</span>
-        ) : null}
-        <span className="option-card-selected-mark" aria-hidden="true">
+      <span className="option-card-masthead" aria-hidden="true">
+        <UtensilsCrossed className="option-card-masthead-icon" />
+        <span className="option-card-index">
+          {displayIndex}
+          <small>batch {displayBatch}</small>
+        </span>
+        <span className="option-card-selected-mark">
           <Check />
         </span>
       </span>
@@ -272,32 +248,11 @@ function OptionCard({
           </span>
           <span>{option.difficulty}</span>
         </span>
-        {nutrition ? (
-          <span
-            className="nutrition-strip"
-            role="group"
-            aria-label="Estimated nutrition"
-          >
-            <NutritionItem value={nutrition.caloriesKcal} label="kcal" />
-            <NutritionItem value={`${nutrition.proteinG}g`} label="protein" />
-            <NutritionItem value={`${nutrition.carbohydratesG}g`} label="carbs" />
-            <NutritionItem value={`${nutrition.fatG}g`} label="fat" />
-          </span>
-        ) : (
-          <span className="option-card-honesty text-muted">
-            Nutrition estimate unavailable
-          </span>
-        )}
         <span className="option-card-tags">
           <span className="tag tag-neutral">
             uses {Math.min(option.usedIngredients.length, ingredientCount)} of{" "}
             {ingredientCount}
           </span>
-          {nutrition?.dietTags.map((tag, index) => (
-            <span className="tag tag-neutral" key={`${index}-${tag}`}>
-              {tag}
-            </span>
-          ))}
         </span>
         {option.missingIngredients.length ? (
           <span className="option-card-honesty option-card-missing">
@@ -311,28 +266,7 @@ function OptionCard({
             {option.optionalIngredients.map((ingredient) => ingredient.name).join(", ")}
           </span>
         ) : null}
-        {nutrition?.allergenWarnings.length ? (
-          <span className="option-card-honesty option-card-allergens">
-            <AlertTriangle aria-hidden="true" size={14} />
-            May contain {allergenListFormat.format(nutrition.allergenWarnings)}
-          </span>
-        ) : null}
-        {option.warnings.length ? (
-          <span className="option-card-honesty option-card-warnings">
-            <AlertTriangle aria-hidden="true" size={14} />
-            {option.warnings.join(" ")}
-          </span>
-        ) : null}
       </span>
     </button>
-  );
-}
-
-function NutritionItem({ value, label }: { value: number | string; label: string }) {
-  return (
-    <span>
-      <span className="nutrition-value">{value}</span>
-      <span className="nutrition-label">{label}</span>
-    </span>
   );
 }

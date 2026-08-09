@@ -3,17 +3,11 @@ import {
   type CompleteRecipeView,
   type IngredientAvailability,
   type IngredientView,
-  type NutritionView,
   type PreferenceView,
   type RecipeHeatLevel,
   type RecipeOptionView,
 } from "./cook-session-state";
 import { normalizePantryStaples, PANTRY_STAPLES } from "./pantry-staples";
-
-const allergenListFormat = new Intl.ListFormat("en", {
-  style: "long",
-  type: "conjunction",
-});
 
 export function demoPantryIngredients(
   pantryNames: readonly string[] = PANTRY_STAPLES,
@@ -74,10 +68,6 @@ interface DemoOptionFixture {
   summary: string;
   totalMinutes: number;
   difficulty: "easy" | "medium";
-  caloriesKcal: number;
-  proteinG: number;
-  carbohydratesG: number;
-  fatG: number;
   usedIngredients: string[];
   dietTags: string[];
   missing: string[];
@@ -94,10 +84,6 @@ const optionFixtures: DemoOptionFixture[] = [
       "Silky spinach gravy with soft paneer cubes — a beginner-friendly classic.",
     totalMinutes: 35,
     difficulty: "easy",
-    caloriesKcal: 410,
-    proteinG: 19,
-    carbohydratesG: 14,
-    fatG: 31,
     usedIngredients: [
       "Spinach",
       "Paneer",
@@ -124,10 +110,6 @@ const optionFixtures: DemoOptionFixture[] = [
       "Scrambled paneer with tomato, onion and green chilli. Fast weeknight food.",
     totalMinutes: 20,
     difficulty: "easy",
-    caloriesKcal: 360,
-    proteinG: 21,
-    carbohydratesG: 9,
-    fatG: 27,
     usedIngredients: [
       "Paneer",
       "Tomatoes",
@@ -150,10 +132,6 @@ const optionFixtures: DemoOptionFixture[] = [
     summary: "A light, peppery tomato broth. Drink it or pour it over rice.",
     totalMinutes: 25,
     difficulty: "medium",
-    caloriesKcal: 120,
-    proteinG: 4,
-    carbohydratesG: 18,
-    fatG: 4,
     usedIngredients: [
       "Tomatoes",
       "Green chillies",
@@ -175,10 +153,6 @@ const optionFixtures: DemoOptionFixture[] = [
     summary: "Crisp paneer tossed in a hot-sweet chilli glaze with peppers and onion.",
     totalMinutes: 30,
     difficulty: "medium",
-    caloriesKcal: 450,
-    proteinG: 20,
-    carbohydratesG: 26,
-    fatG: 30,
     usedIngredients: [
       "Paneer",
       "Green chillies",
@@ -201,10 +175,6 @@ const optionFixtures: DemoOptionFixture[] = [
     summary: "Comforting lentils simmered with spinach and tomato tempering.",
     totalMinutes: 30,
     difficulty: "easy",
-    caloriesKcal: 260,
-    proteinG: 13,
-    carbohydratesG: 34,
-    fatG: 8,
     usedIngredients: [
       "Toor dal",
       "Spinach",
@@ -227,10 +197,6 @@ const optionFixtures: DemoOptionFixture[] = [
     summary: "Whole tomatoes baked with a spiced paneer-spinach filling.",
     totalMinutes: 40,
     difficulty: "medium",
-    caloriesKcal: 330,
-    proteinG: 16,
-    carbohydratesG: 15,
-    fatG: 24,
     usedIngredients: [
       "Tomatoes",
       "Paneer",
@@ -253,10 +219,6 @@ const optionFixtures: DemoOptionFixture[] = [
     summary: "Soft scrambled eggs with tomato, green chilli and coriander.",
     totalMinutes: 18,
     difficulty: "easy",
-    caloriesKcal: 310,
-    proteinG: 20,
-    carbohydratesG: 10,
-    fatG: 22,
     usedIngredients: [
       "Eggs",
       "Tomatoes",
@@ -279,10 +241,6 @@ const optionFixtures: DemoOptionFixture[] = [
     summary: "Tender chicken simmered in a bright spinach and tomato gravy.",
     totalMinutes: 42,
     difficulty: "medium",
-    caloriesKcal: 430,
-    proteinG: 38,
-    carbohydratesG: 15,
-    fatG: 25,
     usedIngredients: [
       "Chicken",
       "Spinach",
@@ -308,10 +266,6 @@ const optionFixtures: DemoOptionFixture[] = [
     summary: "A punchy dry chicken fry with black pepper, tomato and green chilli.",
     totalMinutes: 35,
     difficulty: "medium",
-    caloriesKcal: 390,
-    proteinG: 36,
-    carbohydratesG: 12,
-    fatG: 23,
     usedIngredients: [
       "Chicken",
       "Tomatoes",
@@ -414,18 +368,7 @@ export function createDemoOptions({
       reason: "Adds a useful finishing touch.",
       substitution: null,
     })),
-    nutrition: {
-      caloriesKcal: option.caloriesKcal,
-      proteinG: option.proteinG,
-      carbohydratesG: option.carbohydratesG,
-      fatG: option.fatG,
-      dietTags: option.dietTags,
-      allergenWarnings: option.allergens,
-      disclaimer: "Estimated values; not medical advice.",
-    },
-    previewArtifactId: null,
-    previewLabel: "AI-generated image",
-    warnings: [],
+    nutrition: null,
     batchNumber,
   }));
 }
@@ -442,7 +385,6 @@ interface DemoRecipeFixture {
   stepDetails?: Partial<
     Record<number, { doneWhen?: string; heatLevel?: RecipeHeatLevel }>
   >;
-  nutrition?: NutritionView;
   tips: string[];
   substitutions: string[];
 }
@@ -488,15 +430,6 @@ const recipeFixtures: Record<string, DemoRecipeFixture> = {
         doneWhen: "the paneer is hot through but still soft",
         heatLevel: "low",
       },
-    },
-    nutrition: {
-      caloriesKcal: 438,
-      proteinG: 21,
-      carbohydratesG: 17,
-      fatG: 32,
-      dietTags: ["Vegetarian", "Gluten-free"],
-      allergenWarnings: ["dairy"],
-      disclaimer: "Estimated values; not medical advice.",
     },
     tips: [
       "Cold water after blanching keeps the gravy bright green.",
@@ -839,11 +772,9 @@ export function createDemoRecipes(
         substitutions: fixture.substitutions.map((substitution) =>
           contextualizeSubstitution(substitution, ingredients),
         ),
-        nutrition: fixture.nutrition ?? null,
+        nutrition: null,
         nutritionNotice: "Estimated values; not medical advice.",
-        allergenNotice: option.nutrition?.allergenWarnings.length
-          ? `May contain ${allergenListFormat.format(option.nutrition.allergenWarnings)}.`
-          : "Check ingredient labels for allergens.",
+        allergenNotice: "Check ingredient labels for allergens.",
         assumptions: fixture.assumptions,
         warnings: fixture.ingredients
           .filter(
@@ -851,6 +782,8 @@ export function createDemoRecipes(
               resolveAvailability(availability, name, ingredients) === "missing",
           )
           .map(([, name]) => `${name} is not confirmed.`),
+        previewArtifactId: null,
+        previewLabel: null,
       };
       return [[option.id, recipe] as const];
     }),

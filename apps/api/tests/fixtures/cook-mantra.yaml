@@ -1,0 +1,49 @@
+# Deterministic test configuration. Tests must not depend on a developer's active setup.
+version: 1
+providers:
+  ollama:
+    endpoint: http://127.0.0.1:11434
+roles:
+  ingredient_extractor:
+    provider: ollama
+    model: qwen3.5:9b
+    tuning:
+      temperature: 0
+      reasoning_effort: none
+      context_window: 8192
+      timeout_seconds: 300
+    editable_instruction: Prefer short, canonical culinary ingredient names.
+    capabilities: [vision, structured_output]
+  master_chef:
+    provider: ollama
+    model: gpt-oss:20b
+    tuning:
+      temperature: 0
+      reasoning_effort: low
+      context_window: 16384
+      timeout_seconds: 300
+    editable_instruction: Suggest practical, varied dishes with honest missing ingredients.
+    capabilities: [text, structured_output]
+  recipe_writer:
+    provider: ollama
+    model: gpt-oss:20b
+    tuning:
+      temperature: 0
+      reasoning_effort: low
+      max_output_tokens: 12288
+      context_window: 16384
+      timeout_seconds: 300
+    editable_instruction: Write clear steps with sensory doneness cues.
+    capabilities: [text, structured_output]
+  image_generator:
+    enabled: false
+    provider: ollama
+    model: x/z-image-turbo:fp8
+    tuning:
+      width: 1024
+      height: 1024
+      quality: medium
+      output_format: webp
+      timeout_seconds: 600
+    editable_instruction: Create an appetizing cooked-dish illustration.
+    capabilities: [image_output]

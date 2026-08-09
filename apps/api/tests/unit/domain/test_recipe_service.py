@@ -4,12 +4,15 @@ import pytest
 from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
+from domain.images import DishPreview
 from domain.recipe_options import Difficulty, RecipeOption, RecipePreferences
 from domain.recipe_service import (
     RecipeGenerationContext,
     begin_recipe_generation,
     commit_recipe_results,
+    recipe_preview_artifact_ids,
     restore_after_recipe_failure,
+    superseded_recipe_preview_artifact_ids,
 )
 from domain.recipes import (
     CompleteRecipe,
@@ -120,6 +123,51 @@ def assert_invalid_transition(error: AppError) -> None:
     assert error.session_id == "session-1"
 
 
+def test_preview_artifact_sets_are_detached_deduplicated_and_reference_safe(
+    options_session: Session,
+) -> None:
+    shared = complete_recipe("option-1").model_copy(
+        update={"preview": DishPreview(artifact_id="preview-shared")}
+    )
+    removed = complete_recipe(
+        "option-2",
+        name="Onion Soup",
+        cuisine="French",
+    ).model_copy(update={"preview": DishPreview(artifact_id="preview-removed")})
+    previous = options_session.model_copy(
+        update={
+            "stage": SessionStage.RECIPES_READY,
+            "complete_recipes": {
+                "option-1": shared,
+                "option-2": removed,
+                "option-3": complete_recipe(
+                    "option-3",
+                    name="Spinach Rice",
+                ).model_copy(
+                    update={"preview": DishPreview(artifact_id="preview-shared")}
+                ),
+            },
+        }
+    )
+    committed = previous.model_copy(
+        update={
+            "complete_recipes": {
+                "option-1": shared,
+                "option-2": removed.model_copy(
+                    update={"preview": DishPreview(artifact_id="preview-new")}
+                ),
+            }
+        }
+    )
+
+    assert recipe_preview_artifact_ids(previous) == frozenset(
+        {"preview-shared", "preview-removed"}
+    )
+    assert superseded_recipe_preview_artifact_ids(previous, committed) == frozenset(
+        {"preview-removed"}
+    )
+
+
 def test_selection_resolves_detached_server_owned_options_in_request_order(
     options_session: Session,
 ) -> None:
@@ -139,11 +187,11 @@ def test_selection_resolves_detached_server_owned_options_in_request_order(
     assert selected[0] is not options_session.recipe_options[2]
     assert selected[0] is not generating.recipe_options[2]
 
-    selected[0].warnings.append("Changed selected copy.")
-    generating.recipe_options[0].warnings.append("Changed generating copy.")
+    selected[0].used_ingredients.append("Changed selected copy.")
+    generating.recipe_options[0].used_ingredients.append("Changed generating copy.")
 
-    assert options_session.recipe_options[2].warnings == []
-    assert options_session.recipe_options[0].warnings == []
+    assert options_session.recipe_options[2].used_ingredients == ["Tomato"]
+    assert options_session.recipe_options[0].used_ingredients == ["Tomato"]
 
 
 def test_begin_retains_prior_results_options_and_preferences(
@@ -575,13 +623,13 @@ def test_commit_does_not_mutate_or_alias_inputs(
     completed = commit_recipe_results(generating, successes, failures, context)
     successes.clear()
     completed.complete_recipes.clear()
-    completed.recipe_options[0].warnings.append("Changed completed copy.")
+    completed.recipe_options[0].used_ingredients.append("Changed completed copy.")
 
     assert generating == generating_before
     assert list(completed.recipe_failures) == []
     assert completed.complete_recipes == {}
     assert generating.complete_recipes == {}
-    assert generating.recipe_options[0].warnings == []
+    assert generating.recipe_options[0].used_ingredients == ["Tomato"]
     assert recipe.option_id == "option-1"
 
 
@@ -967,7 +1015,7 @@ def test_restore_reconstructs_the_exact_unusual_ready_snapshot(
         }
     )
     generating, _, _, context = begin_recipe_generation(prior, ["option-3"])
-    generating.recipe_options[0].warnings.append("Mutated after begin.")
+    generating.recipe_options[0].used_ingredients.append("Mutated after begin.")
     generating.preferences.preferred_cuisines.append("Mutated after begin")
     generating.complete_recipes.clear()
     generating.recipe_failures["option-3"] = recipe_failure("option-3")

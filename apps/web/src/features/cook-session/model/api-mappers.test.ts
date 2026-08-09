@@ -239,7 +239,7 @@ describe("API view mappers", () => {
     expect(preferences.dietary_preferences).toEqual(["non-vegetarian"]);
   });
 
-  it("maps recipe option and complete recipe fields without losing honesty data", () => {
+  it("maps previews only from completed recipes", () => {
     const option: RecipeOptionResponse = {
       id: "option-1",
       name: "Tomato Pasta",
@@ -261,11 +261,6 @@ describe("API view mappers", () => {
         allergen_warnings: ["wheat"],
         disclaimer: "Estimated values; not medical advice.",
       },
-      preview: {
-        artifact_id: "artifact-1",
-        label: "AI-generated image",
-      },
-      warnings: ["Image may vary."],
     };
     const recipe: CompleteRecipeResponse = {
       option_id: "option-1",
@@ -310,13 +305,26 @@ describe("API view mappers", () => {
       allergen_notice: "Check ingredient labels for allergens.",
       assumptions: [],
       warnings: ["Pasta must be purchased."],
+      preview: {
+        artifact_id: "artifact-1",
+        label: "AI-generated image",
+      },
     };
 
-    expect(optionFromApi(option, 2)).toMatchObject({
+    expect(optionFromApi(option, 2)).toEqual({
+      id: "option-1",
+      name: "Tomato Pasta",
+      summary: "A quick pasta.",
+      cuisine: "Italian",
       totalMinutes: 30,
-      previewArtifactId: "artifact-1",
+      difficulty: "easy",
+      usedIngredients: ["Tomato"],
+      missingIngredients: [
+        { name: "Pasta", reason: "Base", substitution: "Use noodles" },
+      ],
+      optionalIngredients: [],
       batchNumber: 2,
-      nutrition: { caloriesKcal: 520, allergenWarnings: ["wheat"] },
+      nutrition: null,
     });
     expect(recipeFromApi(recipe)).toMatchObject({
       optionId: "option-1",
@@ -344,16 +352,50 @@ describe("API view mappers", () => {
           heatLevel: undefined,
         },
       ],
-      nutrition: {
-        caloriesKcal: 545,
-        proteinG: 22,
-        carbohydratesG: 82,
-        fatG: 16,
-        dietTags: ["vegetarian"],
-        allergenWarnings: ["wheat"],
-        disclaimer: "Estimated values; not medical advice.",
-      },
+      nutrition: null,
+      previewArtifactId: "artifact-1",
+      previewLabel: "AI-generated image",
     });
-    expect(recipeFromApi({ ...recipe, nutrition: undefined }).nutrition).toBeNull();
+    expect(
+      recipeFromApi({ ...recipe, nutrition: undefined, preview: null }),
+    ).toMatchObject({
+      nutrition: null,
+      previewArtifactId: null,
+      previewLabel: null,
+    });
+  });
+
+  it("drops stale option preview data at the API-to-view boundary", () => {
+    const staleOption = {
+      id: "option-legacy",
+      name: "Legacy Curry",
+      summary: "Old server data.",
+      cuisine: "Indian",
+      total_minutes: 25,
+      difficulty: "easy",
+      used_ingredients: ["Tomato"],
+      missing_ingredients: [],
+      optional_ingredients: [],
+      nutrition: null,
+      preview: {
+        artifact_id: "process-private-preview",
+        label: "AI-generated image",
+      },
+      warnings: ["Dish preview unavailable."],
+    } as unknown as RecipeOptionResponse;
+
+    expect(optionFromApi(staleOption, 1)).toEqual({
+      id: "option-legacy",
+      name: "Legacy Curry",
+      summary: "Old server data.",
+      cuisine: "Indian",
+      totalMinutes: 25,
+      difficulty: "easy",
+      usedIngredients: ["Tomato"],
+      missingIngredients: [],
+      optionalIngredients: [],
+      nutrition: null,
+      batchNumber: 1,
+    });
   });
 });

@@ -7,7 +7,6 @@ import type {
   CompleteRecipeView,
   IngredientView,
   IngredientSource,
-  NutritionView,
   RecipeIngredientView,
   RecipeStepView,
 } from "../model/cook-session-state";
@@ -16,7 +15,6 @@ export interface RecipeDetailProps {
   recipe: CompleteRecipeView;
   confirmedIngredients?: readonly IngredientView[];
   ingredientSources?: Readonly<Record<string, IngredientSource>> | null;
-  nutrition?: NutritionView | null;
   completedSteps?: readonly number[];
   onToggleStep?: (stepNumber: number) => void;
   initialIngredientsExpanded?: boolean;
@@ -30,7 +28,6 @@ export function RecipeDetail({
   recipe,
   confirmedIngredients = [],
   ingredientSources = null,
-  nutrition = recipe.nutrition,
   completedSteps = [],
   onToggleStep,
   initialIngredientsExpanded = false,
@@ -142,20 +139,8 @@ export function RecipeDetail({
             })}
           </div>
 
-          {nutrition ? (
-            <div className="recipe-nutrition">
-              <h3 className="panel-heading">Per serving — estimate</h3>
-              <div className="nutrition-strip">
-                <NutritionItem value={nutrition.caloriesKcal} label="kcal" />
-                <NutritionItem value={`${nutrition.proteinG}g`} label="protein" />
-                <NutritionItem value={`${nutrition.carbohydratesG}g`} label="carbs" />
-                <NutritionItem value={`${nutrition.fatG}g`} label="fat" />
-              </div>
-            </div>
-          ) : null}
           <div className="recipe-notices">
             <p className="nutrition-warning">{recipe.allergenNotice}</p>
-            <p className="nutrition-disclaimer">{recipe.nutritionNotice}</p>
           </div>
         </aside>
 
@@ -255,15 +240,6 @@ function MethodStepContent({
         ) : null}
       </span>
     </>
-  );
-}
-
-function NutritionItem({ value, label }: { value: number | string; label: string }) {
-  return (
-    <span>
-      <span className="nutrition-value">{value}</span>
-      <span className="nutrition-label">{label}</span>
-    </span>
   );
 }
 

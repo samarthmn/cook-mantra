@@ -1,10 +1,13 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RecipeOptionView } from "../model/cook-session-state";
 import { OptionsScreen } from "./OptionsScreen";
 
-const option: RecipeOptionView = {
+const option = {
   id: "seasonal-dal",
   name: "Seasonal Dal",
   summary: "A simple lentil dish.",
@@ -15,11 +18,11 @@ const option: RecipeOptionView = {
   missingIngredients: [],
   optionalIngredients: [],
   nutrition: null,
-  previewArtifactId: null,
-  previewLabel: null,
-  warnings: ["The model could not verify the exact lentil variety."],
+  // Deliberately retained as stale runtime data until the production mapper is
+  // changed. The screen must ignore fields from the retired option-preview shape.
+  warnings: [],
   batchNumber: 1,
-};
+} as unknown as RecipeOptionView;
 
 describe("OptionsScreen", () => {
   afterEach(() => cleanup());
@@ -32,7 +35,6 @@ describe("OptionsScreen", () => {
         selectedOptionIds={[]}
         ingredientCount={2}
         ideasExhausted={false}
-        previewUrl={(artifactId) => artifactId}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={onEditIngredients}
@@ -55,7 +57,6 @@ describe("OptionsScreen", () => {
         selectedOptionIds={[]}
         ingredientCount={11}
         ideasExhausted={false}
-        previewUrl={(artifactId) => artifactId}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={vi.fn()}
@@ -74,7 +75,6 @@ describe("OptionsScreen", () => {
         selectedOptionIds={[]}
         ingredientCount={1}
         ideasExhausted={false}
-        previewUrl={(artifactId) => artifactId}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={vi.fn()}
@@ -86,27 +86,7 @@ describe("OptionsScreen", () => {
     expect(screen.getByRole("button", { name: /Seasonal Dal/ })).toBeVisible();
   });
 
-  it("keeps backend warnings visible on the relevant option", () => {
-    render(
-      <OptionsScreen
-        options={[option]}
-        selectedOptionIds={[]}
-        ingredientCount={1}
-        ideasExhausted={false}
-        previewUrl={(artifactId) => artifactId}
-        onToggleOption={vi.fn()}
-        onMoreIdeas={vi.fn()}
-        onEditIngredients={vi.fn()}
-        onCreateRecipes={vi.fn()}
-      />,
-    );
-
-    expect(
-      screen.getByText("The model could not verify the exact lentil variety."),
-    ).toBeVisible();
-  });
-
-  it("hedges model-derived allergen warnings", () => {
+  it("does not render deprecated nutrition-derived allergen warnings", () => {
     render(
       <OptionsScreen
         options={[
@@ -126,7 +106,6 @@ describe("OptionsScreen", () => {
         selectedOptionIds={[]}
         ingredientCount={1}
         ideasExhausted={false}
-        previewUrl={(artifactId) => artifactId}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={vi.fn()}
@@ -134,18 +113,17 @@ describe("OptionsScreen", () => {
       />,
     );
 
-    expect(screen.getByText("May contain dairy and soy")).toBeVisible();
+    expect(screen.queryByText("May contain dairy and soy")).toBeNull();
     expect(screen.queryByText(/Contains dairy/)).toBeNull();
   });
 
-  it("uses the photo disclaimer and does not label a placeholder as an AI image", () => {
+  it("explains that previews belong to completed recipes", () => {
     render(
       <OptionsScreen
         options={[option]}
         selectedOptionIds={[]}
         ingredientCount={1}
         ideasExhausted={false}
-        previewUrl={(artifactId) => artifactId}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={vi.fn()}
@@ -155,20 +133,30 @@ describe("OptionsScreen", () => {
 
     expect(
       screen.getByText(
-        "Pick one or more. Every photo is AI-generated — your dish may look different. Nutrition is an estimate, not medical advice.",
+        "Pick one or more. After a recipe is written, Cook Mantra may create an AI image of the finished dish.",
       ),
     ).toBeVisible();
     expect(screen.queryByText("AI image")).toBeNull();
   });
 
-  it("labels a real generated preview as an AI image", () => {
+  it("ignores stale option previews and image-only warnings", () => {
+    const staleOption = {
+      ...option,
+      previewArtifactId: "process-private-preview",
+      previewLabel: "AI-generated image",
+      warnings: ["Dish preview unavailable."],
+    } as RecipeOptionView;
+    const staleCompatibilityProps = {
+      previewUrl: (artifactId: string) => `/artifacts/${artifactId}`,
+    };
+
     render(
       <OptionsScreen
-        options={[{ ...option, previewArtifactId: "artifact-1" }]}
+        {...staleCompatibilityProps}
+        options={[staleOption]}
         selectedOptionIds={[]}
         ingredientCount={1}
         ideasExhausted={false}
-        previewUrl={(artifactId) => `/artifacts/${artifactId}`}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={vi.fn()}
@@ -176,20 +164,19 @@ describe("OptionsScreen", () => {
       />,
     );
 
-    expect(screen.getByText("AI image")).toBeVisible();
-    expect(
-      screen.getByRole("img", { name: "Seasonal Dal, AI-generated image" }),
-    ).toBeVisible();
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.queryByText("AI image")).toBeNull();
+    expect(screen.queryByText("Dish preview unavailable.")).toBeNull();
+    expect(document.querySelector(".option-card-media")).toBeNull();
   });
 
-  it("replaces a failed generated preview and removes its AI image label", () => {
+  it("renders an indexed text-first folio without an image surface", () => {
     render(
       <OptionsScreen
-        options={[{ ...option, previewArtifactId: "artifact-1" }]}
+        options={[option]}
         selectedOptionIds={[]}
         ingredientCount={1}
         ideasExhausted={false}
-        previewUrl={(artifactId) => `/artifacts/${artifactId}`}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={vi.fn()}
@@ -197,18 +184,20 @@ describe("OptionsScreen", () => {
       />,
     );
 
-    fireEvent.error(
-      screen.getByRole("img", {
-        name: "Seasonal Dal, AI-generated image",
-      }),
+    const index = document.querySelector(".option-card-index");
+    expect(index).toHaveTextContent("01");
+    expect(index).toHaveTextContent("batch 01");
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.queryByText("AI image")).toBeNull();
+  });
+
+  it("does not depend on the Next.js image optimizer", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/features/cook-session/components/OptionsScreen.tsx"),
+      "utf8",
     );
 
-    expect(
-      screen.queryByRole("img", {
-        name: "Seasonal Dal, AI-generated image",
-      }),
-    ).toBeNull();
-    expect(screen.queryByText("AI image")).toBeNull();
+    expect(source).not.toContain("next/image");
   });
 
   it("disables more ideas with an explanation when the API stage cannot accept it", () => {
@@ -219,7 +208,6 @@ describe("OptionsScreen", () => {
         ingredientCount={1}
         ideasExhausted={false}
         moreIdeasUnavailableReason="Edit your ingredients to start a fresh photo-backed idea session."
-        previewUrl={(artifactId) => artifactId}
         onToggleOption={vi.fn()}
         onMoreIdeas={vi.fn()}
         onEditIngredients={vi.fn()}

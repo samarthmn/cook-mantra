@@ -12,6 +12,7 @@ from repositories.session_store import SessionStore
 from services.artifacts import ArtifactStore
 from services.concurrency import ModelCallLimiter
 from services.dish_previews import DishPreviewService
+from services.model_runtime import ModelRuntimeReadinessService
 from services.ollama_health import OllamaHealthService
 from services.uploads import ImageUploadValidator
 
@@ -76,3 +77,26 @@ def get_model_call_limiter(request: Request) -> ModelCallLimiter:
 def get_ollama_health(request: Request) -> OllamaHealthService:
     """Return the Ollama readiness service."""
     return request.app.state.ollama_health
+
+
+def get_model_runtime_readiness(request: Request) -> ModelRuntimeReadinessService:
+    """Return the process-cached provider-neutral runtime readiness service."""
+    return request.app.state.model_runtime_readiness
+
+
+async def require_ingredient_extractor_runtime(request: Request) -> None:
+    from domain.model_runtime import AgentRole
+
+    await get_model_runtime_readiness(request).require(AgentRole.INGREDIENT_EXTRACTOR)
+
+
+async def require_master_chef_runtime(request: Request) -> None:
+    from domain.model_runtime import AgentRole
+
+    await get_model_runtime_readiness(request).require(AgentRole.MASTER_CHEF)
+
+
+async def require_recipe_writer_runtime(request: Request) -> None:
+    from domain.model_runtime import AgentRole
+
+    await get_model_runtime_readiness(request).require(AgentRole.RECIPE_WRITER)

@@ -1,0 +1,53 @@
+# Redacted example. Secret values remain in the environment; only variable names go here.
+version: 1
+providers:
+  ollama:
+    endpoint: http://127.0.0.1:11434
+  openrouter:
+    endpoint: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+  codex:
+    command: [codex, app-server]
+    # Keep false unless you accept the experimental boundary described in README.
+    allow_unverified_tool_boundary: false
+roles:
+  ingredient_extractor:
+    provider: ollama
+    model: qwen3.5:9b
+    tuning:
+      temperature: 0
+      reasoning_effort: none
+      context_window: 8192
+    editable_instruction: Prefer short, canonical culinary ingredient names.
+    capabilities: [vision, structured_output]
+  master_chef:
+    provider: openrouter
+    model: provider/model-name
+    tuning:
+      temperature: 0
+      reasoning_effort: low
+      max_output_tokens: 8192
+    editable_instruction: Suggest practical, varied dishes.
+    capabilities: [text, structured_output]
+  recipe_writer:
+    provider: codex
+    model: gpt-5.6-sol
+    tuning:
+      temperature: 0
+      reasoning_effort: low
+      max_output_tokens: 12288
+    editable_instruction: Write clear steps with sensory doneness cues.
+    capabilities: [text, structured_output]
+  image_generator:
+    enabled: false
+    provider: ollama
+    # OpenRouter image roles also require one exact discovered endpoint tag:
+    # provider_tag: provider-endpoint-tag
+    model: image-model-name
+    tuning:
+      width: 1024
+      height: 1024
+      quality: medium
+      output_format: webp
+    editable_instruction: Create an appetizing cooked-dish illustration.
+    capabilities: [image_output]

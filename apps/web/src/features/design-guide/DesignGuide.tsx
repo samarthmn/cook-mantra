@@ -73,6 +73,7 @@ const layoutRules = [
   "Use a clamped 16–48px page gutter and keep app content within 1160px.",
   "Keep the primary action in the fixed bottom bar on Confirm and Choose screens.",
   "Let the four-step progress row and recipe tabs scroll horizontally on narrow screens.",
+  "Keep completed-dish previews in their own bordered block so recipe actions can wrap independently.",
   "Keep every touch target at least 44px; use 52px rows for lists and method steps.",
   "Use 2px section rules, 1px row rules, square corners, and selection-only elevation.",
   "Reserve fluid bottom clearance so a wrapped fixed action bar never covers content.",
@@ -88,6 +89,7 @@ const accessibilityRules = [
   "Honor reduced-motion preferences and keep motion limited to progress, disclosure, and theme changes.",
   "Keep fixed actions above the mobile safe area and confirm that wrapped bars do not cover content.",
   "On a screen change, scroll to the top and move focus to the new page heading.",
+  "Label every generated preview as AI image and describe the dish in its image alternative text.",
 ];
 
 function SwatchGroup({ title, swatches }: { title: string; swatches: Swatch[] }) {
@@ -251,13 +253,11 @@ export function DesignGuide() {
           </article>
 
           <article className="option-card">
-            <div className="option-card-media">
-              <Utensils
-                aria-hidden="true"
-                className="option-card-placeholder"
-                strokeWidth={1.5}
-              />
-              <span className="tag tag-neutral option-card-ai-label">AI image</span>
+            <div className="option-card-masthead" aria-hidden="true">
+              <Utensils className="option-card-masthead-icon" />
+              <span className="option-card-index">
+                01<small>batch 01</small>
+              </span>
             </div>
             <div className="option-card-content">
               <div className="option-card-heading">
@@ -275,37 +275,12 @@ export function DesignGuide() {
                 </span>
                 <span>Easy</span>
               </div>
-              <div
-                aria-label="Nutrition estimate"
-                className="nutrition-strip"
-                role="group"
-              >
-                <div>
-                  <div className="nutrition-value">410</div>
-                  <div className="nutrition-label">kcal</div>
-                </div>
-                <div>
-                  <div className="nutrition-value">19g</div>
-                  <div className="nutrition-label">protein</div>
-                </div>
-                <div>
-                  <div className="nutrition-value">14g</div>
-                  <div className="nutrition-label">carbs</div>
-                </div>
-                <div>
-                  <div className="nutrition-value">31g</div>
-                  <div className="nutrition-label">fat</div>
-                </div>
-              </div>
               <div className="option-card-tags">
                 <span className="tag tag-neutral">uses 8 of 11</span>
                 <span className="tag tag-neutral">Vegetarian</span>
               </div>
               <div className="option-card-honesty option-card-missing">
                 <strong>Missing:</strong> cream
-              </div>
-              <div className="nutrition-disclaimer">
-                Estimates only — not medical advice.
               </div>
             </div>
           </article>

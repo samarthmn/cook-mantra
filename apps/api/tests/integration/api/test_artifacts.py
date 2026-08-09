@@ -4,7 +4,6 @@ from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 
-import httpx
 import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
@@ -13,14 +12,18 @@ from PIL import Image
 from api.app import create_app
 from core.config import Settings
 from domain.artifacts import Artifact, ArtifactKind
-from domain.images import DishPreview, GeneratedImage, ImageGenerationRequest
+from domain.images import DishPreview, ImageGenerationRequest, VerifiedRaster
+from tests.runtime_support import (
+    INSTALLED_REQUIRED_MODELS,
+    image_enabled_runtime_snapshot,
+)
 
 
 class ReadyOllama:
     async def inspect(self) -> dict[str, object]:
         return {
             "reachable": True,
-            "available_models": [],
+            "available_models": INSTALLED_REQUIRED_MODELS,
             "missing": [],
         }
 
@@ -43,7 +46,7 @@ class CallerOwnedImageGenerator:
         self,
         request: ImageGenerationRequest,
         progress: Callable[[int], Awaitable[None]],
-    ) -> GeneratedImage:
+    ) -> VerifiedRaster:
         raise AssertionError("Application startup must not generate an image.")
 
     async def aclose(self) -> None:
@@ -61,29 +64,20 @@ class FailingStartupCleanup:
         self.shutdown_called = True
 
 
-class PausingCloseClient:
-    def __init__(self, delegate: httpx.AsyncClient) -> None:
-        self._delegate = delegate
+class PausingCodexOwner:
+    def __init__(self) -> None:
         self.close_started = asyncio.Event()
         self.allow_close = asyncio.Event()
-
-    @property
-    def is_closed(self) -> bool:
-        return self._delegate.is_closed
+        self.closed = False
 
     async def aclose(self) -> None:
         self.close_started.set()
         await self.allow_close.wait()
-        await self._delegate.aclose()
+        self.closed = True
 
 
 def settings_for(artifact_root: Path) -> Settings:
-    return Settings(
-        _env_file=None,
-        artifact_root=artifact_root,
-        beast_base_url="http://beast.test:4900",
-        beast_api_key="test-key",
-    )
+    return Settings(_env_file=None, artifact_root=artifact_root)
 
 
 def png_bytes() -> bytes:
@@ -97,6 +91,7 @@ def client(project_tmp_path: Path) -> Iterator[TestClient]:
     app = create_app(
         settings=settings_for(project_tmp_path / "artifact-route"),
         ollama_health=ReadyOllama(),
+        runtime_snapshot=image_enabled_runtime_snapshot(),
         dish_previews=UnusedDishPreviewService(),
     )
     with TestClient(app, raise_server_exceptions=False) as test_client:
@@ -389,22 +384,6 @@ def test_artifact_route_openapi_documents_binary_media_and_public_errors(
     }
 
 
-def test_default_image_generator_is_closed_by_application_lifespan(
-    project_tmp_path: Path,
-) -> None:
-    app = create_app(
-        settings=settings_for(project_tmp_path / "default-image-lifecycle"),
-        ollama_health=ReadyOllama(),
-    )
-    generator = app.state.image_generator
-    image_client = generator._client
-
-    with TestClient(app):
-        assert image_client.is_closed is False
-
-    assert image_client.is_closed is True
-
-
 @pytest.mark.asyncio
 async def test_caller_injected_image_generator_remains_caller_owned(
     project_tmp_path: Path,
@@ -422,53 +401,6 @@ async def test_caller_injected_image_generator_remains_caller_owned(
     assert image_generator.close_calls == 0
 
 
-@pytest.mark.asyncio
-async def test_caller_injected_image_client_remains_caller_owned(
-    project_tmp_path: Path,
-) -> None:
-    requests: list[httpx.Request] = []
-
-    async def reject_network(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        raise AssertionError(
-            "Application construction and startup must not use Ollama."
-        )
-
-    image_client = httpx.AsyncClient(transport=httpx.MockTransport(reject_network))
-    settings = Settings(
-        _env_file=None,
-        artifact_root=project_tmp_path / "injected-image-client",
-        beast_base_url="http://beast.test:4900",
-        beast_api_key="test-key",
-    )
-    app = create_app(
-        settings=settings,
-        ollama_health=ReadyOllama(),
-        image_client=image_client,
-    )
-
-    try:
-        async with app.router.lifespan_context(app):
-            assert app.state.settings is settings
-            assert app.state.dish_preview_service._settings is settings
-            assert app.state.image_generator._model == settings.beast_image_model
-            assert app.state.image_generator._base_url == "http://beast.test:4900"
-            assert app.state.image_generator._timeout_seconds == (
-                settings.image_timeout_seconds
-            )
-            assert app.state.image_generator._poll_interval_seconds == (
-                settings.beast_poll_interval_seconds
-            )
-            assert app.state.image_generator._headers == {
-                "Authorization": "Bearer test-key"
-            }
-
-        assert image_client.is_closed is False
-        assert requests == []
-    finally:
-        await image_client.aclose()
-
-
 def test_startup_failure_releases_every_application_owned_resource(
     project_tmp_path: Path,
 ) -> None:
@@ -476,20 +408,17 @@ def test_startup_failure_releases_every_application_owned_resource(
         settings=Settings(
             _env_file=None,
             artifact_root=project_tmp_path / "failed-startup",
-            beast_base_url="http://beast.test:4900",
-            beast_api_key="test-key",
         ),
         ollama_health=ReadyOllama(),
+        runtime_snapshot=image_enabled_runtime_snapshot(),
     )
     cleanup = FailingStartupCleanup()
     app.state.cleanup_supervisor = cleanup
-    generator = app.state.image_generator
 
     with pytest.raises(RuntimeError, match="cleanup startup failed"), TestClient(app):
         pass
 
     assert cleanup.shutdown_called is True
-    assert generator._client.is_closed is True
     assert app.state.job_runner._closed is True
     assert app.state.artifact_store._root_fd is None
 
@@ -501,17 +430,16 @@ async def test_shutdown_drains_owned_resources_after_repeated_cancellation(
     app = create_app(
         settings=settings_for(project_tmp_path / "cancelled-shutdown"),
         ollama_health=ReadyOllama(),
+        runtime_snapshot=image_enabled_runtime_snapshot(),
     )
-    generator = app.state.image_generator
-    delegate_client = generator._client
-    pausing_client = PausingCloseClient(delegate_client)
-    generator._client = pausing_client
+    pausing_owner = PausingCodexOwner()
+    app.state.codex_app_server_client = pausing_owner
     lifespan_context = app.router.lifespan_context(app)
     await lifespan_context.__aenter__()
     shutdown_task = asyncio.create_task(lifespan_context.__aexit__(None, None, None))
 
     try:
-        await asyncio.wait_for(pausing_client.close_started.wait(), timeout=1)
+        await asyncio.wait_for(pausing_owner.close_started.wait(), timeout=1)
         shutdown_task.cancel()
         await asyncio.sleep(0)
         assert shutdown_task.done() is False
@@ -520,18 +448,16 @@ async def test_shutdown_drains_owned_resources_after_repeated_cancellation(
         await asyncio.sleep(0)
         assert shutdown_task.done() is False
 
-        pausing_client.allow_close.set()
+        pausing_owner.allow_close.set()
         with pytest.raises(asyncio.CancelledError):
             await shutdown_task
     finally:
-        pausing_client.allow_close.set()
+        pausing_owner.allow_close.set()
         if not shutdown_task.done():
             shutdown_task.cancel()
         await asyncio.gather(shutdown_task, return_exceptions=True)
-        if not delegate_client.is_closed:
-            await delegate_client.aclose()
 
-    assert pausing_client.is_closed is True
+    assert pausing_owner.closed is True
     assert app.state.cleanup_supervisor._task is None
     assert app.state.job_runner._closed is True
     assert app.state.artifact_store._root_fd is None

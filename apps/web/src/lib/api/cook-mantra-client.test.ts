@@ -6,6 +6,7 @@ import type {
   RecipePreferences,
   RecipeSelectionRequest,
   SessionResponse,
+  RuntimeStatusResponse,
 } from "@/types/api";
 import {
   ApiError,
@@ -84,6 +85,28 @@ function requestBody(init: RequestInit | undefined): unknown {
   return JSON.parse(String(init?.body));
 }
 
+function readyRole(
+  role: keyof RuntimeStatusResponse["model_runtime"]["roles"],
+  provider: "ollama" | "openrouter" | "codex",
+): RuntimeStatusResponse["model_runtime"]["roles"][typeof role] {
+  const requiredCapabilities =
+    role === "ingredient_extractor"
+      ? (["structured_output", "vision"] as const)
+      : role === "image_generator"
+        ? (["image_output"] as const)
+        : (["structured_output", "text"] as const);
+  return {
+    role,
+    provider,
+    model: `${provider}/model`,
+    enabled: true,
+    ready: true,
+    required_capabilities: [...requiredCapabilities],
+    available_capabilities: [...requiredCapabilities],
+    error: null,
+  };
+}
+
 describe("CookMantraClient", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -126,7 +149,10 @@ describe("CookMantraClient", () => {
     const controller = new AbortController();
 
     await expect(
-      client.createSession(image, { signal: controller.signal }),
+      client.createSession(image, {
+        runtimeRevision: "runtime-revision-123",
+        signal: controller.signal,
+      }),
     ).resolves.toEqual({ session_id: "session-123", job_id: "job-123" });
 
     const [url, init] = fetchImpl.mock.calls[0] ?? [];
@@ -139,6 +165,41 @@ describe("CookMantraClient", () => {
     expect(init?.body).toBeInstanceOf(FormData);
     expect((init?.body as FormData).get("image")).toBe(image);
     expect(new Headers(init?.headers).has("Content-Type")).toBe(false);
+    expect(new Headers(init?.headers).get("X-Cook-Mantra-Runtime-Revision")).toBe(
+      "runtime-revision-123",
+    );
+  });
+
+  it("reads the runtime status through a no-store request", async () => {
+    const runtimeStatus: RuntimeStatusResponse = {
+      status: "ok",
+      runtime_revision: "runtime-revision-12345678901234567890",
+      model_runtime: {
+        ready: true,
+        roles: {
+          ingredient_extractor: readyRole("ingredient_extractor", "ollama"),
+          master_chef: readyRole("master_chef", "ollama"),
+          recipe_writer: readyRole("recipe_writer", "openrouter"),
+          image_generator: readyRole("image_generator", "openrouter"),
+        },
+      },
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(runtimeStatus));
+    const client = new CookMantraClient({ fetch: fetchImpl });
+    const controller = new AbortController();
+
+    await expect(
+      client.getRuntimeStatus({ signal: controller.signal }),
+    ).resolves.toEqual(runtimeStatus);
+
+    const [url, init] = fetchImpl.mock.calls[0] ?? [];
+    expect(url).toBe(`${DEFAULT_API_BASE_URL}/runtime-status`);
+    expect(init?.method).toBe("GET");
+    expect(init?.cache).toBe("no-store");
+    expect(new Headers(init?.headers).get("Accept")).toBe("application/json");
+    expect(init?.body).toBeUndefined();
   });
 
   it("gets a session and a background job by encoded identifier", async () => {
@@ -304,6 +365,40 @@ describe("CookMantraClient", () => {
       sessionId: "session-123",
       jobId: null,
     });
+  });
+
+  it.each([
+    "runtime_status_stale",
+    "model_configuration_invalid",
+    "provider_unavailable",
+    "provider_authentication_failed",
+    "provider_rate_limited",
+    "provider_payment_required",
+    "model_capability_missing",
+    "provider_protocol_error",
+  ] as const)("preserves the %s API error code", async (code) => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse(
+        {
+          error: {
+            code,
+            message: "Safe runtime error.",
+            details: {},
+            retryable: false,
+            request_id: "request-123",
+            session_id: null,
+            job_id: null,
+          },
+        },
+        409,
+      ),
+    );
+    const client = new CookMantraClient({ fetch: fetchImpl });
+
+    const error = await client.getRuntimeStatus().catch((value) => value);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ code, message: "Safe runtime error." });
   });
 
   it("normalizes a malformed non-success response without exposing response text", async () => {

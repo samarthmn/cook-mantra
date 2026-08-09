@@ -7,8 +7,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from domain.images import DishPreview
-
 NUTRITION_DISCLAIMER = "Estimated values; not medical advice."
 _SPICE_LEVELS = frozenset({"mild", "medium", "hot", "extra-hot"})
 
@@ -326,9 +324,15 @@ class RecipeOptionBatch(BaseModel):
 
 
 class RecipeOption(RecipeOptionDraft):
-    """A stored recipe suggestion with optional enrichments."""
+    """A stored recipe suggestion with deprecated nullable nutrition."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(default_factory=lambda: str(uuid4()))
     nutrition: NutritionEstimate | None = None
-    preview: DishPreview | None = None
-    warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("nutrition", mode="before")
+    @classmethod
+    def keep_nutrition_dormant(cls, _value: object) -> None:
+        """Retain the response field while disabling nutrition computation."""
+        return None

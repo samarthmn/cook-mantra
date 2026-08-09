@@ -3,46 +3,116 @@ from dataclasses import FrozenInstanceError
 import pytest
 from pydantic import ValidationError
 
-from core.config import Settings
-from domain.images import DishPreview, GeneratedImage, ImageGenerationRequest
-from domain.recipe_options import Difficulty, RecipeOption
-from schemas.recipe_options import RecipeOptionResponse
+from domain.images import DishPreview, ImageGenerationRequest, VerifiedRaster
+from domain.model_runtime import (
+    ImageOutputFormat,
+    ImageQuality,
+    ImageTuning,
+    ProviderImageOutput,
+)
 
 
-def test_image_settings_have_local_defaults() -> None:
-    settings = Settings(_env_file=None)
+def test_image_tuning_resolves_a_code_owned_timeout_default() -> None:
+    tuning = ImageTuning()
 
-    assert settings.image_width == 768
-    assert settings.image_height == 768
-    assert settings.image_steps is None
-    assert settings.image_timeout_seconds == 600.0
+    assert tuning.width == 1024
+    assert tuning.height == 1024
+    assert tuning.quality is ImageQuality.MEDIUM
+    assert tuning.output_format is ImageOutputFormat.WEBP
+    assert tuning.timeout_seconds == 600.0
 
 
-@pytest.mark.parametrize("field_name", ["image_width", "image_height"])
-@pytest.mark.parametrize("value", [255, 2_049])
-def test_image_settings_reject_dimensions_outside_supported_range(
-    field_name: str,
-    value: int,
+def test_generation_request_uses_one_complete_image_tuning_value() -> None:
+    tuning = ImageTuning(
+        width=512,
+        height=640,
+        quality=ImageQuality.HIGH,
+        output_format=ImageOutputFormat.PNG,
+        timeout_seconds=45,
+    )
+
+    request = ImageGenerationRequest(prompt="Tomato masala", tuning=tuning)
+
+    assert request.prompt == "Tomato masala"
+    assert request.tuning == tuning
+
+
+def test_generation_request_hides_prompt_from_diagnostics() -> None:
+    private_prompt = "private-dish-prompt-canary"
+
+    request = ImageGenerationRequest(prompt=private_prompt, tuning=ImageTuning())
+
+    assert request.prompt == private_prompt
+    assert private_prompt not in repr(request)
+
+
+@pytest.mark.parametrize(
+    "legacy_field",
+    [
+        {"width": 512},
+        {"height": 512},
+        {"steps": 8},
+    ],
+)
+def test_generation_request_rejects_legacy_provider_specific_fields(
+    legacy_field: dict[str, int],
 ) -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, **{field_name: value})
+        ImageGenerationRequest(
+            prompt="Tomato masala",
+            tuning=ImageTuning(),
+            **legacy_field,
+        )
 
 
-@pytest.mark.parametrize("value", [0, 101])
-def test_image_settings_reject_steps_outside_supported_range(value: int) -> None:
+@pytest.mark.parametrize("prompt", ["", "x" * 2_001])
+def test_generation_request_rejects_invalid_prompt(prompt: str) -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, image_steps=value)
+        ImageGenerationRequest(prompt=prompt, tuning=ImageTuning())
 
 
-def test_image_settings_reject_non_positive_timeout() -> None:
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, image_timeout_seconds=0)
+def test_provider_image_output_hides_sensitive_base64_from_diagnostics() -> None:
+    secret_base64 = "cHJpdmF0ZS1pbWFnZS1ieXRlcw=="
+
+    output = ProviderImageOutput(
+        base64_data=secret_base64,
+        media_type="image/png",
+    )
+
+    assert output.base64_data == secret_base64
+    assert secret_base64 not in repr(output)
+
+
+def test_provider_image_output_is_immutable() -> None:
+    output = ProviderImageOutput(base64_data="AA==")
+
+    with pytest.raises(FrozenInstanceError):
+        output.media_type = "image/png"  # type: ignore[misc]
+
+
+def test_verified_raster_hides_bytes_and_is_immutable() -> None:
+    raster = VerifiedRaster(
+        data=b"private-raster-canary",
+        media_type="image/png",
+        width=512,
+        height=640,
+    )
+
+    assert b"private-raster-canary" not in repr(raster).encode()
+    with pytest.raises(FrozenInstanceError):
+        raster.width = 256  # type: ignore[misc]
 
 
 def test_preview_is_always_labeled_as_ai_generated_image() -> None:
     preview = DishPreview(artifact_id="artifact-1", label="Caller supplied label")
 
     assert preview.label == "AI-generated image"
+
+
+def test_preview_label_schema_is_a_fixed_literal() -> None:
+    label_schema = DishPreview.model_json_schema()["properties"]["label"]
+
+    assert label_schema["const"] == "AI-generated image"
 
 
 def test_preview_label_cannot_change_after_construction() -> None:
@@ -52,73 +122,3 @@ def test_preview_label_cannot_change_after_construction() -> None:
         preview.label = "Generated image"
 
     assert preview.label == "AI-generated image"
-
-
-@pytest.mark.parametrize(
-    ("prompt", "width", "height", "steps"),
-    [
-        ("", 768, 768, None),
-        ("Soup", 255, 768, None),
-        ("Soup", 768, 2_049, None),
-        ("Soup", 768, 768, 0),
-        ("Soup", 768, 768, 101),
-        ("x" * 2_001, 768, 768, None),
-    ],
-)
-def test_generation_request_rejects_invalid_inputs(
-    prompt: str,
-    width: int,
-    height: int,
-    steps: int | None,
-) -> None:
-    with pytest.raises(ValidationError):
-        ImageGenerationRequest(
-            prompt=prompt,
-            width=width,
-            height=height,
-            steps=steps,
-        )
-
-
-def test_generated_image_is_immutable() -> None:
-    image = GeneratedImage(
-        data=b"image-bytes",
-        media_type="image/png",
-        width=768,
-        height=768,
-    )
-
-    with pytest.raises(FrozenInstanceError):
-        image.width = 256  # type: ignore[misc]
-
-
-def test_recipe_option_exposes_the_labeled_preview_in_its_public_schema() -> None:
-    option = RecipeOption(
-        name="Tomato soup",
-        summary="A quick soup.",
-        cuisine="Italian",
-        total_minutes=20,
-        difficulty=Difficulty.EASY,
-        used_ingredients=["Tomato"],
-        preview=DishPreview(artifact_id="artifact-1"),
-    )
-
-    response = RecipeOptionResponse.model_validate(option)
-
-    assert response.model_dump() == {
-        "name": "Tomato soup",
-        "summary": "A quick soup.",
-        "cuisine": "Italian",
-        "total_minutes": 20,
-        "difficulty": Difficulty.EASY,
-        "used_ingredients": ["Tomato"],
-        "missing_ingredients": [],
-        "optional_ingredients": [],
-        "id": option.id,
-        "nutrition": None,
-        "preview": {
-            "artifact_id": "artifact-1",
-            "label": "AI-generated image",
-        },
-        "warnings": [],
-    }

@@ -1,12 +1,15 @@
 import asyncio
+import json
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
+from starlette.types import Message, Scope
 
 from agents.ingredient_extraction import IngredientExtractor
 from api.app import create_app
@@ -26,9 +29,18 @@ class ReadyOllama:
     async def inspect(self) -> dict[str, object]:
         return {
             "reachable": True,
-            "available_models": [],
+            "available_models": ["qwen3.5:9b", "gpt-oss:20b"],
             "missing": [],
         }
+
+
+class CountingReadyOllama(ReadyOllama):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def inspect(self) -> dict[str, object]:
+        self.calls += 1
+        return await super().inspect()
 
 
 class FakeIngredientExtractor:
@@ -66,6 +78,15 @@ class ImmediateUploadValidator:
             media_type="image/png",
             suffix=".png",
         )
+
+
+class CountingUploadValidator(ImmediateUploadValidator):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def read(self, upload: UploadFile) -> ValidatedImage:
+        self.calls += 1
+        return await super().read(upload)
 
 
 class PausingCloseUpload:
@@ -284,6 +305,221 @@ def successful_extraction() -> ExtractionResult:
             {"name": "Onion", "confidence": 0.87},
         ]
     )
+
+
+async def _send_chunked_browser_upload(
+    app,
+    *,
+    origin: str | None,
+    runtime_revision: str | None,
+) -> tuple[int, dict[str, str], dict[str, object], int]:
+    headers = [
+        (b"host", b"testserver"),
+        (b"content-type", b"multipart/form-data; boundary=upload-boundary"),
+        (b"x-request-id", b"req-stale-pre-body"),
+    ]
+    if origin is not None:
+        headers.append((b"origin", origin.encode("ascii")))
+    if runtime_revision is not None:
+        headers.append(
+            (b"x-cook-mantra-runtime-revision", runtime_revision.encode("ascii"))
+        )
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/v1/sessions",
+        "raw_path": b"/api/v1/sessions",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 54321),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+    receive_calls = 0
+    chunks: list[Message] = [
+        {"type": "http.request", "body": b"x" * (40 * 1024), "more_body": True},
+        {"type": "http.request", "body": b"x" * (40 * 1024), "more_body": False},
+    ]
+
+    async def receive() -> Message:
+        nonlocal receive_calls
+        receive_calls += 1
+        return chunks.pop(0)
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
+    response_headers = {
+        name.decode("latin-1"): value.decode("latin-1")
+        for name, value in start["headers"]
+    }
+    response_body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    return (
+        start["status"],
+        response_headers,
+        json.loads(response_body),
+        receive_calls,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin", "runtime_revision"),
+    [
+        ("http://localhost:3000", None),
+        ("http://localhost:3000", "stale-runtime-revision"),
+        (None, "stale-runtime-revision"),
+    ],
+)
+async def test_missing_or_stale_runtime_revision_rejects_before_body_receive(
+    project_tmp_path: Path,
+    origin: str | None,
+    runtime_revision: str | None,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+        max_upload_bytes=4,
+    )
+
+    status_code, headers, body, receive_calls = await _send_chunked_browser_upload(
+        app,
+        origin=origin,
+        runtime_revision=runtime_revision,
+    )
+
+    assert status_code == 409
+    assert headers["x-request-id"] == "req-stale-pre-body"
+    assert body == {
+        "error": {
+            "code": "runtime_status_stale",
+            "message": "Local model status changed. Refresh it before sending a photo.",
+            "details": {},
+            "retryable": False,
+            "request_id": "req-stale-pre-body",
+            "session_id": None,
+            "job_id": None,
+        }
+    }
+    assert receive_calls == 0
+    assert app.state.session_store._sessions == {}
+    assert app.state.job_store._jobs == {}
+
+
+@pytest.mark.parametrize(
+    ("origin", "runtime_revision"),
+    [
+        ("http://localhost:3000", None),
+        ("http://localhost:3000", "stale-runtime-revision"),
+        (None, "stale-runtime-revision"),
+    ],
+)
+def test_stale_revision_rejects_before_provider_or_upload_boundaries(
+    project_tmp_path: Path,
+    origin: str | None,
+    runtime_revision: str | None,
+) -> None:
+    ollama = CountingReadyOllama()
+    app = create_app(
+        settings=settings_for(project_tmp_path),
+        ollama_health=ollama,
+        ingredient_extractor=FakeIngredientExtractor(successful_extraction()),
+    )
+    validator = CountingUploadValidator()
+    app.state.upload_validator = validator
+    session_create = AsyncMock(wraps=app.state.session_store.create)
+    artifact_write = AsyncMock(wraps=app.state.artifact_store.write)
+    job_submit = AsyncMock(wraps=app.state.job_runner.submit)
+    app.state.session_store.create = session_create
+    app.state.artifact_store.write = artifact_write
+    app.state.job_runner.submit = job_submit
+    headers = {}
+    if origin is not None:
+        headers["Origin"] = origin
+    if runtime_revision is not None:
+        headers["X-Cook-Mantra-Runtime-Revision"] = runtime_revision
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+            headers=headers,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "runtime_status_stale"
+    assert ollama.calls == 0
+    assert validator.calls == 0
+    session_create.assert_not_awaited()
+    artifact_write.assert_not_awaited()
+    job_submit.assert_not_awaited()
+    assert app.state.session_store._sessions == {}
+    assert app.state.job_store._jobs == {}
+
+
+def test_matching_browser_revision_reaches_the_existing_upload_route(
+    project_tmp_path: Path,
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            files={"image": ("ingredients.png", png_bytes(), "image/png")},
+            headers={
+                "Origin": "http://localhost:3000",
+                "X-Cook-Mantra-Runtime-Revision": app.state.runtime_revision,
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": "http://localhost:3000"},
+        {
+            "Origin": "http://localhost:3000",
+            "X-Cook-Mantra-Runtime-Revision": "stale-runtime-revision",
+        },
+    ],
+)
+def test_manual_session_is_outside_the_runtime_revision_boundary(
+    project_tmp_path: Path,
+    headers: dict[str, str],
+) -> None:
+    app = make_app(
+        project_tmp_path,
+        FakeIngredientExtractor(successful_extraction()),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions/manual",
+            json={"ingredients": ["Paneer"]},
+            headers=headers,
+        )
+
+    assert response.status_code == 201
 
 
 def test_upload_creates_session_and_job(project_tmp_path: Path) -> None:

@@ -1,20 +1,19 @@
 import pytest
-from langchain_core.messages import HumanMessage
 from tests.tracing_support import enabled_tracing
 
-from agents import ingredient_extraction as ingredient_extraction_module
 from agents.ingredient_extraction import OllamaIngredientExtractor
-from core.config import PROJECT_ROOT, Agent, Settings
+from core.config import PROJECT_ROOT, Settings
 from core.logging import log_context
 from domain.ingredients import ExtractionResult
+from domain.model_runtime import AgentRole, ModelMessage
 
 
 class StructuredModel:
     def __init__(self, result: ExtractionResult) -> None:
         self.result = result
-        self.messages: list[HumanMessage] = []
+        self.messages: list[ModelMessage] = []
 
-    async def ainvoke(self, messages: list[HumanMessage]) -> ExtractionResult:
+    async def ainvoke(self, messages: list[ModelMessage]) -> ExtractionResult:
         self.messages = messages
         return self.result
 
@@ -43,13 +42,8 @@ async def test_extractor_sends_visible_ingredient_multimodal_message() -> None:
     assert result.detected[0].name == "Tomato"
     assert len(model.messages) == 1
     message = model.messages[0]
-    assert isinstance(message, HumanMessage)
-    assert isinstance(message.content, list)
-    assert len(message.content) == 2
-
-    text_block = message.content[0]
-    assert isinstance(text_block, dict)
-    prompt = text_block["text"].lower()
+    assert isinstance(message, ModelMessage)
+    prompt = message.content.lower()
     assert "only visible food ingredients" in prompt
     assert "do not infer pantry items" in prompt
     assert "confidence from 0.0 to 1.0" in prompt
@@ -62,10 +56,8 @@ async def test_extractor_sends_visible_ingredient_multimodal_message() -> None:
     assert "below 0.5 instead of omitting" in prompt
     assert "empty detected list only when the image contains no food" in prompt
 
-    assert message.content[1] == {
-        "type": "image_url",
-        "image_url": {"url": "data:image/png;base64,cG5nLWJ5dGVz"},
-    }
+    assert message.image == b"png-bytes"
+    assert message.media_type == "image/png"
 
 
 @pytest.mark.asyncio
@@ -81,40 +73,34 @@ async def test_extractor_warns_when_no_ingredients_are_detected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_extractor_forwards_its_exact_settings_to_model_factory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_extractor_builds_exact_role_schema_from_injected_factory() -> None:
     settings = Settings(
         _env_file=None,
         artifact_root=PROJECT_ROOT / "tmp" / "adapter-settings-test",
-        ollama_base_url="http://configured-ollama.test:11434",
         llm_timeout_seconds=17,
     )
-    captured_settings: Settings | None = None
 
-    def capture_model(
-        agent: Agent,
-        *,
-        thinking: bool,
-        keep_alive: float | str,
-        settings: Settings,
-    ) -> StructuredModelFactory:
-        nonlocal captured_settings
-        assert agent is Agent.INGREDIENT_EXTRACTION
-        assert thinking is False
-        assert keep_alive == 0
-        captured_settings = settings
-        return StructuredModelFactory(
-            ExtractionResult(detected=[{"name": "Tomato", "confidence": 0.94}])
-        )
+    class ModelFactory:
+        def __init__(self) -> None:
+            self.calls: list[tuple[AgentRole, type[ExtractionResult]]] = []
 
-    monkeypatch.setattr(ingredient_extraction_module, "get_model", capture_model)
-    extractor = OllamaIngredientExtractor(settings=settings)
+        def build(
+            self,
+            role: AgentRole,
+            schema: type[ExtractionResult],
+        ) -> StructuredModel:
+            self.calls.append((role, schema))
+            return StructuredModel(
+                ExtractionResult(detected=[{"name": "Tomato", "confidence": 0.94}])
+            )
+
+    factory = ModelFactory()
+    extractor = OllamaIngredientExtractor(settings=settings, model_factory=factory)
 
     result = await extractor.extract(b"png-bytes", "image/png")
 
     assert result.detected[0].name == "Tomato"
-    assert captured_settings is settings
+    assert factory.calls == [(AgentRole.INGREDIENT_EXTRACTOR, ExtractionResult)]
 
 
 @pytest.mark.asyncio
@@ -130,10 +116,8 @@ async def test_extractor_traces_only_safe_summaries_around_full_local_image() ->
         result = await extractor.extract(canary, "image/png")
 
     assert result.detected[0].name == "Tomato"
-    assert model.messages[0].content[1] == {
-        "type": "image_url",
-        "image_url": {"url": "data:image/png;base64,ZXh0cmFjdG9yLXZpc2lvbi1jYW5hcnk="},
-    }
+    assert model.messages[0].image == canary
+    assert model.messages[0].media_type == "image/png"
     captured = repr(client.calls)
     assert canary.decode() not in captured
     assert "ZXh0cmFjdG9yLXZpc2lvbi1jYW5hcnk=" not in captured

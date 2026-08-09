@@ -11,6 +11,7 @@ from api.dependencies import (
     get_complete_recipes_runner,
     get_job_runner,
     get_session_store,
+    require_recipe_writer_runtime,
 )
 from domain.jobs import JobOperation
 from domain.recipe_service import (
@@ -68,6 +69,7 @@ async def generate_complete_recipes(
         CompleteRecipesRunner,
         Depends(get_complete_recipes_runner),
     ],
+    _runtime_ready: Annotated[None, Depends(require_recipe_writer_runtime)] = None,
 ) -> QueuedJobResponse:
     """Queue complete-recipe generation for selected stored options."""
     session = await session_store.require(session_id)

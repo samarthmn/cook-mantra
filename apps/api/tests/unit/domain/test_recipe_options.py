@@ -386,3 +386,49 @@ def test_canonicalization_rejects_genuinely_unconfirmed_ingredients() -> None:
 
     with pytest.raises(ValueError, match="confirmed"):
         canonicalize_used_ingredients([option], ["Tomato"])
+
+
+def test_recipe_option_discards_deprecated_nutrition_values() -> None:
+    option = RecipeOption(
+        name="Tomato Curry",
+        summary="A practical tomato curry.",
+        cuisine="Indian",
+        total_minutes=30,
+        difficulty=Difficulty.EASY,
+        used_ingredients=["Tomato"],
+        nutrition={
+            "calories_kcal": 300,
+            "protein_g": 8,
+            "carbohydrates_g": 40,
+            "fat_g": 10,
+        },
+    )
+
+    assert option.nutrition is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("preview", {"artifact_id": "artifact-preview-1"}),
+        ("warnings", ["Dish preview unavailable."]),
+    ],
+)
+def test_stored_recipe_option_rejects_image_owned_fields(
+    field_name: str,
+    field_value: object,
+) -> None:
+    values: dict[str, object] = {
+        "name": "Tomato Curry",
+        "summary": "A practical tomato curry.",
+        "cuisine": "Indian",
+        "total_minutes": 30,
+        "difficulty": Difficulty.EASY,
+        "used_ingredients": ["Tomato"],
+        field_name: field_value,
+    }
+
+    with pytest.raises(ValidationError):
+        RecipeOption.model_validate(values)
+
+    assert field_name not in RecipeOption.model_fields

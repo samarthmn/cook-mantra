@@ -77,62 +77,13 @@ async def test_inspect_returns_the_complete_text_inventory() -> None:
     }
 
 
-@pytest.mark.asyncio
-async def test_enabled_beast_health_reports_status_verbatim_without_auth() -> None:
-    requests: list[httpx.Request] = []
-
-    async def respond(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.url.host == "beast.test":
-            return httpx.Response(
-                200,
-                json={"version": "0.1.0", "status": "degraded"},
-            )
-        return httpx.Response(
-            200,
-            json={"models": [model_tag(name) for name in ALL_REQUIRED_MODELS]},
+def test_constructor_has_no_retired_beast_health_endpoint() -> None:
+    with pytest.raises(TypeError, match="beast_base_url"):
+        OllamaHealthService(
+            "http://ollama.local:11434",
+            timeout_seconds=1,
+            beast_base_url="http://retired.test:4900",  # type: ignore[call-arg]
         )
-
-    service = OllamaHealthService(
-        "http://ollama.local:11434",
-        timeout_seconds=1,
-        beast_base_url="http://beast.test:4900/",
-        transport=httpx.MockTransport(respond),
-    )
-
-    result = await service.inspect()
-
-    assert [str(request.url) for request in requests] == [
-        "http://ollama.local:11434/api/tags",
-        "http://beast.test:4900/health",
-    ]
-    assert "authorization" not in requests[1].headers
-    assert result["beast"] == {"reachable": True, "status": "degraded"}
-
-
-@pytest.mark.asyncio
-async def test_unreachable_beast_is_reported_without_hiding_ollama_inventory() -> None:
-    async def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "beast.test":
-            raise httpx.ConnectError("private Beast address", request=request)
-        return httpx.Response(
-            200,
-            json={"models": [model_tag(name) for name in ALL_REQUIRED_MODELS]},
-        )
-
-    service = OllamaHealthService(
-        "http://ollama.local:11434",
-        timeout_seconds=1,
-        beast_base_url="http://beast.test:4900",
-        transport=httpx.MockTransport(respond),
-    )
-
-    assert await service.inspect() == {
-        "reachable": True,
-        "available_models": ALL_REQUIRED_MODELS,
-        "missing": [],
-        "beast": {"reachable": False, "status": None},
-    }
 
 
 @pytest.mark.asyncio

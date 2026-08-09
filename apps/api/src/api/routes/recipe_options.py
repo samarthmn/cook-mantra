@@ -11,6 +11,7 @@ from api.dependencies import (
     get_job_runner,
     get_recipe_options_runner,
     get_session_store,
+    require_master_chef_runtime,
 )
 from domain.jobs import JobOperation
 from domain.recipe_option_service import (
@@ -65,6 +66,7 @@ async def generate_recipe_options(
         RecipeOptionsRunner,
         Depends(get_recipe_options_runner),
     ],
+    _runtime_ready: Annotated[None, Depends(require_master_chef_runtime)] = None,
 ) -> QueuedJobResponse:
     """Queue the first recipe-option batch for confirmed ingredients."""
     return await _queue_recipe_options(
@@ -94,6 +96,7 @@ async def generate_more_recipe_options(
         RecipeOptionsRunner,
         Depends(get_recipe_options_runner),
     ],
+    _runtime_ready: Annotated[None, Depends(require_master_chef_runtime)] = None,
 ) -> QueuedJobResponse:
     """Queue a fresh recipe-option batch excluding every shown name."""
     return await _queue_recipe_options(

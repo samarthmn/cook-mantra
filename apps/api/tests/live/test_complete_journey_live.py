@@ -85,14 +85,11 @@ def _wait_for_job(
 
 def test_complete_live_api_journey(live_workspace: Path) -> None:
     ingredient_path = live_workspace / "ingredients.png"
-    downloaded_preview_path = live_workspace / "dish-preview.png"
     _write_ingredient_image(ingredient_path)
 
     settings = Settings(
         _env_file=None,
         artifact_root=live_workspace / "artifacts",
-        image_width=256,
-        image_height=256,
     )
     with TestClient(create_app(settings=settings)) as client:
         with ingredient_path.open("rb") as image:
@@ -174,19 +171,9 @@ def test_complete_live_api_journey(live_workspace: Path) -> None:
         assert options_ready.stage is SessionStage.OPTIONS_READY
         assert len(options_ready.recipe_options) == 1
         option = options_ready.recipe_options[0]
-        assert option.nutrition is not None
-        assert option.preview is not None
-
-        preview_response = client.get(f"/api/v1/artifacts/{option.preview.artifact_id}")
-        assert preview_response.status_code == 200
-        assert preview_response.headers["content-type"] in {
-            "image/jpeg",
-            "image/png",
-            "image/webp",
-        }
-        downloaded_preview_path.write_bytes(preview_response.content)
-        with Image.open(downloaded_preview_path) as preview:
-            preview.verify()
+        assert option.nutrition is None
+        assert "preview" not in option.model_dump()
+        assert "warnings" not in option.model_dump()
 
         recipes_queued = QueuedJobResponse.model_validate(
             _require_success(
@@ -209,10 +196,9 @@ def test_complete_live_api_journey(live_workspace: Path) -> None:
         assert completed.stage is SessionStage.RECIPES_READY
         recipe = completed.complete_recipes[option.id]
         assert recipe.option_id == option.id
+        assert recipe.preview is None
         assert recipe.ingredients
         assert [step.number for step in recipe.steps] == list(
             range(1, len(recipe.steps) + 1)
         )
-
     assert ingredient_path.exists()
-    assert downloaded_preview_path.exists()

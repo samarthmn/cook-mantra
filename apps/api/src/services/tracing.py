@@ -10,6 +10,11 @@ from langsmith import Client, traceable, tracing_context
 from core.config import Agent, Settings
 from core.logging import current_log_context
 from domain.ingredients import ExtractionResult
+from domain.model_runtime import (
+    AgentRole,
+    ModelResult,
+    ProviderName,
+)
 
 type RunnableConfig = dict[str, Any]
 type ClientFactory = Callable[..., object]
@@ -19,6 +24,49 @@ _BATCH_NUMBER: ContextVar[int | None] = ContextVar(
     default=None,
 )
 _VISION_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+
+def _safe_text_model_inputs(inputs: dict[str, object]) -> dict[str, str]:
+    """Allowlist provider-neutral identity; never trace prompts or operations."""
+    role = inputs.get("role")
+    provider = inputs.get("provider")
+    model = inputs.get("model")
+    return {
+        "role": role.value if isinstance(role, AgentRole) else "invalid",
+        "provider": (
+            provider.value if isinstance(provider, ProviderName) else "invalid"
+        ),
+        "model": model if isinstance(model, str) else "invalid",
+    }
+
+
+def _safe_text_model_outputs(output: object) -> dict[str, int]:
+    """Reduce provider output to normalized aggregate usage."""
+    if not isinstance(output, ModelResult) or output.usage is None:
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    return {
+        "input_tokens": output.usage.input_tokens,
+        "output_tokens": output.usage.output_tokens,
+        "total_tokens": output.usage.total_tokens,
+    }
+
+
+@traceable(
+    name="model_invocation",
+    run_type="llm",
+    process_inputs=_safe_text_model_inputs,
+    process_outputs=_safe_text_model_outputs,
+    exceptions_to_handle=(BaseException,),
+)
+async def invoke_trace_safe_text_model[ResultT](
+    *,
+    role: AgentRole,
+    provider: ProviderName,
+    model: str,
+    operation: Callable[[], Awaitable[ModelResult[ResultT]]],
+) -> ModelResult[ResultT]:
+    """Trace a native model call without exposing its messages or response."""
+    return await operation()
 
 
 def _safe_vision_inputs(inputs: dict[str, object]) -> dict[str, object]:
@@ -123,7 +171,6 @@ class TracingService:
         resolved_job_id = _validated_identifier(job_id, "job_id")
         metadata: dict[str, object] = {
             "agent": agent.value,
-            "model": self._settings.model_for(agent).value,
             "session_id": resolved_session_id,
             "job_id": resolved_job_id,
         }

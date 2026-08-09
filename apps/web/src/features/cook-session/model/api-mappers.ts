@@ -128,20 +128,7 @@ export function optionFromApi(
     usedIngredients: option.used_ingredients,
     missingIngredients: option.missing_ingredients,
     optionalIngredients: option.optional_ingredients,
-    nutrition: option.nutrition
-      ? {
-          caloriesKcal: option.nutrition.calories_kcal,
-          proteinG: option.nutrition.protein_g,
-          carbohydratesG: option.nutrition.carbohydrates_g,
-          fatG: option.nutrition.fat_g,
-          dietTags: option.nutrition.diet_tags,
-          allergenWarnings: option.nutrition.allergen_warnings,
-          disclaimer: option.nutrition.disclaimer,
-        }
-      : null,
-    previewArtifactId: option.preview?.artifact_id ?? null,
-    previewLabel: option.preview?.label ?? null,
-    warnings: option.warnings,
+    nutrition: null,
     batchNumber,
   };
 }
@@ -163,20 +150,12 @@ export function recipeFromApi(recipe: CompleteRecipeResponse): CompleteRecipeVie
     })),
     tips: recipe.tips,
     substitutions: recipe.substitutions,
-    nutrition: recipe.nutrition
-      ? {
-          caloriesKcal: recipe.nutrition.calories_kcal,
-          proteinG: recipe.nutrition.protein_g,
-          carbohydratesG: recipe.nutrition.carbohydrates_g,
-          fatG: recipe.nutrition.fat_g,
-          dietTags: recipe.nutrition.diet_tags,
-          allergenWarnings: recipe.nutrition.allergen_warnings,
-          disclaimer: recipe.nutrition.disclaimer,
-        }
-      : null,
+    nutrition: null,
     nutritionNotice: recipe.nutrition_notice,
     allergenNotice: recipe.allergen_notice,
     assumptions: recipe.assumptions,
     warnings: recipe.warnings,
+    previewArtifactId: recipe.preview?.artifact_id ?? null,
+    previewLabel: recipe.preview?.label ?? null,
   };
 }

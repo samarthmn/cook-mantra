@@ -1,13 +1,23 @@
 import asyncio
 import gc
+import json
 import logging
 
+import httpx
 import pytest
+from pydantic import BaseModel
 
 from core.errors import AppError, ErrorCode
+from core.logging import configure_logging
 from domain.jobs import JobOperation, JobStatus
+from domain.model_runtime import AgentRole, ModelMessage, TextTuning
 from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
+from services.providers.openrouter import OpenRouterTextVisionAdapter
+
+
+class ProviderAnswer(BaseModel):
+    ingredient: str
 
 
 class BlockingCreateJobStore(JobStore):
@@ -139,6 +149,84 @@ async def test_runner_logs_unexpected_worker_failure_without_unsafe_traceback(
     assert record.error_code == "internal_error"
     assert record.exception_type == "RuntimeError"
     assert record.exc_info is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["transport", "invalid_output"])
+async def test_provider_failure_background_log_contains_no_raw_canaries(
+    failure_kind: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bearer = "secret-background-bearer-canary"
+    prompt = "prompt-background-private-canary"
+    invalid_value = "invalid-provider-value-canary"
+    data_url = "data:image/png;base64,aW1hZ2UtY2FuYXJ5"
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if failure_kind == "transport":
+            raise httpx.ConnectError(
+                " | ".join((bearer, prompt, invalid_value, data_url)),
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps({"ingredient": [invalid_value]})
+                        }
+                    }
+                ]
+            },
+        )
+
+    adapter = OpenRouterTextVisionAdapter(
+        endpoint="https://openrouter.test/api/v1",
+        api_key=bearer,
+        model="vendor/vision",
+        role=AgentRole.INGREDIENT_EXTRACTOR,
+        tuning=TextTuning(),
+        supported_parameters={"temperature", "structured_outputs"},
+        transport=httpx.MockTransport(respond),
+    )
+    store = JobStore(ttl_seconds=21_600)
+    runner = JobRunner(store, max_concurrent_jobs=1)
+    configure_logging("INFO")
+
+    async def worker(progress):
+        await adapter.invoke(
+            [
+                ModelMessage(
+                    role="user",
+                    content=prompt,
+                    image=b"image-canary",
+                    media_type="image/png",
+                )
+            ],
+            ProviderAnswer,
+        )
+
+    job = await runner.submit(JobOperation.EXTRACT_INGREDIENTS, "session-1", worker)
+    await runner.wait(job.id)
+
+    records = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.strip().startswith("{")
+    ]
+    failure = next(
+        record for record in records if record["event"] == "job_internal_failure"
+    )
+    assert failure["cause_chain"] in (
+        ["ProviderInvocationError: The selected model provider is unavailable."],
+        ["ProviderInvocationError: The model returned invalid structured output."],
+    )
+    serialized = json.dumps(records)
+    assert all(
+        canary not in serialized
+        for canary in (bearer, prompt, invalid_value, data_url, "aW1hZ2UtY2FuYXJ5")
+    )
 
 
 @pytest.mark.asyncio

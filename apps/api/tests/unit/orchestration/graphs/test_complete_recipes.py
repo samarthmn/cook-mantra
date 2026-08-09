@@ -14,6 +14,7 @@ from agents.specialized_recipe import (
 )
 from core.config import PROJECT_ROOT, Settings
 from core.errors import AppError, ErrorCode
+from domain.images import DishPreview
 from domain.ingredients import Ingredient, IngredientSource
 from domain.recipe_options import (
     Difficulty,
@@ -227,6 +228,92 @@ class CountingLimiter(ModelCallLimiter):
         return await super().run(operation)
 
 
+class ActiveTrackingLimiter(CountingLimiter):
+    def __init__(self, max_concurrent_calls: int) -> None:
+        super().__init__(max_concurrent_calls)
+        self.active = 0
+
+    async def run[T](self, operation: Callable[[], Awaitable[T]]) -> T:
+        self.active += 1
+        try:
+            return await super().run(operation)
+        finally:
+            self.active -= 1
+
+
+class ScriptedDishPreviews:
+    def __init__(
+        self,
+        outcomes: dict[str, DishPreview | BaseException],
+        *,
+        limiter: ActiveTrackingLimiter | None = None,
+    ) -> None:
+        self.outcomes = outcomes
+        self.limiter = limiter
+        self.calls: list[tuple[str, CompleteRecipe]] = []
+        self.delete_calls: list[str] = []
+        self.delete_failures: dict[str, BaseException] = {}
+
+    async def generate(
+        self,
+        session_id: str,
+        recipe: CompleteRecipe,
+        progress: Callable[[int], Awaitable[None]],
+    ) -> DishPreview:
+        assert self.limiter is None or self.limiter.active == 0
+        self.calls.append((session_id, recipe.model_copy(deep=True)))
+        outcome = self.outcomes[recipe.option_id]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome.model_copy(deep=True)
+
+    async def delete(self, artifact_id: str) -> None:
+        self.delete_calls.append(artifact_id)
+        failure = self.delete_failures.get(artifact_id)
+        if failure is not None:
+            raise failure
+
+
+class ControlledDishPreviews(ScriptedDishPreviews):
+    def __init__(
+        self,
+        outcomes: dict[str, DishPreview | BaseException],
+    ) -> None:
+        super().__init__(outcomes)
+        self.started = {option_id: asyncio.Event() for option_id in outcomes}
+        self.release = {option_id: asyncio.Event() for option_id in outcomes}
+        self.cancelled: list[str] = []
+
+    async def generate(
+        self,
+        session_id: str,
+        recipe: CompleteRecipe,
+        progress: Callable[[int], Awaitable[None]],
+    ) -> DishPreview:
+        self.started[recipe.option_id].set()
+        try:
+            await self.release[recipe.option_id].wait()
+        except asyncio.CancelledError:
+            self.cancelled.append(recipe.option_id)
+            raise
+        return await super().generate(session_id, recipe, progress)
+
+
+class PausingDeleteDishPreviews(ScriptedDishPreviews):
+    def __init__(
+        self,
+        outcomes: dict[str, DishPreview | BaseException],
+    ) -> None:
+        super().__init__(outcomes)
+        self.delete_started = asyncio.Event()
+        self.allow_delete = asyncio.Event()
+
+    async def delete(self, artifact_id: str) -> None:
+        self.delete_calls.append(artifact_id)
+        self.delete_started.set()
+        await self.allow_delete.wait()
+
+
 class RecordingNutritionAgent:
     def __init__(
         self,
@@ -360,6 +447,35 @@ class CommitThenSuspendStore(SessionStore):
         return stored
 
 
+class StaleRecipeCommitStore(SessionStore):
+    def __init__(self) -> None:
+        super().__init__(ttl_seconds=21_600)
+        self.make_recipe_commit_stale = False
+        self.newer: Session | None = None
+
+    async def replace(
+        self,
+        session: Session,
+        *,
+        before_commit: PreCommitHook | None = None,
+    ) -> Session:
+        if (
+            self.make_recipe_commit_stale
+            and session.stage is SessionStage.RECIPES_READY
+        ):
+            self.make_recipe_commit_stale = False
+            current = await self.require(session.id)
+            self.newer = await super().replace(
+                current.model_copy(
+                    update={
+                        "recipe_generation_id": "newer-attempt",
+                        "updated_at": current.updated_at,
+                    }
+                )
+            )
+        return await super().replace(session, before_commit=before_commit)
+
+
 class TrackingStore(SessionStore):
     def __init__(self) -> None:
         super().__init__(ttl_seconds=21_600)
@@ -390,6 +506,7 @@ async def make_generation(
     selected_ids: tuple[str, ...] = ("option-1", "option-2"),
     previous_stage: SessionStage = SessionStage.OPTIONS_READY,
     option_nutrition: NutritionEstimate | None = None,
+    prior_preview_artifact_id: str | None = None,
 ) -> GenerationFixture:
     resolved_store = store or SessionStore(ttl_seconds=21_600)
     created = await resolved_store.create(stage=previous_stage)
@@ -400,8 +517,15 @@ async def make_generation(
     ]
     if option_nutrition is not None:
         options[0] = options[0].model_copy(update={"nutrition": option_nutrition})
+    prior_recipe_value = complete_recipe(options[0])
+    if prior_preview_artifact_id is not None:
+        prior_recipe_value = prior_recipe_value.model_copy(
+            update={
+                "preview": DishPreview(artifact_id=prior_preview_artifact_id),
+            }
+        )
     prior_recipe = (
-        {"option-1": complete_recipe(options[0])}
+        {"option-1": prior_recipe_value}
         if previous_stage is SessionStage.RECIPES_READY
         else {}
     )
@@ -483,22 +607,24 @@ def graph_for(
     progress: Callable[[int], Awaitable[None]] | None = None,
     nutrition_agent: RecordingNutritionAgent | None = None,
     nutrition_lookup_enabled: bool = False,
+    dish_previews: ScriptedDishPreviews | None = None,
+    dish_previews_enabled: bool = False,
 ):
     dependencies = CompleteRecipeDependencies(
         agent=agent,
         session_store=fixture.store,
         model_call_limiter=limiter or ModelCallLimiter(max_concurrent_calls=2),
-        nutrition_agent=nutrition_agent,
-        nutrition_lookup_enabled=nutrition_lookup_enabled,
+        dish_previews=dish_previews,
+        dish_previews_enabled=dish_previews_enabled,
     )
     if progress is not None:
         dependencies = CompleteRecipeDependencies(
             agent=agent,
             session_store=fixture.store,
             model_call_limiter=dependencies.model_call_limiter,
+            dish_previews=dish_previews,
+            dish_previews_enabled=dish_previews_enabled,
             progress=progress,
-            nutrition_agent=nutrition_agent,
-            nutrition_lookup_enabled=nutrition_lookup_enabled,
         )
     return build_complete_recipes_graph(dependencies)
 
@@ -539,26 +665,9 @@ async def test_selected_options_run_concurrently_through_the_shared_limit() -> N
 
 
 @pytest.mark.asyncio
-async def test_enabled_lookup_recomputes_complete_recipe_with_exact_quantities() -> (
-    None
-):
-    carried = NutritionEstimate(
-        calories_kcal=200,
-        protein_g=5,
-        carbohydrates_g=30,
-        fat_g=7,
-    )
-    recomputed = NutritionEstimate(
-        calories_kcal=180,
-        protein_g=6,
-        carbohydrates_g=28,
-        fat_g=5,
-    )
-    fixture = await make_generation(
-        selected_ids=("option-1",),
-        option_nutrition=carried,
-    )
-    nutrition_agent = RecordingNutritionAgent(recomputed)
+async def test_removed_nutrition_lookup_is_not_invoked() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+    nutrition_agent = RecordingNutritionAgent(RuntimeError("must not run"))
     limiter = CountingLimiter(max_concurrent_calls=2)
     generated_recipe = complete_recipe(fixture.selected[0])
     generated_recipe = generated_recipe.model_copy(
@@ -582,23 +691,14 @@ async def test_enabled_lookup_recomputes_complete_recipe_with_exact_quantities()
         nutrition_lookup_enabled=True,
     ).ainvoke(invocation(fixture))
 
-    assert result["complete_recipes"][0].nutrition == recomputed
-    assert nutrition_agent.calls == [{"Tomato": "3 medium"}]
-    assert limiter.call_count == 2
+    assert result["complete_recipes"][0].nutrition is None
+    assert nutrition_agent.calls == []
+    assert limiter.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_recompute_failure_keeps_carried_nutrition() -> None:
-    carried = NutritionEstimate(
-        calories_kcal=200,
-        protein_g=5,
-        carbohydrates_g=30,
-        fat_g=7,
-    )
-    fixture = await make_generation(
-        selected_ids=("option-1",),
-        option_nutrition=carried,
-    )
+async def test_removed_nutrition_lookup_never_carries_option_values() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
     nutrition_agent = RecordingNutritionAgent(RuntimeError("lookup failed"))
 
     result = await graph_for(
@@ -608,8 +708,8 @@ async def test_recompute_failure_keeps_carried_nutrition() -> None:
         nutrition_lookup_enabled=True,
     ).ainvoke(invocation(fixture))
 
-    assert result["complete_recipes"][0].nutrition == carried
-    assert nutrition_agent.calls == [{"Tomato": "3 medium"}]
+    assert result["complete_recipes"][0].nutrition is None
+    assert nutrition_agent.calls == []
 
 
 @pytest.mark.asyncio
@@ -1355,6 +1455,571 @@ async def test_success_returns_detached_selected_results_without_rollback() -> N
     assert result["complete_recipes"][0] == saved.complete_recipes["option-3"]
     assert result["complete_recipes"][0] is not saved.complete_recipes["option-3"]
     assert list(saved.complete_recipes) == ["option-1", "option-2", "option-3"]
+
+
+@pytest.mark.asyncio
+async def test_preview_follows_writer_outside_text_limiter_and_commits_once() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+    limiter = ActiveTrackingLimiter(max_concurrent_calls=1)
+    previews = ScriptedDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-new")},
+        limiter=limiter,
+    )
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+        limiter=limiter,
+        dish_previews=previews,
+        dish_previews_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    saved = await fixture.store.require(fixture.generating.id)
+    assert limiter.call_count == 1
+    assert len(previews.calls) == 1
+    assert previews.calls[0][0] == fixture.generating.id
+    assert previews.calls[0][1].preview is None
+    assert result["complete_recipes"][0].preview == DishPreview(
+        artifact_id="preview-new"
+    )
+    assert saved.complete_recipes["option-1"].preview == DishPreview(
+        artifact_id="preview-new"
+    )
+    assert previews.delete_calls == []
+    assert "attempt_preview_ids" not in result
+
+
+@pytest.mark.asyncio
+async def test_disabled_previews_make_no_call_and_add_no_warning() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+    previews = ScriptedDishPreviews({"option-1": RuntimeError("must not run")})
+    generated = complete_recipe(fixture.selected[0]).model_copy(
+        update={"warnings": ("Keep this warning.",)}
+    )
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": generated}),
+        dish_previews=previews,
+        dish_previews_enabled=False,
+    ).ainvoke(invocation(fixture))
+
+    assert previews.calls == []
+    assert result["complete_recipes"][0].preview is None
+    assert result["complete_recipes"][0].warnings == ("Keep this warning.",)
+
+
+@pytest.mark.asyncio
+async def test_writer_failure_makes_no_preview_call_while_sibling_succeeds() -> None:
+    fixture = await make_generation()
+    previews = ScriptedDishPreviews(
+        {"option-2": DishPreview(artifact_id="preview-option-2")}
+    )
+    writer_failure = AppError(
+        code=ErrorCode.PROVIDER_UNAVAILABLE,
+        message="The configured provider is unavailable.",
+        status_code=503,
+        retryable=True,
+    )
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent(
+            {
+                "option-1": writer_failure,
+                "option-2": complete_recipe(fixture.selected[1]),
+            }
+        ),
+        dish_previews=previews,
+        dish_previews_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    assert [recipe.option_id for recipe in result["complete_recipes"]] == ["option-2"]
+    assert [failure.option_id for failure in result["recipe_failures"]] == ["option-1"]
+    assert [recipe.option_id for _, recipe in previews.calls] == ["option-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "preview_failure",
+    [
+        AppError(
+            code=ErrorCode.MODEL_CAPABILITY_MISSING,
+            message="Image capability is unavailable.",
+            status_code=503,
+            retryable=False,
+        ),
+        RuntimeError("private provider response"),
+    ],
+    ids=["expected", "unexpected"],
+)
+async def test_preview_failure_preserves_recipe_and_canonicalizes_one_warning(
+    preview_failure: BaseException,
+) -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+    generated = complete_recipe(fixture.selected[0]).model_copy(
+        update={
+            "warnings": (
+                "Keep this warning.",
+                "Dish preview unavailable.",
+                "Dish preview unavailable.",
+            )
+        }
+    )
+    previews = ScriptedDishPreviews({"option-1": preview_failure})
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": generated}),
+        dish_previews=previews,
+        dish_previews_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    recipe = result["complete_recipes"][0]
+    assert recipe.preview is None
+    assert recipe.warnings == (
+        "Keep this warning.",
+        "Dish preview unavailable.",
+    )
+    assert result["recipe_failures"] == []
+    assert len(previews.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_preview_failure_is_isolated_from_a_successful_sibling() -> None:
+    fixture = await make_generation()
+    previews = ScriptedDishPreviews(
+        {
+            "option-1": RuntimeError("image failed"),
+            "option-2": DishPreview(artifact_id="preview-option-2"),
+        }
+    )
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent(
+            {option.id: complete_recipe(option) for option in fixture.selected}
+        ),
+        dish_previews=previews,
+        dish_previews_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    first, second = result["complete_recipes"]
+    assert first.warnings == ("Dish preview unavailable.",)
+    assert first.preview is None
+    assert second.preview == DishPreview(artifact_id="preview-option-2")
+    assert result["recipe_failures"] == []
+
+
+@pytest.mark.asyncio
+async def test_returned_preview_is_cleaned_if_detaching_it_fails() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+
+    class UndetachablePreview(DishPreview):
+        def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+            raise ValueError("detachment failed")
+
+    previews = ScriptedDishPreviews(
+        {"option-1": UndetachablePreview(artifact_id="preview-orphan")}
+    )
+
+    result = await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+        dish_previews=previews,
+        dish_previews_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    assert result["complete_recipes"][0].preview is None
+    assert result["complete_recipes"][0].warnings == ("Dish preview unavailable.",)
+    assert previews.delete_calls == ["preview-orphan"]
+
+
+@pytest.mark.asyncio
+async def test_all_writer_failures_make_no_preview_calls_and_restore() -> None:
+    fixture = await make_generation()
+    previews = ScriptedDishPreviews({})
+    failure = RuntimeError("writer failed")
+
+    with pytest.raises(AppError) as raised:
+        await graph_for(
+            fixture,
+            ScriptedAgent({"option-1": failure, "option-2": failure}),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+
+    assert raised.value.code is ErrorCode.MODEL_OUTPUT_INVALID
+    assert previews.calls == []
+    assert_exact_restore(fixture, await fixture.store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_preview_cancellation_propagates_and_rolls_back() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+    previews = ControlledDishPreviews({"option-1": asyncio.CancelledError()})
+    graph_task = asyncio.create_task(
+        graph_for(
+            fixture,
+            ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+    )
+
+    try:
+        await asyncio.wait_for(previews.started["option-1"].wait(), timeout=1)
+        previews.release["option-1"].set()
+        with pytest.raises(NodeCancelledError):
+            await asyncio.wait_for(graph_task, timeout=1)
+    finally:
+        previews.release["option-1"].set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    assert previews.cancelled == []
+    assert previews.delete_calls == []
+    assert_exact_restore(fixture, await fixture.store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_progress_failure_cleans_preview_returned_by_finished_child() -> None:
+    fixture = await make_generation(selected_ids=("option-1",))
+    previews = ScriptedDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-uncommitted")}
+    )
+
+    async def fail_after_settlement(value: int) -> None:
+        if value == 90:
+            raise RuntimeError("progress unavailable")
+
+    with pytest.raises(RuntimeError, match="progress unavailable"):
+        await graph_for(
+            fixture,
+            ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+            progress=fail_after_settlement,
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+
+    assert previews.delete_calls == ["preview-uncommitted"]
+    assert_exact_restore(fixture, await fixture.store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_cancellation_drain_collects_and_cleans_a_finished_sibling_preview() -> (
+    None
+):
+    fixture = await make_generation()
+    recipes = {option.id: complete_recipe(option) for option in fixture.selected}
+    agent = FirstCompletesOthersBlockAgent(recipes)
+    previews = ScriptedDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-finished")}
+    )
+    first_settled = asyncio.Event()
+
+    async def record(value: int) -> None:
+        if value == 50:
+            first_settled.set()
+
+    graph_task = asyncio.create_task(
+        graph_for(
+            fixture,
+            agent,
+            progress=record,
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+    )
+
+    try:
+        await asyncio.wait_for(first_settled.wait(), timeout=1)
+        graph_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        agent.release.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    assert agent.cancelled == ["option-2"]
+    assert previews.delete_calls == ["preview-finished"]
+    assert_exact_restore(fixture, await fixture.store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_cannot_interrupt_preview_cleanup_or_rollback() -> (
+    None
+):
+    fixture = await make_generation()
+    recipes = {option.id: complete_recipe(option) for option in fixture.selected}
+    agent = FirstCompletesOthersBlockAgent(recipes)
+    previews = PausingDeleteDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-finished")}
+    )
+    first_settled = asyncio.Event()
+
+    async def record(value: int) -> None:
+        if value == 50:
+            first_settled.set()
+
+    graph_task = asyncio.create_task(
+        graph_for(
+            fixture,
+            agent,
+            progress=record,
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+    )
+
+    try:
+        await asyncio.wait_for(first_settled.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.wait_for(previews.delete_started.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+        previews.allow_delete.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        agent.release.set()
+        previews.allow_delete.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    assert previews.delete_calls == ["preview-finished"]
+    assert_exact_restore(fixture, await fixture.store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_replace_failure_cleans_every_new_preview_then_rolls_back() -> None:
+    store = FailingRecipeCommitStore()
+    fixture = await make_generation(store=store)
+    store.fail_recipe_commit = True
+    previews = ScriptedDishPreviews(
+        {
+            "option-1": DishPreview(artifact_id="preview-1"),
+            "option-2": DishPreview(artifact_id="preview-2"),
+        }
+    )
+    previews.delete_failures["preview-1"] = RuntimeError("delete failed")
+
+    with pytest.raises(AppError) as raised:
+        await graph_for(
+            fixture,
+            ScriptedAgent(
+                {option.id: complete_recipe(option) for option in fixture.selected}
+            ),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+
+    assert raised.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert set(previews.delete_calls) == {"preview-1", "preview-2"}
+    assert len(previews.delete_calls) == 2
+    assert_exact_restore(fixture, await store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cancellation_wins_but_still_attempts_every_preview() -> None:
+    store = FailingRecipeCommitStore()
+    fixture = await make_generation(store=store)
+    store.fail_recipe_commit = True
+    previews = ScriptedDishPreviews(
+        {
+            "option-1": DishPreview(artifact_id="preview-1"),
+            "option-2": DishPreview(artifact_id="preview-2"),
+        }
+    )
+    previews.delete_failures["preview-1"] = asyncio.CancelledError()
+
+    with pytest.raises(NodeCancelledError):
+        await graph_for(
+            fixture,
+            ScriptedAgent(
+                {option.id: complete_recipe(option) for option in fixture.selected}
+            ),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+
+    assert previews.delete_calls == ["preview-1", "preview-2"]
+    assert_exact_restore(fixture, await store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_pending_failed_replace_cleans_before_rollback() -> (
+    None
+):
+    store = SuspendedFailingRecipeCommitStore()
+    fixture = await make_generation(store=store, selected_ids=("option-1",))
+    store.fail_recipe_commit = True
+    previews = ScriptedDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-uncommitted")}
+    )
+    graph_task = asyncio.create_task(
+        graph_for(
+            fixture,
+            ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+    )
+
+    try:
+        await asyncio.wait_for(store.recipe_commit_started.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+        store.allow_recipe_failure.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        store.allow_recipe_failure.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    assert previews.delete_calls == ["preview-uncommitted"]
+    assert_exact_restore(fixture, await store.require(fixture.generating.id))
+
+
+@pytest.mark.asyncio
+async def test_superseded_preview_is_deleted_only_after_successful_commit() -> None:
+    fixture = await make_generation(
+        selected_ids=("option-1",),
+        previous_stage=SessionStage.RECIPES_READY,
+        prior_preview_artifact_id="preview-old",
+    )
+
+    class CommitObservingPreviews(ScriptedDishPreviews):
+        async def delete(self, artifact_id: str) -> None:
+            saved = await fixture.store.require(fixture.generating.id)
+            assert saved.stage is SessionStage.RECIPES_READY
+            assert saved.complete_recipes["option-1"].preview == DishPreview(
+                artifact_id="preview-new"
+            )
+            await super().delete(artifact_id)
+
+    previews = CommitObservingPreviews(
+        {"option-1": DishPreview(artifact_id="preview-new")}
+    )
+
+    await graph_for(
+        fixture,
+        ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+        dish_previews=previews,
+        dish_previews_enabled=True,
+    ).ainvoke(invocation(fixture))
+
+    assert previews.delete_calls == ["preview-old"]
+
+
+@pytest.mark.asyncio
+async def test_failed_replace_preserves_old_preview_and_deletes_only_new_preview() -> (
+    None
+):
+    store = FailingRecipeCommitStore()
+    fixture = await make_generation(
+        store=store,
+        selected_ids=("option-1",),
+        previous_stage=SessionStage.RECIPES_READY,
+        prior_preview_artifact_id="preview-old",
+    )
+    store.fail_recipe_commit = True
+    previews = ScriptedDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-new")}
+    )
+
+    with pytest.raises(AppError):
+        await graph_for(
+            fixture,
+            ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+
+    saved = await store.require(fixture.generating.id)
+    assert_exact_restore(fixture, saved)
+    assert saved.complete_recipes["option-1"].preview == DishPreview(
+        artifact_id="preview-old"
+    )
+    assert previews.delete_calls == ["preview-new"]
+
+
+@pytest.mark.asyncio
+async def test_stale_commit_cleans_preview_without_overwriting_newer_state() -> None:
+    store = StaleRecipeCommitStore()
+    fixture = await make_generation(store=store, selected_ids=("option-1",))
+    store.make_recipe_commit_stale = True
+    previews = ScriptedDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-stale")}
+    )
+
+    with pytest.raises(AppError) as raised:
+        await graph_for(
+            fixture,
+            ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+
+    assert raised.value.code is ErrorCode.INVALID_SESSION_TRANSITION
+    assert previews.delete_calls == ["preview-stale"]
+    assert store.newer is not None
+    assert await store.require(fixture.generating.id) == store.newer
+    assert store.newer.recipe_generation_id == "newer-attempt"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_settled_commit_preserves_new_and_cleans_old() -> None:
+    store = CommitThenSuspendStore()
+    fixture = await make_generation(
+        store=store,
+        selected_ids=("option-1",),
+        previous_stage=SessionStage.RECIPES_READY,
+        prior_preview_artifact_id="preview-old",
+    )
+    previews = ScriptedDishPreviews(
+        {"option-1": DishPreview(artifact_id="preview-new")}
+    )
+    store.suspend_recipe_return = True
+    graph_task = asyncio.create_task(
+        graph_for(
+            fixture,
+            ScriptedAgent({"option-1": complete_recipe(fixture.selected[0])}),
+            dish_previews=previews,
+            dish_previews_enabled=True,
+        ).ainvoke(invocation(fixture))
+    )
+
+    try:
+        await asyncio.wait_for(store.recipe_committed.wait(), timeout=1)
+        graph_task.cancel()
+        await asyncio.sleep(0)
+        assert not graph_task.done()
+        store.allow_recipe_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await graph_task
+    finally:
+        store.allow_recipe_return.set()
+        if not graph_task.done():
+            graph_task.cancel()
+        await asyncio.gather(graph_task, return_exceptions=True)
+
+    saved = await store.require(fixture.generating.id)
+    assert saved.complete_recipes["option-1"].preview == DishPreview(
+        artifact_id="preview-new"
+    )
+    assert previews.delete_calls == ["preview-old"]
 
 
 @pytest.mark.asyncio

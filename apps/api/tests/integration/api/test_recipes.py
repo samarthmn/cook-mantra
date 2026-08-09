@@ -18,8 +18,10 @@ from api.dependencies import get_job_runner, get_session_store
 from api.routes import recipes as recipe_routes
 from core.config import Settings
 from core.errors import AppError, ErrorCode
+from core.runtime_config import ProviderConfiguration, RuntimeConfigurationSnapshot
 from domain.ingredients import ExtractionResult, Ingredient, IngredientSource
 from domain.jobs import JobOperation
+from domain.model_runtime import AgentRole, ProviderName
 from domain.recipe_options import Difficulty, RecipeOption, RecipePreferences
 from domain.recipe_service import RecipeGenerationContext
 from domain.recipes import (
@@ -33,6 +35,7 @@ from orchestration.graphs.complete_recipes import (
     CompleteRecipesOutput,
 )
 from repositories.session_store import SessionStore
+from tests.runtime_support import image_enabled_runtime_snapshot
 
 type ProgressReporter = Callable[[int], Awaitable[None]]
 
@@ -41,7 +44,7 @@ class ReadyOllama:
     async def inspect(self) -> dict[str, object]:
         return {
             "reachable": True,
-            "available_models": [],
+            "available_models": ["qwen3.5:9b", "gpt-oss:20b"],
             "missing": [],
         }
 
@@ -106,6 +109,20 @@ class FakeSpecializedRecipeAgent:
         if isinstance(result, BaseException):
             raise result
         return result.model_copy(deep=True)
+
+
+class FailingDishPreviewService:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def generate(
+        self,
+        session_id: str,
+        recipe: CompleteRecipe,
+        progress: ProgressReporter,
+    ) -> object:
+        self.calls.append(recipe.option_id)
+        raise RuntimeError("private image provider failure")
 
 
 class FailingJobRunner:
@@ -224,6 +241,33 @@ def complete_recipe(option: RecipeOption, *, servings: int = 2) -> CompleteRecip
                 duration_minutes=10,
             )
         ],
+    )
+
+
+def codex_image_runtime_snapshot() -> RuntimeConfigurationSnapshot:
+    snapshot = image_enabled_runtime_snapshot()
+    assert snapshot.config is not None
+    config = snapshot.config
+    image_selection = config.roles[AgentRole.IMAGE_GENERATOR].model_copy(
+        update={"provider": ProviderName.CODEX, "provider_tag": None}
+    )
+    return snapshot.model_copy(
+        update={
+            "config": config.model_copy(
+                update={
+                    "providers": {
+                        **config.providers,
+                        ProviderName.CODEX: ProviderConfiguration(
+                            command=("codex", "app-server")
+                        ),
+                    },
+                    "roles": {
+                        **config.roles,
+                        AgentRole.IMAGE_GENERATOR: image_selection,
+                    },
+                }
+            )
+        }
     )
 
 
@@ -393,7 +437,13 @@ def test_successful_job_exposes_complete_recipe_from_stored_workflow_output(
         "failed_option_ids": [],
     }
     assert saved.json()["stage"] == "recipes_ready"
-    assert saved.json()["complete_recipes"][curry.id]["name"] == "Tomato Curry"
+    saved_recipe = saved.json()["complete_recipes"][curry.id]
+    assert saved_recipe["name"] == "Tomato Curry"
+    assert saved_recipe["preview"] is None
+    assert all(
+        "preview" not in option and "warnings" not in option
+        for option in saved.json()["recipe_options"]
+    )
     assert saved.json()["recipe_failures"] == {}
 
 
@@ -442,12 +492,99 @@ def test_partial_success_keeps_recipe_and_safe_failure(
         "failed_option_ids": [soup.id],
     }
     assert list(saved.json()["complete_recipes"]) == [curry.id]
+    assert saved.json()["complete_recipes"][curry.id]["preview"] is None
     assert saved.json()["recipe_failures"][soup.id] == {
         "option_id": soup.id,
         "code": "model_output_invalid",
         "message": "The model returned invalid structured output.",
         "retryable": True,
     }
+
+
+def test_preview_failure_preserves_completed_recipe_with_one_safe_warning(
+    project_tmp_path: Path,
+) -> None:
+    curry = stored_option("option-curry", "Tomato Curry")
+    preview_service = FailingDishPreviewService()
+    application = create_app(
+        settings=Settings(_env_file=None, artifact_root=project_tmp_path),
+        runtime_snapshot=image_enabled_runtime_snapshot(),
+        image_runtimes={},
+        ollama_health=ReadyOllama(),
+        ingredient_extractor=UnusedIngredientExtractor(),
+        specialized_recipe_agent=FakeSpecializedRecipeAgent(
+            {curry.id: complete_recipe(curry)}
+        ),
+        dish_previews=preview_service,
+    )
+
+    with TestClient(application) as test_client:
+        session = test_client.portal.call(
+            partial(
+                store_options_session,
+                application.state.session_store,
+                options=[curry],
+            )
+        )
+        queued = test_client.post(
+            f"/api/v1/sessions/{session.id}/recipes",
+            json={"option_ids": [curry.id]},
+        )
+        job = poll_job(test_client, queued.json()["job_id"])
+        saved = test_client.get(f"/api/v1/sessions/{session.id}").json()
+
+    assert job.json()["status"] == "succeeded"
+    assert preview_service.calls == [curry.id]
+    assert saved["complete_recipes"][curry.id]["preview"] is None
+    assert (
+        saved["complete_recipes"][curry.id]["warnings"].count(
+            "Dish preview unavailable."
+        )
+        == 1
+    )
+
+
+def test_codex_image_role_never_invokes_an_injected_preview_service(
+    project_tmp_path: Path,
+) -> None:
+    curry = stored_option("option-curry", "Tomato Curry")
+    preview_service = FailingDishPreviewService()
+    application = create_app(
+        settings=Settings(_env_file=None, artifact_root=project_tmp_path),
+        runtime_snapshot=codex_image_runtime_snapshot(),
+        image_runtimes={},
+        ollama_health=ReadyOllama(),
+        ingredient_extractor=UnusedIngredientExtractor(),
+        specialized_recipe_agent=FakeSpecializedRecipeAgent(
+            {curry.id: complete_recipe(curry)}
+        ),
+        dish_previews=preview_service,
+    )
+
+    with TestClient(application) as test_client:
+        session = test_client.portal.call(
+            partial(
+                store_options_session,
+                application.state.session_store,
+                options=[curry],
+            )
+        )
+        queued = test_client.post(
+            f"/api/v1/sessions/{session.id}/recipes",
+            json={"option_ids": [curry.id]},
+        )
+        job = poll_job(test_client, queued.json()["job_id"])
+        saved_recipe = test_client.get(f"/api/v1/sessions/{session.id}").json()[
+            "complete_recipes"
+        ][curry.id]
+
+    assert (
+        application.state.complete_recipes_dependencies.dish_previews_enabled is False
+    )
+    assert job.json()["status"] == "succeeded"
+    assert preview_service.calls == []
+    assert saved_recipe["preview"] is None
+    assert "Dish preview unavailable." not in saved_recipe["warnings"]
 
 
 def test_all_failed_job_restores_exact_previous_session(
@@ -782,17 +919,9 @@ def test_job_result_is_detached_from_mutable_workflow_output(
     }
 
 
-def test_app_wires_recipe_agent_to_exact_settings_store_and_shared_limiter(
+def test_app_wires_recipe_agent_to_exact_factory_store_and_shared_limiter(
     project_tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def reject_model_construction(*args, **kwargs):
-        raise AssertionError("Application construction must not open a model.")
-
-    monkeypatch.setattr(
-        "agents.specialized_recipe.get_model",
-        reject_model_construction,
-    )
     settings = Settings(_env_file=None, artifact_root=project_tmp_path)
 
     application = create_app(
@@ -804,9 +933,29 @@ def test_app_wires_recipe_agent_to_exact_settings_store_and_shared_limiter(
     dependencies = application.state.complete_recipes_dependencies
     assert isinstance(dependencies.agent, OllamaSpecializedRecipeAgent)
     assert dependencies.agent._settings is settings
+    assert (
+        dependencies.agent._model_factory is application.state.structured_model_factory
+    )
     assert dependencies.session_store is application.state.session_store
     assert dependencies.model_call_limiter is application.state.model_call_limiter
+    assert dependencies.dish_previews is application.state.dish_preview_service
+    assert dependencies.dish_previews_enabled is False
     assert application.state.complete_recipes_runner
+
+
+def test_app_enables_complete_recipe_previews_only_from_the_runtime_role(
+    project_tmp_path: Path,
+) -> None:
+    application = create_app(
+        settings=Settings(_env_file=None, artifact_root=project_tmp_path),
+        runtime_snapshot=image_enabled_runtime_snapshot(),
+        ollama_health=ReadyOllama(),
+        ingredient_extractor=UnusedIngredientExtractor(),
+    )
+
+    dependencies = application.state.complete_recipes_dependencies
+    assert dependencies.dish_previews is application.state.dish_preview_service
+    assert dependencies.dish_previews_enabled is True
 
 
 def test_recipe_route_openapi_uses_public_contracts(client: TestClient) -> None:

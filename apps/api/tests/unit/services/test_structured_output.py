@@ -8,6 +8,9 @@ from pydantic import ValidationError
 
 from core.errors import AppError, ErrorCode
 from domain.ingredients import ExtractionResult
+from domain.model_runtime import ProviderError, ProviderErrorKind
+from services.provider_errors import ProviderInvocationError
+from services.providers.ollama import adapt_structured_model
 from services.structured_output import invoke_structured
 
 
@@ -67,6 +70,28 @@ def invalid_extraction_result() -> ValidationError:
 
 
 @pytest.mark.asyncio
+async def test_provider_authentication_failure_uses_generic_public_error() -> None:
+    model = SequencedStructuredModel(
+        [
+            ProviderInvocationError(
+                ProviderError(
+                    kind=ProviderErrorKind.AUTHENTICATION_FAILED,
+                    message="Authentication failed.",
+                    retryable=False,
+                )
+            )
+        ]
+    )
+
+    with pytest.raises(AppError) as raised:
+        await invoke_structured(model, [])
+
+    assert raised.value.code is ErrorCode.PROVIDER_AUTHENTICATION_FAILED
+    assert raised.value.status_code == 401
+    assert raised.value.retryable is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "parsing_error",
     [
@@ -96,7 +121,7 @@ async def test_exhausted_parsing_failures_map_to_model_output_invalid() -> None:
     )
 
     with pytest.raises(AppError) as raised:
-        await invoke_structured(model, ["extract ingredients"])
+        await invoke_structured(adapt_structured_model(model), ["extract ingredients"])
 
     assert raised.value.code is ErrorCode.MODEL_OUTPUT_INVALID
     assert raised.value.status_code == 502
@@ -115,7 +140,7 @@ async def test_exhausted_transient_timeouts_map_to_operation_timed_out() -> None
     )
 
     with pytest.raises(AppError) as raised:
-        await invoke_structured(model, ["extract ingredients"])
+        await invoke_structured(adapt_structured_model(model), ["extract ingredients"])
 
     assert raised.value.code is ErrorCode.OPERATION_TIMED_OUT
     assert raised.value.status_code == 504
@@ -162,18 +187,69 @@ async def test_exhausted_transient_timeouts_map_to_operation_timed_out() -> None
         ),
     ],
 )
-async def test_model_server_failures_are_retried_then_map_to_ollama_unavailable(
+async def test_model_server_failures_are_retried_then_map_to_provider_unavailable(
     model_errors: list[Exception],
 ) -> None:
     model = SequencedStructuredModel(model_errors)
 
     with pytest.raises(AppError) as raised:
-        await invoke_structured(model, ["extract ingredients"])
+        await invoke_structured(adapt_structured_model(model), ["extract ingredients"])
 
-    assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
+    assert raised.value.code is ErrorCode.PROVIDER_UNAVAILABLE
     assert raised.value.status_code == 503
     assert raised.value.retryable is True
     assert model.attempts == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("legacy_error", "expected_kind"),
+    [
+        pytest.param(
+            httpx.ReadTimeout(
+                "legacy-timeout-canary",
+                request=httpx.Request("POST", "http://ollama.test/api/chat"),
+            ),
+            ProviderErrorKind.TIMED_OUT,
+            id="timeout",
+        ),
+        pytest.param(
+            httpx.ConnectError(
+                "legacy-network-canary",
+                request=httpx.Request("POST", "http://ollama.test/api/chat"),
+            ),
+            ProviderErrorKind.UNAVAILABLE,
+            id="network",
+        ),
+        pytest.param(
+            OutputParserException("legacy-invalid-json-canary"),
+            ProviderErrorKind.INVALID_OUTPUT,
+            id="parser",
+        ),
+        pytest.param(
+            invalid_extraction_result(),
+            ProviderErrorKind.INVALID_OUTPUT,
+            id="validation",
+        ),
+        pytest.param(
+            ValueError("legacy-protocol-canary"),
+            ProviderErrorKind.PROTOCOL_ERROR,
+            id="value",
+        ),
+    ],
+)
+async def test_legacy_adapter_outward_failures_are_fully_detached(
+    legacy_error: Exception,
+    expected_kind: ProviderErrorKind,
+) -> None:
+    model = SequencedStructuredModel([legacy_error])
+
+    with pytest.raises(ProviderInvocationError) as raised:
+        await adapt_structured_model(model).ainvoke(["extract ingredients"])
+
+    assert raised.value.error.kind is expected_kind
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 @pytest.mark.asyncio
@@ -188,7 +264,11 @@ async def test_attempts_are_capped_at_two() -> None:
     )
 
     with pytest.raises(AppError):
-        await invoke_structured(model, ["extract ingredients"], max_attempts=5)
+        await invoke_structured(
+            adapt_structured_model(model),
+            ["extract ingredients"],
+            max_attempts=5,
+        )
 
     assert model.attempts == 2
 
@@ -263,7 +343,7 @@ async def test_empty_model_response_is_retried_then_reported_as_retryable() -> N
         ]
     )
 
-    result = await invoke_structured(model, [])
+    result = await invoke_structured(adapt_structured_model(model), [])
 
     assert model.attempts == 2
     assert result.detected[0].name == "Tomato"
@@ -280,8 +360,8 @@ async def test_persistently_empty_model_response_is_not_an_internal_error() -> N
     )
 
     with pytest.raises(AppError) as raised:
-        await invoke_structured(model, [])
+        await invoke_structured(adapt_structured_model(model), [])
 
-    assert raised.value.code is ErrorCode.OLLAMA_UNAVAILABLE
+    assert raised.value.code is ErrorCode.PROVIDER_PROTOCOL_ERROR
     assert raised.value.retryable is True
-    assert raised.value.status_code == 503
+    assert raised.value.status_code == 502

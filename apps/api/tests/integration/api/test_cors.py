@@ -45,6 +45,28 @@ def test_local_frontend_origins_receive_cors_headers(
     assert simple.headers["access-control-expose-headers"] == "X-Request-ID"
 
 
+def test_browser_upload_preflight_allows_the_runtime_revision_header(
+    client: TestClient,
+) -> None:
+    response = client.options(
+        "/api/v1/sessions",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": (
+                "Content-Type, X-Cook-Mantra-Runtime-Revision"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == ("http://localhost:3000")
+    assert (
+        "x-cook-mantra-runtime-revision"
+        in response.headers["access-control-allow-headers"].lower()
+    )
+
+
 @pytest.mark.parametrize(
     "origin",
     [

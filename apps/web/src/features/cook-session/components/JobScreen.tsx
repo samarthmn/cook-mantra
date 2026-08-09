@@ -7,6 +7,7 @@ interface JobLine {
   label: string;
   detail: string;
   agent: boolean;
+  phase?: "preview";
 }
 
 interface JobCopy {
@@ -20,6 +21,10 @@ interface JobCopy {
 
 interface JobScreenProps {
   job: JobView;
+  imageRoleStatus?: {
+    enabled: boolean;
+    ready: boolean;
+  };
   allowInterruption?: boolean;
   onCancel: () => void;
   onSimulateFailure: () => void;
@@ -27,7 +32,11 @@ interface JobScreenProps {
 }
 
 const extractionLines: JobLine[] = [
-  { label: "Photo upload", detail: "Sent for this session only", agent: false },
+  {
+    label: "Photo upload",
+    detail: "Sent after the destination check",
+    agent: false,
+  },
   {
     label: "Ingredient Extraction Agent",
     detail: "Identifying the ingredients in your photo",
@@ -47,23 +56,21 @@ const ideaLines: JobLine[] = [
     agent: true,
   },
   {
-    label: "Nutrition Agent",
-    detail: "Estimating calories, macros and diet tags",
-    agent: true,
-  },
-  {
-    label: "Image Agent",
-    detail: "Generating a photo of each dish (AI-generated)",
-    agent: true,
-  },
-  {
     label: "Assembling options",
-    detail: "Combining ideas, nutrition and images",
+    detail: "Checking the final set of dish ideas",
     agent: false,
   },
 ];
 
-function jobCopy(job: JobView): JobCopy {
+// The backend reports per-recipe workers only after writing and optional preview
+// generation have both settled. It exposes no safe milestone for claiming that
+// an individual preview is running.
+const RECIPE_WORKERS_SETTLED_PROGRESS = 90;
+
+function jobCopy(
+  job: JobView,
+  imageRoleStatus: JobScreenProps["imageRoleStatus"],
+): JobCopy {
   if (job.kind === "extraction") {
     return {
       kicker: "Step 1 — Identifying ingredients",
@@ -86,13 +93,25 @@ function jobCopy(job: JobView): JobCopy {
           ? `${job.selectedNames.length} recipes, in parallel`
           : "Writing your recipe",
       intro:
-        "One Specialized Recipe Agent per dish, each an expert in its cuisine. They run at the same time.",
+        "One Recipe Writer Agent per dish, each an expert in its cuisine. They run at the same time.",
       lines: [
-        ...job.selectedNames.map((name) => ({
-          label: `Specialized Recipe Agent — ${name}`,
-          detail: "Quantities, numbered steps, tips, substitutions",
-          agent: true,
-        })),
+        ...job.selectedNames.flatMap((name) => [
+          {
+            label: `Recipe Writer Agent — ${name}`,
+            detail: "Quantities, numbered steps, tips, substitutions",
+            agent: true,
+          },
+          ...(imageRoleStatus?.enabled && imageRoleStatus.ready
+            ? [
+                {
+                  label: `Dish preview — ${name}`,
+                  detail: "Starts after this recipe is written",
+                  agent: true,
+                  phase: "preview" as const,
+                },
+              ]
+            : []),
+        ]),
         {
           label: "Collecting results",
           detail: "All successful recipes return together",
@@ -123,8 +142,14 @@ function lineStatus(
   if (progress >= 100) return "done";
   if (parallel) {
     const collecting = index === lineCount - 1;
-    if (collecting) return progress >= 80 ? "running" : "pending";
-    return progress > 0 ? (progress >= 80 ? "done" : "running") : "pending";
+    if (collecting) {
+      return progress >= RECIPE_WORKERS_SETTLED_PROGRESS ? "running" : "pending";
+    }
+    return progress > 0
+      ? progress >= RECIPE_WORKERS_SETTLED_PROGRESS
+        ? "done"
+        : "running"
+      : "pending";
   }
   if (index < preCompleted) {
     if (progress > 0) return "done";
@@ -140,12 +165,13 @@ function lineStatus(
 
 export function JobScreen({
   job,
+  imageRoleStatus,
   allowInterruption = true,
   onCancel,
   onSimulateFailure,
   showSimulateFailure = false,
 }: JobScreenProps) {
-  const copy = jobCopy(job);
+  const copy = jobCopy(job, imageRoleStatus);
   const parallel = job.kind === "recipes";
 
   return (
@@ -171,13 +197,18 @@ export function JobScreen({
         aria-live="polite"
       >
         {copy.lines.map((line, index) => {
-          const status = lineStatus(
-            index,
-            copy.lines.length,
-            job.progress,
-            parallel,
-            copy.preCompletedLines ?? 0,
-          );
+          const status =
+            line.phase === "preview"
+              ? job.progress >= RECIPE_WORKERS_SETTLED_PROGRESS
+                ? "done"
+                : "pending"
+              : lineStatus(
+                  index,
+                  copy.lines.length,
+                  job.progress,
+                  parallel,
+                  copy.preCompletedLines ?? 0,
+                );
           return (
             <div
               className="job-row"

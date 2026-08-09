@@ -1,280 +1,423 @@
-"""Beast API adapter for generated dish preview images."""
+"""Provider-neutral generated-image validation and invocation boundaries."""
 
-import asyncio
-import hashlib
+import base64
 import math
-from collections.abc import Awaitable, Callable
+import warnings
+from collections.abc import Awaitable, Callable, Mapping
 from io import BytesIO
-from types import TracebackType
-from typing import Protocol, Self
+from typing import Protocol
 
-import httpx
 from PIL import Image
 
 from core.errors import AppError, ErrorCode
-from domain.images import GeneratedImage, ImageGenerationRequest
+from core.logging import current_log_context
+from core.runtime_config import RoleConfiguration, RuntimeConfigurationSnapshot
+from domain.images import ImageGenerationRequest, VerifiedRaster
+from domain.model_runtime import (
+    IMAGE_PROVIDER_NAMES,
+    AgentRole,
+    Capability,
+    ImageOutputFormat,
+    ImageOutputProvider,
+    ImageTuning,
+    ModelResult,
+    ModelUsage,
+    ModelUsageEvent,
+    ProviderDiscoveryResult,
+    ProviderError,
+    ProviderErrorKind,
+    ProviderImageOutput,
+    ProviderName,
+)
+from services.provider_errors import ProviderInvocationError
 
 ProgressCallback = Callable[[int], Awaitable[None]]
 
-_MEDIA_TYPES = {
-    "JPEG": "image/jpeg",
-    "PNG": "image/png",
-    "WEBP": "image/webp",
+MAX_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_ENCODED_IMAGE_CHARS = 4 * math.ceil(MAX_GENERATED_IMAGE_BYTES / 3)
+
+_RASTER_TYPES: dict[str, tuple[ImageOutputFormat, str]] = {
+    "JPEG": (ImageOutputFormat.JPEG, "image/jpeg"),
+    "PNG": (ImageOutputFormat.PNG, "image/png"),
+    "WEBP": (ImageOutputFormat.WEBP, "image/webp"),
 }
-_TERMINAL_FAILURE_STATES = {"cancelled", "failed"}
+_ALLOWED_MEDIA_TYPES = frozenset(media_type for _, media_type in _RASTER_TYPES.values())
+_RETRYABLE_PROVIDER_KINDS = frozenset(
+    {
+        ProviderErrorKind.RATE_LIMITED,
+        ProviderErrorKind.TIMED_OUT,
+        ProviderErrorKind.UNAVAILABLE,
+    }
+)
 
 
 class ImageGenerator(Protocol):
-    """Generate one verified image while reporting bounded progress."""
+    """Generate one centrally verified raster and report bounded progress."""
 
     async def generate(
         self,
         request: ImageGenerationRequest,
         progress: ProgressCallback,
-    ) -> GeneratedImage:
-        raise NotImplementedError
+    ) -> VerifiedRaster: ...
 
 
-class BeastImageGenerator:
-    """Submit, poll, download, and verify one Beast API image job."""
+class ImageProviderRuntime(ImageOutputProvider, Protocol):
+    """Discover and invoke one immutable configured image-provider selection."""
+
+    async def inspect(self) -> ProviderDiscoveryResult: ...
+
+
+class ModelUsageEventSink(Protocol):
+    """Receive content-free image usage events."""
+
+    async def record(self, event: ModelUsageEvent) -> None: ...
+
+
+class RuntimeImageGenerator:
+    """Invoke the one configured image runtime and return a verified raster."""
 
     def __init__(
         self,
+        snapshot: RuntimeConfigurationSnapshot,
         *,
-        base_url: str,
-        api_key: str,
-        model: str,
-        client: httpx.AsyncClient | None = None,
-        timeout_seconds: float = 600.0,
-        poll_interval_seconds: float = 2.0,
-        transport: httpx.AsyncBaseTransport | None = None,
+        image_runtimes: Mapping[ProviderName, ImageProviderRuntime],
+        usage_journal: ModelUsageEventSink | None = None,
     ) -> None:
-        if client is not None and transport is not None:
-            raise ValueError("transport cannot be supplied with an injected client")
-
-        self._base_url = base_url.rstrip("/")
-        self._model = model
-        self._timeout_seconds = timeout_seconds
-        self._poll_interval_seconds = poll_interval_seconds
-        self._headers = {"Authorization": f"Bearer {api_key}"}
-        self._owns_client = client is None
-        self._client = (
-            client
-            if client is not None
-            else httpx.AsyncClient(
-                timeout=timeout_seconds,
-                transport=transport,
-            )
-        )
-        self._closed = False
+        self._snapshot = snapshot
+        self._image_runtimes = dict(image_runtimes)
+        self._usage_journal = usage_journal
 
     async def generate(
         self,
         request: ImageGenerationRequest,
         progress: ProgressCallback,
-    ) -> GeneratedImage:
-        """Generate and verify one image within a single overall timeout."""
+    ) -> VerifiedRaster:
+        selection = self._selection(request)
+        runtime = self._image_runtimes.get(selection.provider)
+        if runtime is None:
+            raise _public_image_error(
+                _runtime_failure(
+                    ProviderErrorKind.CAPABILITY_MISSING,
+                    provider=selection.provider,
+                    retryable=False,
+                )
+            ) from None
+
         try:
-            async with asyncio.timeout(self._timeout_seconds):
-                return await self._generate(request, progress)
-        except (httpx.TimeoutException, TimeoutError) as error:
-            raise AppError(
-                code=ErrorCode.OPERATION_TIMED_OUT,
-                message="Image generation timed out.",
-                status_code=504,
-                retryable=True,
-            ) from error
-        except (httpx.HTTPStatusError, httpx.RequestError) as error:
-            raise _provider_unavailable() from error
-
-    async def _generate(
-        self,
-        request: ImageGenerationRequest,
-        progress: ProgressCallback,
-    ) -> GeneratedImage:
-        payload: dict[str, object] = {
-            "model": self._model,
-            "prompt": request.prompt,
-            "width": request.width,
-            "height": request.height,
-            "output_format": "png",
-        }
-        if request.steps is not None:
-            payload["model_options"] = {"steps": request.steps}
-
-        response = await self._client.post(
-            f"{self._base_url}/v1/images/generations",
-            json=payload,
-            headers=self._headers,
-        )
-        response.raise_for_status()
-        if response.status_code != 202:
-            raise _provider_unavailable()
-
-        job = _job_resource(response)
-        last_progress = -1
-        while True:
-            next_progress = _job_progress(job)
-            if next_progress is not None and next_progress > last_progress:
-                await progress(next_progress)
-                last_progress = next_progress
-
-            state = job.get("state")
-            if state == "completed":
-                break
-            if state in _TERMINAL_FAILURE_STATES:
-                raise _provider_unavailable()
-            if state not in {"queued", "loading", "running"}:
-                raise _provider_unavailable()
-
-            job_id = job.get("id")
-            if not isinstance(job_id, str) or not job_id:
-                raise _provider_unavailable()
-            await asyncio.sleep(self._poll_interval_seconds)
-            response = await self._client.get(
-                f"{self._base_url}/v1/jobs/{job_id}",
-                headers=self._headers,
+            inspection = await runtime.inspect()
+            if not isinstance(inspection, ProviderDiscoveryResult):
+                raise _runtime_failure(
+                    ProviderErrorKind.PROTOCOL_ERROR,
+                    provider=selection.provider,
+                    retryable=False,
+                )
+            self._admit(inspection)
+            result = await runtime.generate_image(
+                request.prompt,
+                tuning=request.tuning,
             )
-            response.raise_for_status()
-            if response.status_code != 200:
-                raise _provider_unavailable()
-            job = _job_resource(response)
-
-        job_id = job.get("id")
-        outputs = job.get("outputs")
-        if (
-            not isinstance(job_id, str)
-            or not job_id
-            or not isinstance(outputs, list)
-            or not outputs
-            or not isinstance(outputs[0], dict)
-        ):
-            raise _artifact_failure()
-
-        output = outputs[0]
-        expected_size = output.get("size_bytes")
-        expected_sha256 = output.get("sha256")
-        if (
-            isinstance(expected_size, bool)
-            or not isinstance(expected_size, int)
-            or expected_size <= 0
-            or not isinstance(expected_sha256, str)
-            or not expected_sha256
-        ):
-            raise _artifact_failure()
-
-        response = await self._client.get(
-            self._output_url(job_id, 0),
-            headers=self._headers,
-        )
-        response.raise_for_status()
-        if response.status_code != 200:
-            raise _provider_unavailable()
-        image_bytes = response.content
-
-        if len(image_bytes) != expected_size:
-            raise _artifact_failure()
-        if hashlib.sha256(image_bytes).hexdigest() != expected_sha256:
-            raise _artifact_failure()
-
-        generated_image = _decode_and_verify(image_bytes)
-        if generated_image is None:
-            raise _artifact_failure()
+            if not isinstance(result, ModelResult) or not isinstance(
+                result.output, ProviderImageOutput
+            ):
+                raise _runtime_failure(
+                    ProviderErrorKind.PROTOCOL_ERROR,
+                    provider=selection.provider,
+                    retryable=False,
+                )
+            if result.usage is not None and not isinstance(result.usage, ModelUsage):
+                raise _runtime_failure(
+                    ProviderErrorKind.PROTOCOL_ERROR,
+                    provider=selection.provider,
+                    retryable=False,
+                )
+            if result.usage is not None and self._usage_journal is not None:
+                await self._usage_journal.record(
+                    ModelUsageEvent(
+                        role=AgentRole.IMAGE_GENERATOR,
+                        provider=selection.provider,
+                        model=selection.model,
+                        usage=ModelUsage(
+                            input_tokens=result.usage.input_tokens,
+                            output_tokens=result.usage.output_tokens,
+                        ),
+                        **_usage_correlation(),
+                    )
+                )
+            raster = validate_generated_raster(result.output, request.tuning)
+        except ProviderInvocationError as error:
+            raise _public_image_error(error) from None
 
         await progress(100)
-        return generated_image
+        return raster
 
-    def _output_url(self, job_id: str, index: int) -> str:
-        """Build the pending Beast output-download route in one place."""
-        return f"{self._base_url}/v1/jobs/{job_id}/outputs/{index}"
+    def _selection(self, request: ImageGenerationRequest) -> RoleConfiguration:
+        config = self._snapshot.config
+        if config is None:
+            raise _configuration_error()
+        selection = config.roles[AgentRole.IMAGE_GENERATOR]
+        if not selection.enabled:
+            raise _public_image_error(
+                _runtime_failure(
+                    ProviderErrorKind.CAPABILITY_MISSING,
+                    provider=selection.provider,
+                    retryable=False,
+                )
+            ) from None
+        if selection.provider not in IMAGE_PROVIDER_NAMES:
+            raise _public_image_error(
+                _runtime_failure(
+                    ProviderErrorKind.CAPABILITY_MISSING,
+                    provider=selection.provider,
+                    retryable=False,
+                )
+            ) from None
+        if selection.image_tuning is None or request.tuning != selection.image_tuning:
+            raise _configuration_error()
+        return selection
 
-    async def aclose(self) -> None:
-        """Close only the HTTP client created by this adapter."""
-        if self._owns_client and not self._closed:
-            await self._client.aclose()
-            self._closed = True
+    def _admit(self, inspection: ProviderDiscoveryResult) -> None:
+        config = self._snapshot.config
+        if config is None:
+            raise _runtime_failure(
+                ProviderErrorKind.PROTOCOL_ERROR,
+                retryable=False,
+            )
+        selection = config.roles[AgentRole.IMAGE_GENERATOR]
+        if inspection.provider is not selection.provider:
+            raise _runtime_failure(
+                ProviderErrorKind.PROTOCOL_ERROR,
+                provider=selection.provider,
+                retryable=False,
+            )
+        discovered = inspection.models.get(selection.model)
+        if discovered is None or discovered.model != selection.model:
+            raise _runtime_failure(
+                ProviderErrorKind.CAPABILITY_MISSING,
+                provider=selection.provider,
+                retryable=False,
+            )
+        if not discovered.available or discovered.error is not None:
+            kind = discovered.error or ProviderErrorKind.CAPABILITY_MISSING
+            raise _runtime_failure(
+                kind,
+                provider=selection.provider,
+                retryable=kind in _RETRYABLE_PROVIDER_KINDS,
+            )
+        configured_capabilities = selection.capabilities or frozenset()
+        if Capability.IMAGE_OUTPUT not in configured_capabilities or (
+            Capability.IMAGE_OUTPUT not in discovered.capabilities
+        ):
+            raise _runtime_failure(
+                ProviderErrorKind.CAPABILITY_MISSING,
+                provider=selection.provider,
+                retryable=False,
+            )
 
-    async def __aenter__(self) -> Self:
-        return self
 
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        await self.aclose()
-
-
-class UnavailableImageGenerator:
-    """Fail safely if preview generation is invoked without Beast settings."""
-
-    async def generate(
-        self,
-        request: ImageGenerationRequest,
-        progress: ProgressCallback,
-    ) -> GeneratedImage:
-        raise _provider_unavailable()
-
-
-def _job_resource(response: httpx.Response) -> dict[str, object]:
+def validate_generated_raster(
+    output: ProviderImageOutput,
+    tuning: ImageTuning,
+) -> VerifiedRaster:
+    """Decode and fully verify one provider raster without fetching or rewriting it."""
     try:
-        payload = response.json()
-    except (ValueError, UnicodeError):
-        raise _provider_unavailable() from None
-    if not isinstance(payload, dict):
-        raise _provider_unavailable()
-    return payload
-
-
-def _job_progress(job: dict[str, object]) -> int | None:
-    value = job.get("progress")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        if not math.isfinite(value):
-            return None
-        percent = value * 100 if value <= 1 else value
-        return int(max(0, min(percent, 99)))
-    except OverflowError:
-        return None
-
-
-def _decode_and_verify(image_bytes: bytes) -> GeneratedImage | None:
-    try:
-        with Image.open(BytesIO(image_bytes)) as image:
-            image_format = image.format
-            width, height = image.size
-            image.verify()
-        with Image.open(BytesIO(image_bytes)) as image:
-            image.load()
+        return _validate_generated_raster(output, tuning)
     except Exception:
-        return None
+        raise _invalid_output() from None
 
-    media_type = _MEDIA_TYPES.get(image_format or "")
-    if media_type is None:
-        return None
-    return GeneratedImage(
-        data=image_bytes,
+
+def _validate_generated_raster(
+    output: ProviderImageOutput,
+    tuning: ImageTuning,
+) -> VerifiedRaster:
+    raw_base64 = output.base64_data
+    if (
+        not isinstance(raw_base64, str)
+        or not raw_base64
+        or not raw_base64.isascii()
+        or len(raw_base64) > MAX_ENCODED_IMAGE_CHARS
+    ):
+        raise ValueError("invalid encoded image")
+
+    encoded = raw_base64.encode("ascii")
+    data = base64.b64decode(encoded, validate=True)
+    if not data or len(data) > MAX_GENERATED_IMAGE_BYTES:
+        raise ValueError("invalid decoded image")
+
+    declared_media_type = _normalize_media_type(output.media_type)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(BytesIO(data)) as image:
+            image_format, width, height, media_type = _inspect_raster(
+                image,
+                tuning,
+                declared_media_type,
+            )
+            image.verify()
+
+        with Image.open(BytesIO(data)) as image:
+            loaded_format, loaded_width, loaded_height, loaded_media_type = (
+                _inspect_raster(image, tuning, declared_media_type)
+            )
+            image.load()
+            if (
+                image.format != loaded_format
+                or image.size != (loaded_width, loaded_height)
+                or getattr(image, "n_frames", 1) != 1
+            ):
+                raise ValueError("loaded image metadata changed")
+
+    if (
+        loaded_format != image_format
+        or loaded_width != width
+        or loaded_height != height
+        or loaded_media_type != media_type
+    ):
+        raise ValueError("verified image metadata changed")
+    return VerifiedRaster(
+        data=data,
         media_type=media_type,
         width=width,
         height=height,
     )
 
 
-def _artifact_failure() -> AppError:
-    return AppError(
-        code=ErrorCode.ARTIFACT_FAILURE,
-        message="The generated image artifact is invalid.",
-        status_code=502,
+def _normalize_media_type(media_type: object) -> str | None:
+    if media_type is None:
+        return None
+    if not isinstance(media_type, str):
+        raise ValueError("invalid declared media type")
+    normalized = media_type.strip().lower()
+    if normalized not in _ALLOWED_MEDIA_TYPES:
+        raise ValueError("unsupported declared media type")
+    return normalized
+
+
+def _inspect_raster(
+    image: Image.Image,
+    tuning: ImageTuning,
+    declared_media_type: str | None,
+) -> tuple[str, int, int, str]:
+    image_format = image.format
+    raster_type = _RASTER_TYPES.get(image_format or "")
+    if raster_type is None:
+        raise ValueError("unsupported detected image format")
+    output_format, media_type = raster_type
+    if output_format is not tuning.output_format:
+        raise ValueError("detected image format differs from configured format")
+    if declared_media_type is not None and declared_media_type != media_type:
+        raise ValueError("declared media type differs from detected format")
+
+    width, height = image.size
+    if (
+        isinstance(width, bool)
+        or isinstance(height, bool)
+        or not isinstance(width, int)
+        or not isinstance(height, int)
+        or width <= 0
+        or height <= 0
+        or width != tuning.width
+        or height != tuning.height
+    ):
+        raise ValueError("detected dimensions differ from configured dimensions")
+    frame_count = getattr(image, "n_frames", 1)
+    if isinstance(frame_count, bool) or not isinstance(frame_count, int):
+        raise ValueError("invalid raster frame count")
+    if frame_count != 1:
+        raise ValueError("animated raster is not supported")
+    return image_format or "", width, height, media_type
+
+
+def _invalid_output() -> ProviderInvocationError:
+    return _runtime_failure(
+        ProviderErrorKind.INVALID_OUTPUT,
         retryable=False,
     )
 
 
-def _provider_unavailable() -> AppError:
+def _runtime_failure(
+    kind: ProviderErrorKind,
+    *,
+    retryable: bool,
+    provider: ProviderName | None = None,
+) -> ProviderInvocationError:
+    return ProviderInvocationError(
+        ProviderError(
+            kind=kind,
+            message="The selected image provider could not complete the operation.",
+            retryable=retryable,
+            provider=provider,
+            role=AgentRole.IMAGE_GENERATOR,
+        )
+    )
+
+
+def _usage_correlation() -> dict[str, object]:
+    context = current_log_context()
+    return {
+        field: value
+        for field in ("session_id", "job_id")
+        if isinstance((value := context.get(field)), str) and 0 < len(value) <= 128
+    }
+
+
+def _configuration_error() -> AppError:
     return AppError(
-        code=ErrorCode.IMAGE_PROVIDER_UNAVAILABLE,
-        message="The image generation provider is unavailable.",
+        code=ErrorCode.MODEL_CONFIGURATION_INVALID,
+        message="The model runtime configuration is invalid.",
         status_code=503,
-        retryable=True,
+        retryable=False,
+        details={"role": AgentRole.IMAGE_GENERATOR.value},
+    )
+
+
+def _public_image_error(error: ProviderInvocationError) -> AppError:
+    mappings: dict[ProviderErrorKind, tuple[ErrorCode, int, str]] = {
+        ProviderErrorKind.UNAVAILABLE: (
+            ErrorCode.PROVIDER_UNAVAILABLE,
+            503,
+            "The selected model provider is unavailable.",
+        ),
+        ProviderErrorKind.AUTHENTICATION_FAILED: (
+            ErrorCode.PROVIDER_AUTHENTICATION_FAILED,
+            401,
+            "Model provider authentication failed.",
+        ),
+        ProviderErrorKind.RATE_LIMITED: (
+            ErrorCode.PROVIDER_RATE_LIMITED,
+            429,
+            "The selected model provider is rate limited.",
+        ),
+        ProviderErrorKind.PAYMENT_REQUIRED: (
+            ErrorCode.PROVIDER_PAYMENT_REQUIRED,
+            402,
+            "The model provider requires payment.",
+        ),
+        ProviderErrorKind.CAPABILITY_MISSING: (
+            ErrorCode.MODEL_CAPABILITY_MISSING,
+            503,
+            "The selected model lacks a required capability.",
+        ),
+        ProviderErrorKind.PROTOCOL_ERROR: (
+            ErrorCode.PROVIDER_PROTOCOL_ERROR,
+            502,
+            "The model provider returned an invalid response.",
+        ),
+        ProviderErrorKind.TIMED_OUT: (
+            ErrorCode.OPERATION_TIMED_OUT,
+            504,
+            "The model operation timed out.",
+        ),
+        ProviderErrorKind.INVALID_OUTPUT: (
+            ErrorCode.ARTIFACT_FAILURE,
+            502,
+            "The generated image artifact is invalid.",
+        ),
+    }
+    code, status_code, message = mappings[error.error.kind]
+    return AppError(
+        code=code,
+        message=message,
+        status_code=status_code,
+        retryable=error.error.retryable,
+        details={"role": AgentRole.IMAGE_GENERATOR.value},
     )

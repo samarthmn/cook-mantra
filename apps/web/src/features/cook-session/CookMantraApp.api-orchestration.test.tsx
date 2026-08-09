@@ -1,11 +1,32 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiTimeoutError, CookMantraClient } from "@/lib/api/cook-mantra-client";
-import type { JobResponse, SessionResponse, TerminalJobResponse } from "@/types/api";
+import {
+  ApiError,
+  ApiTimeoutError,
+  CookMantraClient,
+} from "@/lib/api/cook-mantra-client";
+import type {
+  JobResponse,
+  RuntimeStatusResponse,
+  SessionResponse,
+  TerminalJobResponse,
+} from "@/types/api";
 
 import { CookMantraApp } from "./CookMantraApp";
+import {
+  persistRemoteMediaAcknowledgement,
+  type RemoteMediaDisclosureTarget,
+} from "./model/remote-media-disclosure";
 
 const originalCreateObjectUrl = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
 const originalRevokeObjectUrl = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
@@ -93,8 +114,6 @@ const optionsSession: SessionResponse = {
         allergen_warnings: [],
         disclaimer: "Estimated values; not medical advice.",
       },
-      preview: null,
-      warnings: ["Dish preview unavailable."],
     },
   ],
   excluded_recipe_names: ["Tomato Skillet"],
@@ -179,10 +198,87 @@ const recipesSession: SessionResponse = {
       allergen_notice: "Check ingredient labels for allergens.",
       assumptions: [],
       warnings: [],
+      preview: null,
     },
   },
   updated_at: "2026-07-31T08:00:09Z",
 };
+
+const RUNTIME_REVISION_A = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const RUNTIME_REVISION_B = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+function runtimeStatus(
+  provider: "ollama" | "openrouter" | "codex" = "ollama",
+  model = provider === "ollama" ? "qwen3.5:9b" : "openai/gpt-5.2",
+  runtimeRevision = RUNTIME_REVISION_A,
+  ingredientReady = true,
+): RuntimeStatusResponse {
+  return {
+    status: ingredientReady ? "ok" : "attention",
+    runtime_revision: runtimeRevision,
+    model_runtime: {
+      ready: ingredientReady,
+      roles: {
+        ingredient_extractor: {
+          role: "ingredient_extractor",
+          provider,
+          model,
+          enabled: true,
+          ready: ingredientReady,
+          required_capabilities: ["structured_output", "vision"],
+          available_capabilities: ingredientReady
+            ? ["structured_output", "vision"]
+            : [],
+          error: ingredientReady ? null : "unavailable",
+        },
+        master_chef: {
+          role: "master_chef",
+          provider: "ollama",
+          model: "qwen3.5:9b",
+          enabled: true,
+          ready: true,
+          required_capabilities: ["structured_output", "text"],
+          available_capabilities: ["structured_output", "text"],
+          error: null,
+        },
+        recipe_writer: {
+          role: "recipe_writer",
+          provider: "ollama",
+          model: "qwen3.5:9b",
+          enabled: true,
+          ready: true,
+          required_capabilities: ["structured_output", "text"],
+          available_capabilities: ["structured_output", "text"],
+          error: null,
+        },
+        image_generator: {
+          role: "image_generator",
+          provider: "ollama",
+          model: "x/z-image-turbo:latest",
+          enabled: false,
+          ready: true,
+          required_capabilities: ["image_output"],
+          available_capabilities: [],
+          error: null,
+        },
+      },
+    },
+  };
+}
+
+function persistRemoteTarget(target: RemoteMediaDisclosureTarget) {
+  expect(persistRemoteMediaAcknowledgement(localStorage, target)).toBe(true);
+}
+
+function deferred<Value>() {
+  let resolve!: (value: Value) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 function job(
   operation: JobResponse["operation"],
@@ -208,6 +304,9 @@ describe("CookMantraApp API orchestration", () => {
   beforeEach(() => {
     localStorage.clear();
     document.documentElement.removeAttribute("data-theme");
+    vi.spyOn(CookMantraClient.prototype, "getRuntimeStatus").mockResolvedValue(
+      runtimeStatus(),
+    );
     Object.defineProperty(URL, "createObjectURL", {
       configurable: true,
       value: vi.fn(() => "blob:cook-mantra-ingredients"),
@@ -223,6 +322,520 @@ describe("CookMantraApp API orchestration", () => {
     vi.restoreAllMocks();
     restoreUrlProperty("createObjectURL", originalCreateObjectUrl);
     restoreUrlProperty("revokeObjectURL", originalRevokeObjectUrl);
+  });
+
+  it("creates no browser or server upload state until a fresh local status passes", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const selectedStatus = deferred<RuntimeStatusResponse>();
+    const getRuntimeStatus = vi
+      .spyOn(client, "getRuntimeStatus")
+      .mockResolvedValueOnce(runtimeStatus())
+      .mockReturnValueOnce(selectedStatus.promise);
+    const createSession = vi.spyOn(client, "createSession").mockResolvedValue({
+      session_id: "session-api-123",
+      job_id: "job-extract",
+    });
+    vi.spyOn(client, "pollJob").mockImplementation(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+    await screen.findByText("Ingredient recognition");
+    const image = new File(["verified-image-bytes"], "ingredients.jpg", {
+      type: "image/jpeg",
+    });
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      image,
+    );
+
+    expect(getRuntimeStatus).toHaveBeenCalledTimes(2);
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+
+    await act(async () => selectedStatus.resolve(runtimeStatus()));
+
+    await waitFor(() =>
+      expect(createSession).toHaveBeenCalledWith(
+        image,
+        expect.objectContaining({
+          runtimeRevision: RUNTIME_REVISION_A,
+          signal: expect.any(AbortSignal),
+        }),
+      ),
+    );
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds remote media in memory until the user accepts the exact disclosure", async () => {
+    const selectedRuntime = runtimeStatus(
+      "openrouter",
+      "openai/gpt-5.2",
+      RUNTIME_REVISION_A,
+    );
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(selectedRuntime);
+    const createSession = vi.spyOn(client, "createSession").mockResolvedValue({
+      session_id: "session-api-123",
+      job_id: "job-extract",
+    });
+    vi.spyOn(client, "pollJob").mockImplementation(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+    const galleryButton = screen.getByRole("button", { name: "Choose from gallery" });
+    await user.click(galleryButton);
+    const image = new File(["verified-image-bytes"], "ingredients.jpg", {
+      type: "image/jpeg",
+    });
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      image,
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "This photo will leave your device",
+    });
+    expect(dialog).toHaveTextContent("OpenRouter");
+    expect(dialog).toHaveTextContent("openai/gpt-5.2");
+    expect(
+      screen.getByRole("button", { name: "Keep photo on this device" }),
+    ).toHaveFocus();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Continue and send photo" }));
+
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    expect(createSession).toHaveBeenCalledWith(
+      image,
+      expect.objectContaining({ runtimeRevision: RUNTIME_REVISION_A }),
+    );
+  });
+
+  it("declining remote media restores focus and sends no photo", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(
+      runtimeStatus("codex", "gpt-5.3-codex"),
+    );
+    const createSession = vi.spyOn(client, "createSession");
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+    const galleryButton = screen.getByRole("button", { name: "Choose from gallery" });
+    await user.click(galleryButton);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+    await screen.findByRole("dialog", { name: "This photo will leave your device" });
+    await user.click(screen.getByRole("button", { name: "Keep photo on this device" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(galleryButton).toHaveFocus();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("cannot submit the same retained remote file twice from repeated acceptance", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(
+      runtimeStatus("openrouter", "openai/gpt-5.2"),
+    );
+    const createSession = vi
+      .spyOn(client, "createSession")
+      .mockImplementation(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+    const continueButton = await screen.findByRole("button", {
+      name: "Continue and send photo",
+    });
+
+    act(() => {
+      fireEvent.click(continueButton);
+      fireEvent.click(continueButton);
+    });
+
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps manual entry available when remote disclosure persistence fails", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(
+      runtimeStatus("openrouter", "openai/gpt-5.2"),
+    );
+    const createSession = vi.spyOn(client, "createSession");
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+    await screen.findByRole("dialog", { name: "This photo will leave your device" });
+    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Continue and send photo" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not save your photo-sharing choice",
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Type ingredients instead",
+      }),
+    ).toBeEnabled();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("blocks a photo when ingredient recognition is not ready but leaves manual entry usable", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(
+      runtimeStatus("ollama", "qwen3.5:9b", RUNTIME_REVISION_A, false),
+    );
+    const createSession = vi.spyOn(client, "createSession");
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Ingredient recognition needs attention",
+    );
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Type ingredients instead" }));
+    expect(
+      await screen.findByRole("heading", { name: "Check what we found" }),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks photo submission when another required cooking role is not ready", async () => {
+    const requiredFailure = runtimeStatus();
+    requiredFailure.status = "attention";
+    requiredFailure.model_runtime.ready = false;
+    requiredFailure.model_runtime.roles.recipe_writer = {
+      ...requiredFailure.model_runtime.roles.recipe_writer,
+      ready: false,
+      available_capabilities: [],
+      error: "unavailable",
+    };
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(requiredFailure);
+    const createSession = vi.spyOn(client, "createSession");
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Cooking models need attention",
+    );
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects a ready ingredient role with a blank model identifier", async () => {
+    const blankModel = runtimeStatus();
+    blankModel.model_runtime.roles.ingredient_extractor = {
+      ...blankModel.model_runtime.roles.ingredient_extractor,
+      model: "   ",
+    };
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(blankModel);
+    const createSession = vi.spyOn(client, "createSession");
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", {
+        type: "image/jpeg",
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Ingredient recognition needs attention",
+    );
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("allows only the latest selected file to cross an out-of-order status gate", async () => {
+    const firstStatus = deferred<RuntimeStatusResponse>();
+    const secondStatus = deferred<RuntimeStatusResponse>();
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus")
+      .mockResolvedValueOnce(runtimeStatus())
+      .mockReturnValueOnce(firstStatus.promise)
+      .mockReturnValueOnce(secondStatus.promise);
+    const createSession = vi.spyOn(client, "createSession");
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+    await screen.findByText("Ingredient recognition");
+    const galleryInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([capture])',
+    )!;
+    const first = new File(["first"], "first.jpg", { type: "image/jpeg" });
+    const second = new File(["second"], "second.jpg", { type: "image/jpeg" });
+
+    await user.upload(galleryInput, first);
+    await user.upload(galleryInput, second);
+    await act(async () =>
+      secondStatus.resolve(runtimeStatus("openrouter", "provider/new-model")),
+    );
+    expect(
+      await screen.findByText("provider/new-model", {
+        selector: ".privacy-dialog-provider",
+      }),
+    ).toBeInTheDocument();
+
+    await act(async () =>
+      firstStatus.resolve(runtimeStatus("openrouter", "provider/old-model")),
+    );
+
+    expect(screen.queryByText("provider/old-model")).not.toBeInTheDocument();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("cancels a status-gated photo when progress navigation leaves the photo step", async () => {
+    const pendingStatus = deferred<RuntimeStatusResponse>();
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const getRuntimeStatus = vi
+      .spyOn(client, "getRuntimeStatus")
+      .mockResolvedValue(runtimeStatus());
+    const createSession = vi.spyOn(client, "createSession").mockResolvedValue({
+      session_id: "session-api-123",
+      job_id: "job-extract",
+    });
+    vi.spyOn(client, "pollJob").mockResolvedValue(
+      job("extract_ingredients", "succeeded", 100, {
+        ingredient_count: 2,
+      }) as TerminalJobResponse,
+    );
+    vi.spyOn(client, "getSession").mockResolvedValue(extractedSession);
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["first"], "first.jpg", { type: "image/jpeg" }),
+    );
+    await screen.findByRole("heading", { name: "Check what we found" });
+    const progress = screen.getByRole("navigation", { name: "Progress" });
+    await user.click(within(progress).getByRole("button", { name: /Photo/ }));
+
+    getRuntimeStatus.mockReturnValueOnce(pendingStatus.promise);
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["second"], "second.jpg", { type: "image/jpeg" }),
+    );
+    await user.click(within(progress).getByRole("button", { name: /Confirm/ }));
+    await act(async () => pendingStatus.resolve(runtimeStatus()));
+
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Check what we found" })).toBeVisible();
+  });
+
+  it("keeps an accepted upload running while saved recipes are open", async () => {
+    const firstCreate = deferred<{ session_id: string; job_id: string }>();
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const createSession = vi
+      .spyOn(client, "createSession")
+      .mockReturnValue(firstCreate.promise);
+    vi.spyOn(client, "pollJob").mockResolvedValue(
+      job("extract_ingredients", "succeeded", 100, {
+        ingredient_count: 2,
+      }) as TerminalJobResponse,
+    );
+    const getSession = vi
+      .spyOn(client, "getSession")
+      .mockResolvedValue(extractedSession);
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+    const firstInput = container.querySelector<HTMLInputElement>(
+      'input[type="file"]:not([capture])',
+    )!;
+
+    await user.upload(
+      firstInput,
+      new File(["first"], "first.jpg", { type: "image/jpeg" }),
+    );
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    const uploadSignal = createSession.mock.calls[0]?.[1]?.signal;
+    await user.click(screen.getByRole("button", { name: "Saved recipes" }));
+    expect(uploadSignal?.aborted).toBe(false);
+
+    await act(async () =>
+      firstCreate.resolve({ session_id: "session-old", job_id: "job-old" }),
+    );
+    await waitFor(() => expect(getSession).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(screen.getByRole("heading", { name: "Check what we found" })).toBeVisible();
+  });
+
+  it("reports an accepted upload failure after returning from saved recipes", async () => {
+    const firstCreate = deferred<{ session_id: string; job_id: string }>();
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const createSession = vi
+      .spyOn(client, "createSession")
+      .mockReturnValue(firstCreate.promise);
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["first"], "first.jpg", { type: "image/jpeg" }),
+    );
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "Saved recipes" }));
+    await act(async () => firstCreate.reject(new Error("accepted upload failed")));
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("accepted upload failed");
+  });
+
+  it("aborts an explicit runtime-status refresh when the app unmounts", async () => {
+    const refresh = deferred<RuntimeStatusResponse>();
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const getRuntimeStatus = vi
+      .spyOn(client, "getRuntimeStatus")
+      .mockResolvedValueOnce(runtimeStatus())
+      .mockReturnValueOnce(refresh.promise);
+    const user = userEvent.setup();
+    const { unmount } = render(<CookMantraApp apiClient={client} />);
+    await screen.findByText("Ingredient recognition");
+
+    await user.click(screen.getByRole("button", { name: "Refresh local status" }));
+    const refreshSignal = getRuntimeStatus.mock.calls[1]?.[0]?.signal;
+    expect(refreshSignal?.aborted).toBe(false);
+
+    unmount();
+
+    expect(refreshSignal?.aborted).toBe(true);
+  });
+
+  it("aborts and revokes an uncommitted photo submission on unmount", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const createSession = vi
+      .spyOn(client, "createSession")
+      .mockImplementation(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    const { container, unmount } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["candidate"], "candidate.jpg", { type: "image/jpeg" }),
+    );
+    await waitFor(() => expect(createSession).toHaveBeenCalledOnce());
+    const signal = createSession.mock.calls[0]?.[1]?.signal;
+
+    unmount();
+
+    expect(signal?.aborted).toBe(true);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:cook-mantra-ingredients");
+  });
+
+  it("rechecks a stale runtime revision before a same-target retry", async () => {
+    const target = { provider: "openrouter", model: "openai/gpt-5.2" } as const;
+    persistRemoteTarget(target);
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const getRuntimeStatus = vi
+      .spyOn(client, "getRuntimeStatus")
+      .mockResolvedValueOnce(runtimeStatus(target.provider, target.model))
+      .mockResolvedValueOnce(runtimeStatus(target.provider, target.model))
+      .mockResolvedValueOnce(
+        runtimeStatus(target.provider, target.model, RUNTIME_REVISION_B),
+      );
+    const createSession = vi
+      .spyOn(client, "createSession")
+      .mockRejectedValueOnce(
+        new ApiError({
+          status: 409,
+          code: "runtime_status_stale",
+          message: "Refresh local model status before sending this photo.",
+          details: {},
+          retryable: true,
+          requestId: "request-stale",
+          sessionId: null,
+          jobId: null,
+        }),
+      )
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    expect(getRuntimeStatus).toHaveBeenCalledTimes(3);
+    expect(createSession.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ runtimeRevision: RUNTIME_REVISION_A }),
+    );
+    expect(createSession.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({ runtimeRevision: RUNTIME_REVISION_B }),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:cook-mantra-ingredients");
+  });
+
+  it("reopens disclosure instead of replaying when stale status selects a new model", async () => {
+    const accepted = { provider: "openrouter", model: "openai/gpt-5.2" } as const;
+    persistRemoteTarget(accepted);
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "getRuntimeStatus")
+      .mockResolvedValueOnce(runtimeStatus(accepted.provider, accepted.model))
+      .mockResolvedValueOnce(runtimeStatus(accepted.provider, accepted.model))
+      .mockResolvedValueOnce(
+        runtimeStatus("openrouter", "anthropic/claude-sonnet", RUNTIME_REVISION_B),
+      );
+    const createSession = vi.spyOn(client, "createSession").mockRejectedValueOnce(
+      new ApiError({
+        status: 409,
+        code: "runtime_status_stale",
+        message: "Refresh local model status before sending this photo.",
+        details: {},
+        retryable: true,
+        requestId: "request-stale",
+        sessionId: null,
+        jobId: null,
+      }),
+    );
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+
+    expect(
+      await screen.findByText("anthropic/claude-sonnet", {
+        selector: ".privacy-dialog-provider",
+      }),
+    ).toBeInTheDocument();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:cook-mantra-ingredients");
   });
 
   it("uses the injected client from image upload through rendered recipe options", async () => {
@@ -444,6 +1057,37 @@ describe("CookMantraApp API orchestration", () => {
     expect(alert).toHaveTextContent("Check your connection and try again.");
     expect(alert).not.toHaveTextContent("Load failed");
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:cook-mantra-ingredients");
+  });
+
+  it("shows provider-neutral copy for model runtime configuration failures", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    vi.spyOn(client, "createSession").mockRejectedValue(
+      new ApiError({
+        status: 503,
+        code: "model_configuration_invalid",
+        message: "The model runtime configuration is invalid.",
+        details: {},
+        retryable: false,
+        requestId: "request-runtime",
+        sessionId: null,
+        jobId: null,
+      }),
+    );
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["verified-image-bytes"], "ingredients.jpg", { type: "image/jpeg" }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("The cooking agents need configuration");
+    expect(alert).toHaveTextContent(
+      "Check the local model runtime settings and restart Cook Mantra.",
+    );
   });
 
   it("treats repeated-recipe failure after more-ideas retries as exhaustion", async () => {
@@ -515,7 +1159,7 @@ describe("CookMantraApp API orchestration", () => {
     expect(screen.queryByText("The agent stopped early")).toBeNull();
   });
 
-  it("restarts a photo session and rebases edited ingredients before generating again", async () => {
+  it("retains the source photo through status refresh and refreshes a stale revision while rebasing edits", async () => {
     const client = new CookMantraClient({
       fetch: vi.fn<typeof fetch>(async () => {
         throw new Error("Unexpected network request");
@@ -524,16 +1168,29 @@ describe("CookMantraApp API orchestration", () => {
     const image = new File(["verified-image-bytes"], "ingredients.jpg", {
       type: "image/jpeg",
     });
+    const acceptedRebase = deferred<{ session_id: string; job_id: string }>();
     const createSession = vi
       .spyOn(client, "createSession")
       .mockResolvedValueOnce({
         session_id: "session-api-123",
         job_id: "job-extract",
       })
-      .mockResolvedValueOnce({
-        session_id: "session-api-456",
-        job_id: "job-extract-fresh",
-      });
+      .mockRejectedValueOnce(
+        new ApiError({
+          status: 409,
+          code: "runtime_status_stale",
+          message: "Refresh local model status before sending this photo.",
+          details: {},
+          retryable: true,
+          requestId: "request-stale-rebase",
+          sessionId: null,
+          jobId: null,
+        }),
+      )
+      .mockReturnValueOnce(acceptedRebase.promise);
+    const getRuntimeStatus = vi
+      .spyOn(client, "getRuntimeStatus")
+      .mockResolvedValue(runtimeStatus());
     vi.spyOn(client, "pollJob").mockImplementation(async (jobId) => {
       if (jobId === "job-extract" || jobId === "job-extract-fresh") {
         return {
@@ -593,19 +1250,65 @@ describe("CookMantraApp API orchestration", () => {
     await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
     await screen.findByRole("button", { name: /Tomato Skillet/ });
 
+    const progress = screen.getByRole("navigation", { name: "Progress" });
+    await user.click(within(progress).getByRole("button", { name: /Photo/ }));
+    getRuntimeStatus.mockResolvedValueOnce(
+      runtimeStatus("openrouter", "openai/replacement-model"),
+    );
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["replacement"], "replacement.jpg", { type: "image/jpeg" }),
+    );
+    await screen.findByRole("dialog", { name: "This photo will leave your device" });
+    await user.click(screen.getByRole("button", { name: "Keep photo on this device" }));
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Refresh local status" }));
+    await screen.findByText("Ingredient recognition");
+    await user.click(within(progress).getByRole("button", { name: /Choose/ }));
+
     await user.click(screen.getByRole("button", { name: /Edit ingredients/ }));
     const tomato = screen.getByRole("textbox", { name: "Ingredient Tomato" });
     await user.clear(tomato);
     await user.type(tomato, "Cherry Tomato");
+    getRuntimeStatus
+      .mockResolvedValueOnce(runtimeStatus())
+      .mockResolvedValueOnce(
+        runtimeStatus("openrouter", "openai/rebased-model", RUNTIME_REVISION_B),
+      );
     await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
+    const disclosure = await screen.findByRole("dialog", {
+      name: "This photo will leave your device",
+    });
+    expect(disclosure).toHaveTextContent("openai/rebased-model");
+    expect(createSession).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: "Saved recipes" }));
+    expect(disclosure).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Saved recipes" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Continue and send photo" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Cooking up suggestions" }),
+      ).toHaveFocus(),
+    );
+    await act(async () =>
+      acceptedRebase.resolve({
+        session_id: "session-api-456",
+        job_id: "job-extract-fresh",
+      }),
+    );
 
     expect(
       await screen.findByRole("button", { name: /Cherry Tomato Skillet/ }),
     ).toBeInTheDocument();
-    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(createSession).toHaveBeenCalledTimes(3);
     expect(createSession).toHaveBeenLastCalledWith(
       image,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      expect.objectContaining({
+        runtimeRevision: RUNTIME_REVISION_B,
+        signal: expect.any(AbortSignal),
+      }),
     );
     expect(updateIngredients).toHaveBeenNthCalledWith(
       2,
@@ -624,6 +1327,120 @@ describe("CookMantraApp API orchestration", () => {
       },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it("keeps reviewed ingredients but invalidates prior ideas when a rebase disclosure switches to manual entry", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const getRuntimeStatus = vi
+      .spyOn(client, "getRuntimeStatus")
+      .mockResolvedValue(runtimeStatus());
+    const createSession = vi
+      .spyOn(client, "createSession")
+      .mockResolvedValueOnce({
+        session_id: "session-api-123",
+        job_id: "job-extract",
+      })
+      .mockRejectedValueOnce(
+        new ApiError({
+          status: 409,
+          code: "runtime_status_stale",
+          message: "Refresh local model status before sending this photo.",
+          details: {},
+          retryable: false,
+          requestId: "request-manual-rebase",
+          sessionId: null,
+          jobId: null,
+        }),
+      );
+    const manualSession: SessionResponse = {
+      ...extractedSession,
+      id: "session-manual-rebase",
+      image_artifact_id: null,
+      ingredients: [
+        {
+          ...extractedSession.ingredients[0],
+          id: "manual-tomato",
+          source: "user_added",
+          confirmed: true,
+        },
+        extractedSession.ingredients[1],
+      ],
+    };
+    const createManualSession = vi
+      .spyOn(client, "createManualSession")
+      .mockResolvedValue(manualSession);
+    vi.spyOn(client, "pollJob").mockImplementation(async (jobId) =>
+      jobId === "job-extract"
+        ? (job("extract_ingredients", "succeeded", 100, {
+            ingredient_count: 2,
+          }) as TerminalJobResponse)
+        : (job("generate_options", "succeeded", 100, {
+            option_ids: ["option-tomato-skillet"],
+            batch_number: 1,
+          }) as TerminalJobResponse),
+    );
+    vi.spyOn(client, "getSession")
+      .mockResolvedValueOnce(extractedSession)
+      .mockResolvedValueOnce(optionsSession)
+      .mockResolvedValueOnce({
+        ...optionsSession,
+        id: manualSession.id,
+        image_artifact_id: null,
+        ingredients: manualSession.ingredients,
+      });
+    vi.spyOn(client, "updateIngredients").mockResolvedValue({
+      ...extractedSession,
+      ingredients: optionsSession.ingredients,
+    });
+    vi.spyOn(client, "confirmIngredients").mockResolvedValue({
+      ...extractedSession,
+      stage: "ingredients_confirmed",
+      ingredients: optionsSession.ingredients,
+    });
+    vi.spyOn(client, "generateRecipeOptions").mockResolvedValue({
+      session_id: "session-api-123",
+      job_id: "job-options",
+    });
+    const user = userEvent.setup();
+    const { container } = render(<CookMantraApp apiClient={client} />);
+
+    await user.upload(
+      container.querySelector<HTMLInputElement>('input[type="file"]:not([capture])')!,
+      new File(["original"], "original.jpg", { type: "image/jpeg" }),
+    );
+    await screen.findByRole("heading", { name: "Check what we found" });
+    await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
+    await screen.findByRole("button", { name: /Tomato Skillet/ });
+    await user.click(screen.getByRole("button", { name: /Edit ingredients/ }));
+
+    getRuntimeStatus
+      .mockResolvedValueOnce(runtimeStatus())
+      .mockResolvedValueOnce(
+        runtimeStatus("openrouter", "openai/manual-rebase", RUNTIME_REVISION_B),
+      );
+    await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
+    await screen.findByText("openai/manual-rebase", {
+      selector: ".privacy-dialog-provider",
+    });
+    await user.click(screen.getByRole("button", { name: "Type ingredients instead" }));
+
+    expect(
+      await screen.findByRole("textbox", { name: "Ingredient Tomato" }),
+    ).toHaveValue("Tomato");
+    const choose = within(
+      screen.getByRole("navigation", { name: "Progress" }),
+    ).getByRole("button", { name: /Choose/ });
+    expect(choose).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /Tomato Skillet/ })).toBeNull();
+    expect(createSession).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
+    await screen.findByRole("button", { name: /Tomato Skillet/ });
+    expect(createManualSession).toHaveBeenCalledWith(
+      { ingredients: ["Tomato"] },
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(createSession).toHaveBeenCalledTimes(2);
   });
 
   it("starts another fresh session when a rebased ingredient update needs retrying", async () => {
@@ -782,7 +1599,17 @@ describe("CookMantraApp API orchestration", () => {
       session_id: "session-api-123",
       job_id: "job-extract",
     });
+    const readyStatus = runtimeStatus();
+    readyStatus.model_runtime.roles.image_generator = {
+      ...readyStatus.model_runtime.roles.image_generator,
+      enabled: true,
+      ready: true,
+      available_capabilities: ["image_output"],
+    };
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(readyStatus);
+    const recipeJob = deferred<TerminalJobResponse>();
     vi.spyOn(client, "pollJob").mockImplementation(async (jobId) => {
+      if (jobId === "job-recipes") return recipeJob.promise;
       const operation =
         jobId === "job-extract"
           ? "extract_ingredients"
@@ -829,6 +1656,16 @@ describe("CookMantraApp API orchestration", () => {
     await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
     await user.click(await screen.findByRole("button", { name: /Tomato Skillet/ }));
     await user.click(screen.getByRole("button", { name: "Create 1 recipe" }));
+    expect(
+      await screen.findByText("Recipe Writer Agent — Tomato Skillet"),
+    ).toBeVisible();
+    expect(screen.getByText("Dish preview — Tomato Skillet")).toBeVisible();
+    await act(async () =>
+      recipeJob.resolve({
+        ...job("generate_recipes", "succeeded", 100, {}),
+        id: "job-recipes",
+      } as TerminalJobResponse),
+    );
     await screen.findByRole("heading", { name: "Your recipe, ready" });
     await user.click(screen.getByRole("button", { name: /Back to recipe ideas/ }));
     expect(
@@ -838,6 +1675,37 @@ describe("CookMantraApp API orchestration", () => {
       screen.getByText(/edit your ingredients — Cook Mantra will re-read your photo/i),
     ).toBeVisible();
     expect(moreIdeas).not.toHaveBeenCalled();
+  });
+
+  it("does not advertise ready API dish previews during a demo recipe job", async () => {
+    const client = new CookMantraClient({ fetch: vi.fn<typeof fetch>() });
+    const readyStatus = runtimeStatus();
+    readyStatus.model_runtime.roles.image_generator = {
+      ...readyStatus.model_runtime.roles.image_generator,
+      enabled: true,
+      ready: true,
+      available_capabilities: ["image_output"],
+    };
+    vi.spyOn(client, "getRuntimeStatus").mockResolvedValue(readyStatus);
+    const user = userEvent.setup();
+    const view = render(
+      <CookMantraApp apiClient={client} devControls demoJobDurationMs={0} />,
+    );
+    expect(await screen.findAllByText("Ready")).toHaveLength(4);
+
+    await user.click(screen.getByRole("button", { name: "Simulate weak detection" }));
+    await screen.findByRole("heading", { name: "Check what we found" });
+    await user.click(screen.getByRole("button", { name: "Generate recipe ideas" }));
+    await screen.findByRole("heading", { name: /ideas from your 1 ingredient/ });
+    await user.click(screen.getByRole("button", { name: /Tomato Rasam/ }));
+
+    view.rerender(
+      <CookMantraApp apiClient={client} devControls demoJobDurationMs={60_000} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Create 1 recipe" }));
+
+    expect(await screen.findByText("Recipe Writer Agent — Tomato Rasam")).toBeVisible();
+    expect(screen.queryByText(/Dish preview — Tomato Rasam/)).toBeNull();
   });
 
   it("retries only failed recipes and merges a later success", async () => {

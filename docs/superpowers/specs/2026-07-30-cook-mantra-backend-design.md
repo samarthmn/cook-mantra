@@ -1,7 +1,11 @@
 # Cook Mantra Backend Design
 
 **Date:** 2026-07-30
-**Status:** Approved for implementation planning
+**Status:** Superseded historical plan
+
+> This document records the original Ollama-only design and is not the current
+> implementation contract. Use [`docs/prd.md`](../../prd.md) and
+> [`docs/architecture-doc.md`](../../architecture-doc.md) for current behavior.
 
 ## Objective
 
@@ -193,19 +197,19 @@ Each complete recipe includes:
 
 All routes use the `/api/v1` prefix.
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Confirm that the API process is running. |
-| `GET` | `/ready` | Check Ollama connectivity and configured model availability. |
-| `POST` | `/sessions` | Upload an image, create a session, and queue extraction. |
-| `GET` | `/jobs/{job_id}` | Read job state, progress, result, warnings, or error. |
-| `GET` | `/sessions/{session_id}` | Read the current session state. |
-| `PUT` | `/sessions/{session_id}/ingredients` | Replace the editable ingredient review list. |
-| `POST` | `/sessions/{session_id}/ingredients/confirm` | Confirm the available ingredients. |
-| `POST` | `/sessions/{session_id}/recipe-options` | Queue the first recipe-option workflow. |
-| `POST` | `/sessions/{session_id}/recipe-options/more` | Queue fresh options with prior names excluded. |
-| `POST` | `/sessions/{session_id}/recipes` | Queue complete recipes for selected option IDs. |
-| `GET` | `/artifacts/{artifact_id}` | Return a generated dish image. |
+| Method | Route                                        | Purpose                                                      |
+| ------ | -------------------------------------------- | ------------------------------------------------------------ |
+| `GET`  | `/health`                                    | Confirm that the API process is running.                     |
+| `GET`  | `/ready`                                     | Check Ollama connectivity and configured model availability. |
+| `POST` | `/sessions`                                  | Upload an image, create a session, and queue extraction.     |
+| `GET`  | `/jobs/{job_id}`                             | Read job state, progress, result, warnings, or error.        |
+| `GET`  | `/sessions/{session_id}`                     | Read the current session state.                              |
+| `PUT`  | `/sessions/{session_id}/ingredients`         | Replace the editable ingredient review list.                 |
+| `POST` | `/sessions/{session_id}/ingredients/confirm` | Confirm the available ingredients.                           |
+| `POST` | `/sessions/{session_id}/recipe-options`      | Queue the first recipe-option workflow.                      |
+| `POST` | `/sessions/{session_id}/recipe-options/more` | Queue fresh options with prior names excluded.               |
+| `POST` | `/sessions/{session_id}/recipes`             | Queue complete recipes for selected option IDs.              |
+| `GET`  | `/artifacts/{artifact_id}`                   | Return a generated dish image.                               |
 
 The session response exposes one ingredient list with source metadata. A caller
 can group detected, pantry, and user-added items without maintaining separate

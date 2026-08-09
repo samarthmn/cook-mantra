@@ -1,12 +1,15 @@
 import json
 import logging
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from api.app import create_app
 from api.middleware import RequestIdMiddleware
+from core.config import Settings
 from core.errors import install_error_handlers
 from core.logging import configure_logging
 
@@ -162,3 +165,32 @@ def test_unexpected_request_error_does_not_attach_an_unsafe_traceback(
     assert failure.error_code == "internal_error"
     assert failure.exception_type == "RuntimeError"
     assert failure.exc_info is None
+
+
+def test_runtime_revision_header_never_enters_logs_or_errors(
+    capsys: pytest.CaptureFixture[str],
+    project_tmp_path: Path,
+) -> None:
+    configure_logging("INFO")
+    app = create_app(
+        Settings(_env_file=None, artifact_root=project_tmp_path),
+    )
+    stale_revision = "canary-stale-runtime-revision"
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/sessions",
+            content=b"body-must-not-be-read",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Content-Type": "multipart/form-data; boundary=unused",
+                "X-Cook-Mantra-Runtime-Revision": stale_revision,
+            },
+        )
+
+    output = capsys.readouterr().err
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "runtime_status_stale"
+    assert stale_revision not in output
+    assert "cook-mantra-runtime-revision" not in output.casefold()
+    assert stale_revision not in response.text

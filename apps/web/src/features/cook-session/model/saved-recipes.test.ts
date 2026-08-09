@@ -53,10 +53,16 @@ const recipe: CompleteRecipeView = {
   allergenNotice: "Check ingredient labels for allergens.",
   assumptions: ["Salt is available."],
   warnings: ["Contains dairy."],
+  previewArtifactId: null,
+  previewLabel: null,
 };
+const legacyRecipe: Record<string, unknown> = { ...recipe };
+Reflect.deleteProperty(legacyRecipe, "previewArtifactId");
+Reflect.deleteProperty(legacyRecipe, "previewLabel");
 
 const photo = "data:image/jpeg;base64,c25hcHNob3Q=";
-const legacyStorageKey = "cook-mantra:saved-recipes:v1";
+const v1StorageKey = "cook-mantra:saved-recipes:v1";
+const v2StorageKey = "cook-mantra:saved-recipes:v2";
 const ingredientSources = {
   Tomato: "detected",
   Paneer: "user_added",
@@ -108,6 +114,99 @@ describe("saved recipes", () => {
     expect(loadSavedRecipes()).toEqual([]);
   });
 
+  it("stores only a durable photo and nulls process-private preview fields", () => {
+    const liveRecipe = {
+      ...recipe,
+      previewArtifactId: "process-private-preview",
+      previewLabel: "AI-generated image",
+      processPrivate: "must-not-be-stored",
+      ingredients: [
+        {
+          ...recipe.ingredients[0],
+          processPrivate: "must-not-be-stored",
+        },
+      ],
+      steps: [
+        {
+          ...recipe.steps[0],
+          processPrivate: "must-not-be-stored",
+        },
+      ],
+      nutrition: {
+        ...recipe.nutrition!,
+        processPrivate: "must-not-be-stored",
+      },
+    } as unknown as CompleteRecipeView;
+
+    const saved = saveRecipe(liveRecipe, snapshot);
+    const serialized = window.localStorage.getItem("cook-mantra:saved-recipes:v3");
+
+    expect(SAVED_RECIPES_STORAGE_KEY).toBe("cook-mantra:saved-recipes:v3");
+    expect(saved.ok).toBe(true);
+    expect(saved.entries[0]).toMatchObject({
+      photo,
+      recipe: {
+        previewArtifactId: null,
+        previewLabel: null,
+      },
+    });
+    expect(saved.entries[0].recipe).not.toHaveProperty("processPrivate");
+    expect(saved.entries[0].recipe.ingredients[0]).not.toHaveProperty("processPrivate");
+    expect(saved.entries[0].recipe.steps[0]).not.toHaveProperty("processPrivate");
+    expect(saved.entries[0].recipe.nutrition).not.toHaveProperty("processPrivate");
+    expect(serialized).not.toBeNull();
+    expect(serialized).not.toContain("process-private-preview");
+    expect(serialized).not.toContain("must-not-be-stored");
+    expect(JSON.parse(serialized!)).toMatchObject({
+      version: 3,
+      entries: [
+        {
+          photo,
+          recipe: {
+            previewArtifactId: null,
+            previewLabel: null,
+          },
+        },
+      ],
+    });
+  });
+
+  it("accepts only null preview fields in the v3 payload", () => {
+    const validEntry = {
+      id: "valid-v3",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe,
+      photo: null,
+      progress: null,
+      ingredientSources: null,
+    };
+    window.localStorage.setItem(
+      "cook-mantra:saved-recipes:v3",
+      JSON.stringify({
+        version: 3,
+        entries: [
+          validEntry,
+          {
+            ...validEntry,
+            id: "missing-preview-fields",
+            recipe: legacyRecipe,
+          },
+          {
+            ...validEntry,
+            id: "live-preview-fields",
+            recipe: {
+              ...recipe,
+              previewArtifactId: "process-private-preview",
+              previewLabel: "AI-generated image",
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([validEntry]);
+  });
+
   it("appends a new version every time the same recipe is saved", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-01T10:30:00.000Z"));
@@ -152,25 +251,32 @@ describe("saved recipes", () => {
     expect(loadSavedRecipes()).toEqual(second.entries);
   });
 
-  it("migrates entries from the legacy key and removes it after writing v2", () => {
+  it("hydrates v1 recipes and removes the old key only after writing v3", () => {
     const legacyEntry = {
       id: "option-1",
       savedAt: "2026-08-01T10:30:00.000Z",
-      recipe,
+      recipe: legacyRecipe,
     };
     window.localStorage.setItem(
-      legacyStorageKey,
+      v1StorageKey,
       JSON.stringify({ version: 1, entries: [legacyEntry] }),
     );
 
     expect(loadSavedRecipes()).toEqual([
       {
         ...legacyEntry,
+        recipe: {
+          ...legacyRecipe,
+          previewArtifactId: null,
+          previewLabel: null,
+        },
         photo: null,
         progress: null,
         ingredientSources: null,
       },
     ]);
+    expect(window.localStorage.getItem(v1StorageKey)).not.toBeNull();
+    expect(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)).toBeNull();
 
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
@@ -179,38 +285,151 @@ describe("saved recipes", () => {
     expect(saved.ok).toBe(true);
     expect(JSON.parse(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)!)).toEqual(
       {
-        version: 2,
+        version: 3,
         entries: saved.entries,
       },
     );
-    expect(window.localStorage.getItem(legacyStorageKey)).toBeNull();
+    expect(window.localStorage.getItem(v1StorageKey)).toBeNull();
   });
 
-  it("preserves snapshots previously written as v2 under the legacy key", () => {
+  it("preserves v2 snapshots while hydrating private preview fields to null", () => {
     const previousSnapshot = {
       id: "option-1",
       savedAt: "2026-08-01T10:30:00.000Z",
-      recipe,
+      recipe: {
+        ...legacyRecipe,
+        previewArtifactId: "stale-process-preview",
+        previewLabel: "AI-generated image",
+      },
       photo,
       progress: snapshot.progress,
+      ingredientSources,
     };
     window.localStorage.setItem(
-      legacyStorageKey,
+      v2StorageKey,
       JSON.stringify({ version: 2, entries: [previousSnapshot] }),
+    );
+    window.localStorage.setItem(
+      v1StorageKey,
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            id: "older-v1",
+            savedAt: "2026-07-01T10:30:00.000Z",
+            recipe: legacyRecipe,
+          },
+        ],
+      }),
     );
 
     expect(loadSavedRecipes()).toEqual([
-      { ...previousSnapshot, ingredientSources: null },
+      {
+        ...previousSnapshot,
+        recipe: {
+          ...legacyRecipe,
+          previewArtifactId: null,
+          previewLabel: null,
+        },
+      },
     ]);
+    expect(window.localStorage.getItem(v2StorageKey)).not.toBeNull();
+    expect(window.localStorage.getItem(v1StorageKey)).not.toBeNull();
+    expect(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)).toBeNull();
 
     const saved = saveRecipe(recipe, snapshot);
 
     expect(saved.ok).toBe(true);
     expect(saved.entries[0]).toEqual({
       ...previousSnapshot,
-      ingredientSources: null,
+      recipe: {
+        ...legacyRecipe,
+        previewArtifactId: null,
+        previewLabel: null,
+      },
     });
-    expect(window.localStorage.getItem(legacyStorageKey)).toBeNull();
+    expect(window.localStorage.getItem(v2StorageKey)).toBeNull();
+    expect(window.localStorage.getItem(v1StorageKey)).toBeNull();
+  });
+
+  it("hydrates snapshots from early v2 payloads written under the v1 key", () => {
+    const earlyV2Snapshot = {
+      id: "early-v2",
+      savedAt: "2026-07-15T10:30:00.000Z",
+      recipe: legacyRecipe,
+      photo,
+      progress: snapshot.progress,
+      ingredientSources,
+    };
+    window.localStorage.setItem(
+      v1StorageKey,
+      JSON.stringify({ version: 2, entries: [earlyV2Snapshot] }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([
+      {
+        ...earlyV2Snapshot,
+        recipe: {
+          ...legacyRecipe,
+          previewArtifactId: null,
+          previewLabel: null,
+        },
+      },
+    ]);
+    expect(window.localStorage.getItem(v1StorageKey)).not.toBeNull();
+    expect(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)).toBeNull();
+  });
+
+  it("prefers v3 over v2 and v2 over v1 without mutating storage during reads", () => {
+    const v1Entry = {
+      id: "from-v1",
+      savedAt: "2026-07-01T10:30:00.000Z",
+      recipe: legacyRecipe,
+    };
+    const v2Entry = {
+      id: "from-v2",
+      savedAt: "2026-07-02T10:30:00.000Z",
+      recipe: legacyRecipe,
+      photo: null,
+      progress: null,
+      ingredientSources: null,
+    };
+    const v3Entry = {
+      id: "from-v3",
+      savedAt: "2026-07-03T10:30:00.000Z",
+      recipe,
+      photo: null,
+      progress: null,
+      ingredientSources: null,
+    };
+    window.localStorage.setItem(
+      v1StorageKey,
+      JSON.stringify({ version: 1, entries: [v1Entry] }),
+    );
+    window.localStorage.setItem(
+      v2StorageKey,
+      JSON.stringify({ version: 2, entries: [v2Entry] }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([
+      {
+        ...v2Entry,
+        recipe: {
+          ...legacyRecipe,
+          previewArtifactId: null,
+          previewLabel: null,
+        },
+      },
+    ]);
+
+    window.localStorage.setItem(
+      SAVED_RECIPES_STORAGE_KEY,
+      JSON.stringify({ version: 3, entries: [v3Entry] }),
+    );
+
+    expect(loadSavedRecipes()).toEqual([v3Entry]);
+    expect(window.localStorage.getItem(v1StorageKey)).not.toBeNull();
+    expect(window.localStorage.getItem(v2StorageKey)).not.toBeNull();
   });
 
   it("drops corrupt payloads and malformed entries without throwing", () => {
@@ -228,7 +447,7 @@ describe("saved recipes", () => {
     window.localStorage.setItem(
       SAVED_RECIPES_STORAGE_KEY,
       JSON.stringify({
-        version: 2,
+        version: 3,
         entries: [
           validEntry,
           { ...validEntry, savedAt: "last Tuesday" },
@@ -361,7 +580,7 @@ describe("saved recipes", () => {
     window.localStorage.setItem(
       SAVED_RECIPES_STORAGE_KEY,
       JSON.stringify({
-        version: 2,
+        version: 3,
         entries: [
           entry,
           {
@@ -396,7 +615,7 @@ describe("saved recipes", () => {
     };
     window.localStorage.setItem(
       SAVED_RECIPES_STORAGE_KEY,
-      JSON.stringify({ version: 2, entries: [entry] }),
+      JSON.stringify({ version: 3, entries: [entry] }),
     );
 
     expect(loadSavedRecipes()).toEqual([
@@ -421,7 +640,7 @@ describe("saved recipes", () => {
     window.localStorage.setItem(
       SAVED_RECIPES_STORAGE_KEY,
       JSON.stringify({
-        version: 2,
+        version: 3,
         entries: [
           entry,
           {
@@ -456,7 +675,7 @@ describe("saved recipes", () => {
     window.localStorage.setItem(
       SAVED_RECIPES_STORAGE_KEY,
       JSON.stringify({
-        version: 2,
+        version: 3,
         entries: [
           { ...entry, id: "valid", photo },
           { ...entry, id: "remote", photo: "https://example.com/dish.jpg" },
@@ -472,9 +691,9 @@ describe("saved recipes", () => {
     ]);
   });
 
-  it("reads unsupported v2 payloads as empty and refuses to mutate them", () => {
+  it("reads unsupported v3 payloads as empty and refuses to mutate them", () => {
     const unsupportedPayload = JSON.stringify({
-      version: 3,
+      version: 4,
       entries: [
         {
           id: "saved-test-curry",
@@ -486,6 +705,22 @@ describe("saved recipes", () => {
       ],
     });
     window.localStorage.setItem(SAVED_RECIPES_STORAGE_KEY, unsupportedPayload);
+    window.localStorage.setItem(
+      v2StorageKey,
+      JSON.stringify({
+        version: 2,
+        entries: [
+          {
+            id: "must-not-fall-back",
+            savedAt: "2026-07-01T10:30:00.000Z",
+            recipe: legacyRecipe,
+            photo: null,
+            progress: null,
+            ingredientSources: null,
+          },
+        ],
+      }),
+    );
 
     expect(loadSavedRecipes()).toEqual([]);
     expect(saveRecipe(recipe, snapshot)).toEqual({ ok: false, entries: [] });
@@ -496,6 +731,33 @@ describe("saved recipes", () => {
     expect(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)).toBe(
       unsupportedPayload,
     );
+    expect(window.localStorage.getItem(v2StorageKey)).not.toBeNull();
+  });
+
+  it("keeps legacy payloads when the v3 replacement write fails", () => {
+    const legacyEntry = {
+      id: "option-1",
+      savedAt: "2026-08-01T10:30:00.000Z",
+      recipe: legacyRecipe,
+      photo: null,
+      progress: null,
+      ingredientSources: null,
+    };
+    const serializedLegacy = JSON.stringify({
+      version: 2,
+      entries: [legacyEntry],
+    });
+    window.localStorage.setItem(v2StorageKey, serializedLegacy);
+    vi.spyOn(window.localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+    });
+
+    const removed = removeSavedRecipe("option-1");
+
+    expect(removed.ok).toBe(false);
+    expect(removed.entries).toHaveLength(1);
+    expect(window.localStorage.getItem(v2StorageKey)).toBe(serializedLegacy);
+    expect(window.localStorage.getItem(SAVED_RECIPES_STORAGE_KEY)).toBeNull();
   });
 
   it("retries without the new photo while preserving a non-empty cookbook", () => {

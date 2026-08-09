@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.errors import ErrorCode
+from domain.images import DishPreview
 from domain.recipe_options import NutritionEstimate
 
 NUTRITION_NOTICE = "Estimated values; not medical advice."
@@ -109,8 +110,15 @@ class CompleteRecipe(BaseModel):
     nutrition: NutritionEstimate | None = None
     nutrition_notice: str = NUTRITION_NOTICE
     allergen_notice: str = ALLERGEN_NOTICE
+    preview: DishPreview | None = None
     assumptions: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+    @field_validator("nutrition", mode="before")
+    @classmethod
+    def keep_nutrition_dormant(cls, _value: object) -> None:
+        """Retain the response field while disabling nutrition computation."""
+        return None
 
     @field_validator(
         "option_id",

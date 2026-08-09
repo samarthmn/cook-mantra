@@ -58,9 +58,6 @@ export interface RecipeOptionView {
   missingIngredients: IngredientRequirementView[];
   optionalIngredients: IngredientRequirementView[];
   nutrition: NutritionView | null;
-  previewArtifactId: string | null;
-  previewLabel: string | null;
-  warnings: string[];
   batchNumber: number;
 }
 
@@ -94,6 +91,8 @@ export interface CompleteRecipeView {
   allergenNotice: string;
   assumptions: string[];
   warnings: string[];
+  previewArtifactId: string | null;
+  previewLabel: string | null;
 }
 
 export interface RecipeFailureView {
@@ -147,6 +146,7 @@ type SetPreferenceAction = {
 
 export type CookSessionAction =
   | { type: "start-manual-entry" }
+  | { type: "continue-with-manual-entry" }
   | {
       type: "receive-ingredients";
       mode: SessionMode;
@@ -552,6 +552,26 @@ export function cookSessionReducer(
         // an API session that simply does not have its id yet.
         mode: "api",
         ingredients: pantryIngredients(state.pantryStaples),
+      };
+
+    case "continue-with-manual-entry":
+      return {
+        ...state,
+        view: "confirm",
+        maxReached: 2,
+        mode: "api",
+        sessionId: null,
+        photoPreviewUrl: null,
+        weakDetection: false,
+        options: [],
+        selectedOptionIds: [],
+        completeRecipes: {},
+        recipeFailures: {},
+        activeRecipeId: null,
+        completedSteps: {},
+        ideasExhausted: false,
+        job: null,
+        error: null,
       };
 
     case "receive-ingredients": {

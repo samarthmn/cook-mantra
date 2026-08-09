@@ -1,7 +1,22 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { DesignGuide } from "./DesignGuide";
+
+const globalStyles = readFileSync(
+  resolve(process.cwd(), "src/app/globals.css"),
+  "utf8",
+);
+
+function declarationsFor(selector: string): string {
+  const escapedSelector = selector.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = globalStyles.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`));
+  expect(match, `Missing CSS rule for ${selector}`).not.toBeNull();
+  return match?.[1] ?? "";
+}
 
 describe("DesignGuide", () => {
   afterEach(() => cleanup());
@@ -46,17 +61,47 @@ describe("DesignGuide", () => {
     expect(
       within(patterns).getByText("Detection was weak on this photo."),
     ).toBeInTheDocument();
+    const optionHeading = within(patterns).getByRole("heading", {
+      level: 3,
+      name: "Palak Paneer",
+    });
+    expect(optionHeading).toBeInTheDocument();
+    const optionCard = optionHeading.closest(".option-card");
+    expect(optionCard).not.toBeNull();
+    expect(optionCard?.querySelector(".option-card-masthead")).not.toBeNull();
+    expect(optionCard?.querySelector(".option-card-index")).toHaveTextContent(
+      "01batch 01",
+    );
+    expect(within(patterns).queryByText("AI image")).toBeNull();
+    expect(patterns.querySelector(".option-card-media")).toBeNull();
+    expect(within(patterns).queryByLabelText("Nutrition estimate")).toBeNull();
     expect(
-      within(patterns).getByRole("heading", { level: 3, name: "Palak Paneer" }),
-    ).toBeInTheDocument();
-    expect(within(patterns).getByText("410")).toBeInTheDocument();
-    expect(within(patterns).getByText("kcal")).toBeInTheDocument();
+      within(patterns).queryByText("Estimates only — not medical advice."),
+    ).toBeNull();
 
+    const layout = screen.getByRole("region", {
+      name: "Layout and responsiveness",
+    });
+    expect(layout).toBeInTheDocument();
     expect(
-      screen.getByRole("region", { name: "Layout and responsiveness" }),
-    ).toBeInTheDocument();
+      within(layout).getByText(/completed-dish previews in their own bordered block/i),
+    ).toBeVisible();
+    const accessibility = screen.getByRole("region", {
+      name: "Accessibility and interaction",
+    });
+    expect(accessibility).toBeInTheDocument();
     expect(
-      screen.getByRole("region", { name: "Accessibility and interaction" }),
-    ).toBeInTheDocument();
+      within(accessibility).getByText(/label every generated preview as AI image/i),
+    ).toBeVisible();
+  });
+
+  it("keeps generated text and the bordered preview inside narrow layouts", () => {
+    for (const selector of [".job-content", ".option-card-content", ".recipe-title"]) {
+      expect(declarationsFor(selector)).toMatch(/overflow-wrap:\s*anywhere\s*;/);
+    }
+
+    expect(declarationsFor(".recipe-preview-figure figcaption")).toMatch(
+      /margin-top:\s*0\s*;/,
+    );
   });
 });

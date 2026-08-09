@@ -5,13 +5,12 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from typing import NotRequired, TypedDict, cast
+from typing import NotRequired, Protocol, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langsmith import tracing_context
 
-from agents.nutrition import ApiBackedNutritionAgent, NutritionAgent
 from agents.specialized_recipe import (
     OllamaSpecializedRecipeAgent,
     SpecializedRecipeAgent,
@@ -19,14 +18,17 @@ from agents.specialized_recipe import (
 from core.config import Settings
 from core.errors import AppError, ErrorCode
 from core.logging import cause_chain
+from domain.images import DishPreview
 from domain.recipe_options import RecipeOption, RecipePreferences
 from domain.recipe_service import (
     RecipeGenerationContext,
     commit_recipe_results,
+    recipe_preview_artifact_ids,
     restore_after_recipe_failure,
+    superseded_recipe_preview_artifact_ids,
     validate_recipe_generation,
 )
-from domain.recipes import CompleteRecipe, IngredientAvailability, RecipeFailure
+from domain.recipes import CompleteRecipe, RecipeFailure
 from domain.session_service import confirmed_ingredient_names
 from domain.sessions import Session, SessionStage
 from repositories.session_store import SessionStore
@@ -40,6 +42,7 @@ logger = logging.getLogger(__name__)
 _LOAD_PROGRESS = 10
 _SETTLED_PROGRESS = 90
 _GENERIC_FAILURE_MESSAGE = "The model returned invalid structured output."
+_PREVIEW_UNAVAILABLE_WARNING = "Dish preview unavailable."
 
 
 class CompleteRecipesState(TypedDict):
@@ -55,6 +58,7 @@ class CompleteRecipesState(TypedDict):
     preferences: NotRequired[RecipePreferences]
     successes: NotRequired[dict[str, CompleteRecipe]]
     failures: NotRequired[dict[str, RecipeFailure]]
+    attempt_preview_ids: NotRequired[list[str]]
     complete_recipes: NotRequired[list[CompleteRecipe]]
     recipe_failures: NotRequired[list[RecipeFailure]]
     stage: NotRequired[SessionStage]
@@ -85,6 +89,26 @@ async def _ignore_progress(_: int) -> None:
     return None
 
 
+class DishPreviewGenerator(Protocol):
+    """Generate and delete session-owned completed-recipe previews."""
+
+    async def generate(
+        self,
+        session_id: str,
+        recipe: CompleteRecipe,
+        progress: ProgressReporter,
+    ) -> DishPreview: ...
+
+    async def delete(self, artifact_id: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _DetachedRecipeOutcome:
+    option_id: str
+    result: CompleteRecipe | RecipeFailure
+    preview_artifact_id: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class CompleteRecipeDependencies:
     """Replaceable service boundaries for complete-recipe generation."""
@@ -93,15 +117,20 @@ class CompleteRecipeDependencies:
     session_store: SessionStore
     model_call_limiter: ModelCallLimiter
     progress: ProgressReporter = _ignore_progress
-    nutrition_agent: NutritionAgent | None = None
-    nutrition_lookup_enabled: bool = False
+    dish_previews: DishPreviewGenerator | None = None
+    dish_previews_enabled: bool = False
 
 
 class _CommitSucceededDuringCancellation(Exception):
     """Carry cancellation without rolling back an exact committed replacement."""
 
-    def __init__(self, cancellation: asyncio.CancelledError) -> None:
+    def __init__(
+        self,
+        stored: Session,
+        cancellation: asyncio.CancelledError,
+    ) -> None:
         super().__init__("Complete recipe commit completed during cancellation.")
+        self.stored = stored
         self.cancellation = cancellation
 
 
@@ -139,6 +168,7 @@ def build_complete_recipes_graph(
         tasks = [
             asyncio.create_task(
                 _generate_one(
+                    state["session_id"],
                     option,
                     state["confirmed_names"],
                     state["preferences"],
@@ -150,14 +180,17 @@ def build_complete_recipes_graph(
         ]
         successes: dict[str, CompleteRecipe] = {}
         failures: dict[str, RecipeFailure] = {}
+        attempt_preview_ids: set[str] = set()
         settled = 0
         try:
             for completion in asyncio.as_completed(tasks):
-                option_id, result = await completion
-                if isinstance(result, CompleteRecipe):
-                    successes[option_id] = result
+                outcome = await completion
+                if isinstance(outcome.result, CompleteRecipe):
+                    successes[outcome.option_id] = outcome.result
                 else:
-                    failures[option_id] = result
+                    failures[outcome.option_id] = outcome.result
+                if outcome.preview_artifact_id is not None:
+                    attempt_preview_ids.add(outcome.preview_artifact_id)
                 settled += 1
                 await dependencies.progress(
                     _LOAD_PROGRESS
@@ -165,16 +198,30 @@ def build_complete_recipes_graph(
                     * (_SETTLED_PROGRESS - _LOAD_PROGRESS)
                     // len(selected_options)
                 )
-        except asyncio.CancelledError:
-            await _cancel_and_drain_tasks(tasks)
-            raise
-        except BaseException:
-            await _cancel_and_drain_tasks(tasks)
+        except BaseException as primary:
+            drained, drain_cancellation = await _cancel_and_drain_tasks(tasks)
+            attempt_preview_ids.update(
+                outcome.preview_artifact_id
+                for outcome in drained
+                if outcome.preview_artifact_id is not None
+            )
+            cleanup_cancellation = await _cleanup_preview_ids(
+                _uncommitted_preview_ids(state["session"], attempt_preview_ids),
+                dependencies,
+            )
+            cancellation = (
+                cleanup_cancellation
+                or drain_cancellation
+                or (primary if isinstance(primary, asyncio.CancelledError) else None)
+            )
+            if cancellation is not None:
+                raise cancellation from None
             raise
 
         return {
             "successes": successes,
             "failures": failures,
+            "attempt_preview_ids": sorted(attempt_preview_ids),
         }
 
     async def commit_results(
@@ -184,17 +231,63 @@ def build_complete_recipes_graph(
             state["session"],
             state["generation_context"],
         )
-        committed = commit_recipe_results(
+        attempt_preview_ids = _uncommitted_preview_ids(
             state["session"],
-            state["successes"],
-            state["failures"],
-            context,
+            state.get("attempt_preview_ids", ()),
         )
+        try:
+            committed = commit_recipe_results(
+                state["session"],
+                state["successes"],
+                state["failures"],
+                context,
+            )
+        except BaseException:
+            cleanup_cancellation = await _cleanup_preview_ids(
+                attempt_preview_ids,
+                dependencies,
+            )
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation from None
+            raise
         replacement = committed.model_copy(
             deep=True,
             update={"updated_at": state["session"].updated_at},
         )
-        stored = await _replace_settling_cancellation(replacement, dependencies)
+        try:
+            stored = await _replace_settling_cancellation(replacement, dependencies)
+        except _CommitSucceededDuringCancellation as committed_during_cancellation:
+            await _cleanup_preview_ids(
+                _post_commit_cleanup_ids(
+                    state["session"],
+                    committed_during_cancellation.stored,
+                    attempt_preview_ids,
+                ),
+                dependencies,
+            )
+            raise committed_during_cancellation
+        except BaseException:
+            cleanup_cancellation = await _cleanup_preview_ids(
+                attempt_preview_ids,
+                dependencies,
+            )
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation from None
+            raise
+
+        cleanup_cancellation = await _cleanup_preview_ids(
+            _post_commit_cleanup_ids(
+                state["session"],
+                stored,
+                attempt_preview_ids,
+            ),
+            dependencies,
+        )
+        if cleanup_cancellation is not None:
+            raise _CommitSucceededDuringCancellation(
+                stored,
+                cleanup_cancellation,
+            )
 
         selected_option_ids = list(context.selected_option_ids)
         complete_recipes = [
@@ -235,11 +328,12 @@ def build_complete_recipes_graph(
 
 
 async def _generate_one(
+    session_id: str,
     option: RecipeOption,
     confirmed_names: list[str],
     preferences: RecipePreferences,
     dependencies: CompleteRecipeDependencies,
-) -> tuple[str, CompleteRecipe | RecipeFailure]:
+) -> _DetachedRecipeOutcome:
     """Generate and independently sanitize one selected option's outcome."""
     try:
         recipe = await dependencies.model_call_limiter.run(
@@ -255,44 +349,12 @@ async def _generate_one(
                 round_trip=True,
                 warnings="error",
             )
-        )
-        if (
-            dependencies.nutrition_lookup_enabled
-            and dependencies.nutrition_agent is not None
-        ):
-            try:
-                ingredient_quantities = {
-                    ingredient.name: ingredient.quantity
-                    for ingredient in detached.ingredients
-                    if ingredient.availability is not IngredientAvailability.OPTIONAL
-                }
-                nutrition_agent = dependencies.nutrition_agent
-
-                async def estimate_nutrition():
-                    if isinstance(nutrition_agent, ApiBackedNutritionAgent):
-                        return await nutrition_agent.estimate_from_lookup(
-                            option,
-                            preferences.model_copy(deep=True),
-                            ingredient_quantities,
-                        )
-                    return await nutrition_agent.estimate(
-                        option,
-                        preferences.model_copy(deep=True),
-                        ingredient_quantities,
-                    )
-
-                nutrition = await dependencies.model_call_limiter.run(
-                    estimate_nutrition
-                )
-                detached = detached.model_copy(
-                    deep=True,
-                    update={"nutrition": nutrition},
-                )
-            except Exception:
-                pass
-        return option.id, detached
+        ).model_copy(update={"preview": None})
     except AppError as error:
-        return option.id, _failure_from_app_error(option.id, error)
+        return _DetachedRecipeOutcome(
+            option_id=option.id,
+            result=_failure_from_app_error(option.id, error),
+        )
     except Exception as error:
         logger.error(
             "complete_recipe_generation_failed",
@@ -303,7 +365,83 @@ async def _generate_one(
                 "cause_chain": cause_chain(error),
             },
         )
-        return option.id, _generic_failure(option.id)
+        return _DetachedRecipeOutcome(
+            option_id=option.id,
+            result=_generic_failure(option.id),
+        )
+
+    if not dependencies.dish_previews_enabled:
+        return _DetachedRecipeOutcome(option_id=option.id, result=detached)
+
+    dish_previews = dependencies.dish_previews
+    if dish_previews is None:
+        return _DetachedRecipeOutcome(
+            option_id=option.id,
+            result=_with_preview_warning(detached),
+        )
+
+    returned_preview_id: str | None = None
+    try:
+        preview = await dish_previews.generate(
+            session_id,
+            detached.model_copy(deep=True),
+            _ignore_progress,
+        )
+        if not isinstance(preview, DishPreview):
+            raise TypeError("Dish preview service returned an invalid result.")
+        if not isinstance(preview.artifact_id, str) or not preview.artifact_id:
+            raise TypeError("Dish preview service returned an invalid result.")
+        returned_preview_id = preview.artifact_id
+        detached_preview = DishPreview.model_validate(
+            preview.model_dump(
+                mode="python",
+                round_trip=True,
+                warnings="error",
+            )
+        )
+    except asyncio.CancelledError:
+        raise
+    except AppError:
+        return _DetachedRecipeOutcome(
+            option_id=option.id,
+            result=_with_preview_warning(detached),
+            preview_artifact_id=returned_preview_id,
+        )
+    except Exception as error:
+        logger.error(
+            "dish_preview_generation_failed",
+            extra={
+                "event": "dish_preview_generation_failed",
+                "option_id": option.id,
+                "exception_type": type(error).__name__,
+            },
+        )
+        return _DetachedRecipeOutcome(
+            option_id=option.id,
+            result=_with_preview_warning(detached),
+            preview_artifact_id=returned_preview_id,
+        )
+
+    return _DetachedRecipeOutcome(
+        option_id=option.id,
+        result=detached.model_copy(update={"preview": detached_preview}),
+        preview_artifact_id=detached_preview.artifact_id,
+    )
+
+
+def _with_preview_warning(recipe: CompleteRecipe) -> CompleteRecipe:
+    warnings = tuple(
+        warning
+        for warning in recipe.warnings
+        if warning != _PREVIEW_UNAVAILABLE_WARNING
+    )
+    return recipe.model_copy(
+        deep=True,
+        update={
+            "preview": None,
+            "warnings": (*warnings, _PREVIEW_UNAVAILABLE_WARNING),
+        },
+    )
 
 
 def _failure_from_app_error(option_id: str, error: AppError) -> RecipeFailure:
@@ -418,13 +556,13 @@ def _rollback_on_failure(
 
 
 async def _cancel_and_drain_tasks(
-    tasks: list[asyncio.Task[tuple[str, CompleteRecipe | RecipeFailure]]],
-) -> None:
+    tasks: list[asyncio.Task[_DetachedRecipeOutcome]],
+) -> tuple[list[_DetachedRecipeOutcome], asyncio.CancelledError | None]:
     """Cancel and settle every fan-out child despite repeated parent cancellation."""
     for task in tasks:
         task.cancel()
 
-    async def settle() -> list[object]:
+    async def settle() -> list[_DetachedRecipeOutcome | BaseException]:
         return await asyncio.gather(*tasks, return_exceptions=True)
 
     settle_task = asyncio.create_task(settle())
@@ -437,14 +575,103 @@ async def _cancel_and_drain_tasks(
             continue
         except BaseException:
             break
+    settled = settle_task.result()
+    return (
+        [outcome for outcome in settled if isinstance(outcome, _DetachedRecipeOutcome)],
+        cancellation,
+    )
+
+
+def _uncommitted_preview_ids(
+    session: Session,
+    artifact_ids: Sequence[str] | set[str],
+) -> frozenset[str]:
+    """Exclude every artifact that the current persisted snapshot references."""
+    return frozenset(artifact_ids) - recipe_preview_artifact_ids(session)
+
+
+def _post_commit_cleanup_ids(
+    previous: Session,
+    committed: Session,
+    attempt_preview_ids: Sequence[str] | set[str] | frozenset[str],
+) -> frozenset[str]:
+    """Return superseded or unattached IDs, excluding all committed references."""
+    committed_ids = recipe_preview_artifact_ids(committed)
+    return (
+        superseded_recipe_preview_artifact_ids(previous, committed)
+        | frozenset(attempt_preview_ids)
+    ) - committed_ids
+
+
+async def _cleanup_preview_ids(
+    artifact_ids: Sequence[str] | set[str] | frozenset[str],
+    dependencies: CompleteRecipeDependencies,
+) -> asyncio.CancelledError | None:
+    """Attempt every unique cleanup while resisting repeated parent cancellation."""
+    unique_ids = tuple(sorted(set(artifact_ids)))
+    if not unique_ids:
+        return None
+
+    dish_previews = dependencies.dish_previews
+    if dish_previews is None:
+        logger.error(
+            "dish_preview_cleanup_unavailable",
+            extra={
+                "event": "dish_preview_cleanup_unavailable",
+                "artifact_count": len(unique_ids),
+            },
+        )
+        return None
+
+    async def cleanup_all() -> asyncio.CancelledError | None:
+        cancellation: asyncio.CancelledError | None = None
+        for artifact_id in unique_ids:
+            try:
+                await dish_previews.delete(artifact_id)
+            except asyncio.CancelledError as error:
+                cancellation = error
+                logger.error(
+                    "dish_preview_cleanup_failed",
+                    extra={
+                        "event": "dish_preview_cleanup_failed",
+                        "artifact_id": artifact_id,
+                        "exception_type": type(error).__name__,
+                    },
+                )
+            except BaseException as error:
+                logger.error(
+                    "dish_preview_cleanup_failed",
+                    extra={
+                        "event": "dish_preview_cleanup_failed",
+                        "artifact_id": artifact_id,
+                        "exception_type": type(error).__name__,
+                    },
+                )
+        return cancellation
+
+    cleanup_task = asyncio.create_task(cleanup_all())
+    parent_cancellation: asyncio.CancelledError | None = None
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError as error:
+            parent_cancellation = error
+            continue
+        except BaseException:
+            break
     try:
-        settle_task.result()
-    except BaseException:
-        if cancellation is not None:
-            raise cancellation from None
-        raise
-    if cancellation is not None:
-        raise cancellation
+        cleanup_cancellation = cleanup_task.result()
+    except BaseException as error:
+        logger.error(
+            "dish_preview_cleanup_failed",
+            extra={
+                "event": "dish_preview_cleanup_failed",
+                "artifact_count": len(unique_ids),
+                "exception_type": type(error).__name__,
+            },
+        )
+        cleanup_cancellation = None
+    return parent_cancellation or cleanup_cancellation
 
 
 async def _replace_settling_cancellation(
@@ -471,7 +698,7 @@ async def _replace_settling_cancellation(
         raise
 
     if cancellation is not None:
-        raise _CommitSucceededDuringCancellation(cancellation)
+        raise _CommitSucceededDuringCancellation(stored, cancellation)
     return stored
 
 
@@ -546,8 +773,6 @@ def build_real_complete_recipe_dependencies(
     """Wire one lazy real agent, configured limiter, and in-memory store."""
     resolved_settings = settings or Settings(_env_file=None)
     tracing = TracingService(resolved_settings)
-    from orchestration.graphs.recipe_options import _configured_nutrition_agent
-
     return CompleteRecipeDependencies(
         agent=OllamaSpecializedRecipeAgent(
             settings=resolved_settings,
@@ -557,11 +782,6 @@ def build_real_complete_recipe_dependencies(
         model_call_limiter=ModelCallLimiter(
             resolved_settings.max_concurrent_model_calls
         ),
-        nutrition_agent=_configured_nutrition_agent(
-            resolved_settings,
-            tracing=tracing,
-        ),
-        nutrition_lookup_enabled=resolved_settings.nutrition_lookup_enabled,
     )
 
 

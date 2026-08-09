@@ -21,9 +21,6 @@ const options: RecipeOptionView[] = [
     missingIngredients: [],
     optionalIngredients: [],
     nutrition: null,
-    previewArtifactId: null,
-    previewLabel: null,
-    warnings: [],
     batchNumber: 1,
   },
   {
@@ -37,9 +34,6 @@ const options: RecipeOptionView[] = [
     missingIngredients: [],
     optionalIngredients: [],
     nutrition: null,
-    previewArtifactId: null,
-    previewLabel: null,
-    warnings: [],
     batchNumber: 1,
   },
 ];
@@ -84,6 +78,8 @@ function stateWithGeneratedContent(): CookSessionState {
         allergenNotice: "Check ingredient labels for allergens.",
         assumptions: [],
         warnings: [],
+        previewArtifactId: null,
+        previewLabel: null,
       },
     },
   };
@@ -137,6 +133,52 @@ describe("cookSessionReducer", () => {
         confirmed: false,
       },
     ]);
+  });
+
+  it("keeps reviewed inputs but invalidates orphaned generated work when a remote rebase switches to manual entry", () => {
+    const current = {
+      ...stateWithGeneratedContent(),
+      view: "job" as const,
+      mode: "api" as const,
+      sessionId: "session-photo",
+      photoPreviewUrl: "blob:committed-photo",
+      weakDetection: true,
+      job: {
+        kind: "ideas" as const,
+        returnView: "confirm" as const,
+        progress: 0,
+        selectedNames: [],
+      },
+      preferences: {
+        ...stateWithGeneratedContent().preferences,
+        servings: 4 as const,
+        specialInstructions: "Keep it mild",
+      },
+    };
+
+    const next = cookSessionReducer(current, {
+      type: "continue-with-manual-entry",
+    });
+
+    expect(next).toMatchObject({
+      view: "confirm",
+      maxReached: 2,
+      mode: "api",
+      sessionId: null,
+      photoPreviewUrl: null,
+      weakDetection: false,
+      job: null,
+      error: null,
+    });
+    expect(next.ingredients).toEqual(current.ingredients);
+    expect(next.preferences).toEqual(current.preferences);
+    expect(next.options).toEqual([]);
+    expect(next.selectedOptionIds).toEqual([]);
+    expect(next.completeRecipes).toEqual({});
+    expect(next.recipeFailures).toEqual({});
+    expect(next.activeRecipeId).toBeNull();
+    expect(next.completedSteps).toEqual({});
+    expect(next.ideasExhausted).toBe(false);
   });
 
   it("adds a trimmed user ingredient as confirmed and rejects a duplicate name", () => {

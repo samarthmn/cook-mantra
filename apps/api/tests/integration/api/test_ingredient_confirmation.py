@@ -18,7 +18,7 @@ class ReadyOllama:
     async def inspect(self) -> dict[str, object]:
         return {
             "reachable": True,
-            "available_models": [],
+            "available_models": ["qwen3.5:9b", "gpt-oss:20b"],
             "missing": [],
         }
 

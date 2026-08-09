@@ -58,6 +58,9 @@ export function RecipesScreen({
     kind: "pending" | "success" | "error";
   } | null>(null);
   const [savingOptionId, setSavingOptionId] = useState<string | null>(null);
+  const [failedPreviewArtifactIds, setFailedPreviewArtifactIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const captureAbortControllerRef = useRef<AbortController | null>(null);
   const saveInFlightRef = useRef(false);
   const mountedRef = useRef(true);
@@ -144,13 +147,13 @@ export function RecipesScreen({
     );
   }
 
-  const activeOption = options.find((option) => option.id === activeRecipe.optionId);
-  const activeNutrition = activeRecipe.nutrition ?? activeOption?.nutrition ?? null;
-  const displayedRecipe =
-    activeRecipe.nutrition === activeNutrition
-      ? activeRecipe
-      : { ...activeRecipe, nutrition: activeNutrition };
+  const displayedRecipe = activeRecipe;
   const completeSteps = completedSteps[activeRecipe.optionId] ?? [];
+  const previewArtifactId = displayedRecipe.previewArtifactId;
+  const visiblePreviewArtifactId =
+    previewArtifactId !== null && !failedPreviewArtifactIds.has(previewArtifactId)
+      ? previewArtifactId
+      : null;
 
   async function saveSnapshot() {
     if (saveInFlightRef.current) return;
@@ -165,7 +168,7 @@ export function RecipesScreen({
       snapshotRecipe.ingredients,
       confirmedIngredients,
     );
-    const previewArtifactId = activeOption?.previewArtifactId ?? null;
+    const previewArtifactId = snapshotRecipe.previewArtifactId;
     if (saveConfirmationTimeoutRef.current !== null) {
       window.clearTimeout(saveConfirmationTimeoutRef.current);
       saveConfirmationTimeoutRef.current = null;
@@ -314,6 +317,28 @@ export function RecipesScreen({
           recipeList.length > 1 ? `recipe-tab-${activeRecipe.optionId}` : undefined
         }
       >
+        {visiblePreviewArtifactId ? (
+          <figure className="recipe-preview-figure" key={visiblePreviewArtifactId}>
+            {/* A process-private, no-store artifact URL must bypass the Next image
+                optimizer so it is fetched directly from the user's local API. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              className="recipe-preview-image"
+              src={previewUrl(visiblePreviewArtifactId)}
+              alt={`${displayedRecipe.name}, AI-generated image`}
+              decoding="async"
+              referrerPolicy="no-referrer"
+              onError={() => {
+                setFailedPreviewArtifactIds((failedIds) => {
+                  const nextFailedIds = new Set(failedIds);
+                  nextFailedIds.add(visiblePreviewArtifactId);
+                  return nextFailedIds;
+                });
+              }}
+            />
+            <figcaption>AI image</figcaption>
+          </figure>
+        ) : null}
         <RecipeDetail
           recipe={displayedRecipe}
           confirmedIngredients={confirmedIngredients}

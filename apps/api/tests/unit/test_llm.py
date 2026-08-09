@@ -3,14 +3,17 @@ from langchain_ollama import ChatOllama
 
 from core import Agent, Model, Settings
 from core.config import AGENT_MODELS
+from core.errors import AppError, ErrorCode
+from core.runtime_config import ProviderConfiguration, get_runtime_snapshot
+from domain.model_runtime import AgentRole, ProviderName
 from services import get_model
+from services import llm as llm_service
 
 
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
         llm_timeout_seconds=300,
-        ollama_base_url="http://192.168.29.16:11434",
         _env_file=None,
     )
 
@@ -24,23 +27,49 @@ def test_backend_switching_is_not_supported(settings: Settings) -> None:
         )
 
 
-def test_model_targets_the_configured_ollama_host(settings: Settings) -> None:
+def test_unimplemented_selected_provider_is_refused_without_ollama_fallback(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = get_runtime_snapshot()
+    assert snapshot.config is not None
+    config = snapshot.config
+    role = AgentRole.MASTER_CHEF
+    openrouter = ProviderConfiguration(
+        endpoint="https://openrouter.ai/api/v1",
+        api_key_env="OPENROUTER_API_KEY",
+    )
+    changed = config.roles[role].model_copy(
+        update={"provider": ProviderName.OPENROUTER}
+    )
+    selected = snapshot.model_copy(
+        update={
+            "config": config.model_copy(
+                update={
+                    "providers": {
+                        **config.providers,
+                        ProviderName.OPENROUTER: openrouter,
+                    },
+                    "roles": {**config.roles, role: changed},
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(llm_service, "get_runtime_snapshot", lambda: selected)
+
+    with pytest.raises(AppError) as raised:
+        get_model(Agent.MASTER_CHEF, settings=settings)
+
+    assert raised.value.code is ErrorCode.PROVIDER_UNAVAILABLE
+    assert raised.value.details == {"role": role.value}
+
+
+def test_model_targets_the_yaml_configured_ollama_host(settings: Settings) -> None:
     model = get_model(Agent.MASTER_CHEF, settings=settings)
 
     assert isinstance(model, ChatOllama)
     assert model.model == AGENT_MODELS[Agent.MASTER_CHEF].value
-    assert model.base_url == "http://192.168.29.16:11434"
-
-
-def test_model_normalizes_a_typed_ollama_url_with_a_trailing_slash() -> None:
-    settings = Settings(
-        ollama_base_url="http://192.168.29.16:11434/",
-        _env_file=None,
-    )
-
-    model = get_model(Agent.MASTER_CHEF, settings=settings)
-
-    assert model.base_url == "http://192.168.29.16:11434"
+    assert model.base_url == "http://127.0.0.1:11434"
 
 
 def test_each_agent_uses_its_configured_model(settings: Settings) -> None:
@@ -49,6 +78,15 @@ def test_each_agent_uses_its_configured_model(settings: Settings) -> None:
 
     assert extraction.model == AGENT_MODELS[Agent.INGREDIENT_EXTRACTION].value
     assert chef.model == AGENT_MODELS[Agent.MASTER_CHEF].value
+
+
+def test_yaml_tuning_is_translated_by_the_ollama_adapter() -> None:
+    model = get_model(Agent.MASTER_CHEF, settings=Settings(_env_file=None))
+
+    assert model.model == "gpt-oss:20b"
+    assert model.base_url == "http://127.0.0.1:11434"
+    assert model.reasoning == "low"
+    assert model.num_ctx == 16_384
 
 
 def test_explicit_model_overrides_the_agent_default(settings: Settings) -> None:
@@ -63,14 +101,14 @@ def test_thinking_can_be_disabled(settings: Settings) -> None:
     assert model.reasoning is False
 
 
-def test_thinking_left_unset_defers_to_the_model(settings: Settings) -> None:
+def test_thinking_left_unset_uses_yaml_tuning(settings: Settings) -> None:
     model = get_model(Agent.MASTER_CHEF, settings=settings)
 
-    assert model.reasoning is None
+    assert model.reasoning == "low"
 
 
 def test_reasoning_effort_levels_are_forwarded(settings: Settings) -> None:
-    model = get_model(Agent.NUTRITION, thinking="low", settings=settings)
+    model = get_model(Agent.SPECIALIZED_RECIPE, thinking="low", settings=settings)
 
     assert model.reasoning == "low"
 
@@ -79,10 +117,13 @@ def test_agents_never_fall_back_to_the_ollama_default_context_window(
     settings: Settings,
 ) -> None:
     """Ollama's 4k default truncates structured output mid-JSON."""
-    for agent in (Agent.INGREDIENT_EXTRACTION, Agent.MASTER_CHEF, Agent.NUTRITION):
+    for agent in (
+        Agent.INGREDIENT_EXTRACTION,
+        Agent.MASTER_CHEF,
+        Agent.SPECIALIZED_RECIPE,
+    ):
         model = get_model(agent, settings=settings)
 
-        assert model.num_ctx == settings.llm_num_ctx
         assert model.num_ctx is not None and model.num_ctx > 4_096
 
 

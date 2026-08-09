@@ -6,11 +6,13 @@ import type {
   RecipeStepView,
 } from "./cook-session-state";
 
-export const SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v2";
+export const SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v3";
 
-const LEGACY_SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v1";
-const LEGACY_SAVED_RECIPES_VERSION = 1;
-const SAVED_RECIPES_VERSION = 2;
+const V2_SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v2";
+const V1_SAVED_RECIPES_STORAGE_KEY = "cook-mantra:saved-recipes:v1";
+const V1_SAVED_RECIPES_VERSION = 1;
+const V2_SAVED_RECIPES_VERSION = 2;
+const SAVED_RECIPES_VERSION = 3;
 const MAX_PHOTO_DATA_URL_LENGTH = 400 * 1024;
 
 export interface SavedRecipeProgress {
@@ -55,6 +57,11 @@ const INGREDIENT_SOURCES = new Set<IngredientSource>([
 ]);
 const HEAT_LEVELS = new Set(["low", "medium", "medium-high", "high"]);
 const DATA_IMAGE_URL_PATTERN = /^data:image\/[a-z0-9.+-]+(?:;[^,\r\n]*)?,[^\r\n]*$/i;
+
+type CompleteRecipeCore = Omit<
+  CompleteRecipeView,
+  "previewArtifactId" | "previewLabel"
+>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -115,7 +122,9 @@ function isNutrition(value: unknown): value is NutritionView {
   );
 }
 
-function isCompleteRecipe(value: unknown): value is CompleteRecipeView {
+function hasCompleteRecipeCore(
+  value: unknown,
+): value is Record<string, unknown> & CompleteRecipeCore {
   if (!isRecord(value)) {
     return false;
   }
@@ -145,6 +154,70 @@ function isCompleteRecipe(value: unknown): value is CompleteRecipeView {
     isStringArray(value.assumptions) &&
     isStringArray(value.warnings)
   );
+}
+
+function hasRuntimePreview(value: Record<string, unknown>): boolean {
+  return (
+    (value.previewArtifactId === null && value.previewLabel === null) ||
+    (typeof value.previewArtifactId === "string" &&
+      value.previewArtifactId.trim().length > 0 &&
+      value.previewLabel === "AI-generated image")
+  );
+}
+
+function isCompleteRecipe(value: unknown): value is CompleteRecipeView {
+  return hasCompleteRecipeCore(value) && hasRuntimePreview(value);
+}
+
+function isStoredCompleteRecipe(value: unknown): value is CompleteRecipeView {
+  return (
+    hasCompleteRecipeCore(value) &&
+    value.previewArtifactId === null &&
+    value.previewLabel === null
+  );
+}
+
+function projectRecipeForStorage(recipe: CompleteRecipeCore): CompleteRecipeView {
+  return {
+    optionId: recipe.optionId,
+    name: recipe.name,
+    cuisine: recipe.cuisine,
+    servings: recipe.servings,
+    totalMinutes: recipe.totalMinutes,
+    ingredients: recipe.ingredients.map((ingredient) => ({
+      name: ingredient.name,
+      quantity: ingredient.quantity,
+      availability: ingredient.availability,
+      substitution: ingredient.substitution,
+    })),
+    steps: recipe.steps.map((step) => ({
+      number: step.number,
+      instruction: step.instruction,
+      durationMinutes: step.durationMinutes,
+      ...(step.doneWhen === undefined ? {} : { doneWhen: step.doneWhen }),
+      ...(step.heatLevel === undefined ? {} : { heatLevel: step.heatLevel }),
+    })),
+    tips: [...recipe.tips],
+    substitutions: [...recipe.substitutions],
+    nutrition:
+      recipe.nutrition === null
+        ? null
+        : {
+            caloriesKcal: recipe.nutrition.caloriesKcal,
+            proteinG: recipe.nutrition.proteinG,
+            carbohydratesG: recipe.nutrition.carbohydratesG,
+            fatG: recipe.nutrition.fatG,
+            dietTags: [...recipe.nutrition.dietTags],
+            allergenWarnings: [...recipe.nutrition.allergenWarnings],
+            disclaimer: recipe.nutrition.disclaimer,
+          },
+    nutritionNotice: recipe.nutritionNotice,
+    allergenNotice: recipe.allergenNotice,
+    assumptions: [...recipe.assumptions],
+    warnings: [...recipe.warnings],
+    previewArtifactId: null,
+    previewLabel: null,
+  };
 }
 
 function isIsoDate(value: unknown): value is string {
@@ -222,46 +295,66 @@ function normalizePhoto(value: unknown): string | null {
     : null;
 }
 
-function hasValidEntryCore(value: unknown): value is Record<string, unknown> & {
+function hasValidEntryMetadata(value: unknown): value is Record<string, unknown> & {
   id: string;
   savedAt: string;
-  recipe: CompleteRecipeView;
+  recipe: unknown;
 } {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
     value.id.trim().length > 0 &&
-    isIsoDate(value.savedAt) &&
-    isCompleteRecipe(value.recipe)
+    isIsoDate(value.savedAt)
   );
 }
 
-function migrateLegacyEntry(value: unknown): SavedRecipeEntry | null {
-  if (!hasValidEntryCore(value)) {
+function migrateV1Entry(value: unknown): SavedRecipeEntry | null {
+  if (!hasValidEntryMetadata(value) || !hasCompleteRecipeCore(value.recipe)) {
     return null;
   }
+
+  const recipe = projectRecipeForStorage(value.recipe);
 
   return {
     id: value.id,
     savedAt: value.savedAt,
-    recipe: value.recipe,
+    recipe,
     photo: null,
     progress: null,
     ingredientSources: null,
   };
 }
 
-function normalizeSavedRecipeEntry(value: unknown): SavedRecipeEntry | null {
-  if (!hasValidEntryCore(value)) {
+function migrateV2Entry(value: unknown): SavedRecipeEntry | null {
+  if (!hasValidEntryMetadata(value) || !hasCompleteRecipeCore(value.recipe)) {
     return null;
   }
+
+  const recipe = projectRecipeForStorage(value.recipe);
 
   return {
     id: value.id,
     savedAt: value.savedAt,
-    recipe: value.recipe,
+    recipe,
     photo: normalizePhoto(value.photo),
-    progress: normalizeProgress(value.progress, value.recipe),
+    progress: normalizeProgress(value.progress, recipe),
+    ingredientSources: normalizeIngredientSources(value.ingredientSources),
+  };
+}
+
+function normalizeSavedRecipeEntry(value: unknown): SavedRecipeEntry | null {
+  if (!hasValidEntryMetadata(value) || !isStoredCompleteRecipe(value.recipe)) {
+    return null;
+  }
+
+  const recipe = projectRecipeForStorage(value.recipe);
+
+  return {
+    id: value.id,
+    savedAt: value.savedAt,
+    recipe,
+    photo: normalizePhoto(value.photo),
+    progress: normalizeProgress(value.progress, recipe),
     ingredientSources: normalizeIngredientSources(value.ingredientSources),
   };
 }
@@ -311,28 +404,58 @@ function parseCurrentPayload(serialized: string): StorageReadResult {
   }
 }
 
-function parseLegacyPayload(serialized: string): SavedRecipeEntry[] {
+function parseV2Payload(serialized: string): StorageReadResult {
+  try {
+    const payload: unknown = JSON.parse(serialized);
+    if (
+      !isRecord(payload) ||
+      payload.version !== V2_SAVED_RECIPES_VERSION ||
+      !Array.isArray(payload.entries)
+    ) {
+      return { ok: false, entries: [] };
+    }
+
+    return {
+      ok: true,
+      entries: payload.entries
+        .map(migrateV2Entry)
+        .filter((entry): entry is SavedRecipeEntry => entry !== null),
+    };
+  } catch {
+    return { ok: false, entries: [] };
+  }
+}
+
+function parseV1Payload(serialized: string): StorageReadResult {
   try {
     const payload: unknown = JSON.parse(serialized);
     if (!isRecord(payload) || !Array.isArray(payload.entries)) {
-      return [];
+      return { ok: false, entries: [] };
     }
 
-    if (payload.version === LEGACY_SAVED_RECIPES_VERSION) {
-      return payload.entries
-        .map(migrateLegacyEntry)
-        .filter((entry): entry is SavedRecipeEntry => entry !== null);
+    if (payload.version === V1_SAVED_RECIPES_VERSION) {
+      return {
+        ok: true,
+        entries: payload.entries
+          .map(migrateV1Entry)
+          .filter((entry): entry is SavedRecipeEntry => entry !== null),
+      };
     }
 
-    if (payload.version === SAVED_RECIPES_VERSION) {
-      return payload.entries
-        .map(normalizeSavedRecipeEntry)
-        .filter((entry): entry is SavedRecipeEntry => entry !== null);
+    // Early v2 builds wrote the upgraded payload under the v1 key. Hydrate
+    // those snapshots without mutating storage during a read.
+    if (payload.version === V2_SAVED_RECIPES_VERSION) {
+      return {
+        ok: true,
+        entries: payload.entries
+          .map(migrateV2Entry)
+          .filter((entry): entry is SavedRecipeEntry => entry !== null),
+      };
     }
 
-    return [];
+    return { ok: false, entries: [] };
   } catch {
-    return [];
+    return { ok: false, entries: [] };
   }
 }
 
@@ -346,22 +469,36 @@ function readSavedRecipes(storage: Storage): StorageReadResult {
     return parseCurrentPayload(current.serialized);
   }
 
-  const legacy = readStorageItem(storage, LEGACY_SAVED_RECIPES_STORAGE_KEY);
-  if (!legacy.ok) {
+  const v2 = readStorageItem(storage, V2_SAVED_RECIPES_STORAGE_KEY);
+  if (!v2.ok) {
     return { ok: false, entries: [] };
   }
 
-  return {
-    ok: true,
-    entries: legacy.serialized === null ? [] : parseLegacyPayload(legacy.serialized),
-  };
+  if (v2.serialized !== null) {
+    return parseV2Payload(v2.serialized);
+  }
+
+  const v1 = readStorageItem(storage, V1_SAVED_RECIPES_STORAGE_KEY);
+  if (!v1.ok) {
+    return { ok: false, entries: [] };
+  }
+
+  return v1.serialized === null
+    ? { ok: true, entries: [] }
+    : parseV1Payload(v1.serialized);
 }
 
-function removeLegacyPayload(storage: Storage): void {
+function removeLegacyPayloads(storage: Storage): void {
   try {
-    storage.removeItem(LEGACY_SAVED_RECIPES_STORAGE_KEY);
+    storage.removeItem(V2_SAVED_RECIPES_STORAGE_KEY);
   } catch {
-    // The v2 write already succeeded, so stale legacy data is safe to ignore.
+    // The v3 write already succeeded, so stale legacy data is safe to ignore.
+  }
+
+  try {
+    storage.removeItem(V1_SAVED_RECIPES_STORAGE_KEY);
+  } catch {
+    // The v3 write already succeeded, so stale legacy data is safe to ignore.
   }
 }
 
@@ -373,7 +510,7 @@ function writeSavedRecipes(storage: Storage, entries: SavedRecipeEntry[]): boole
 
   try {
     storage.setItem(SAVED_RECIPES_STORAGE_KEY, JSON.stringify(payload));
-    removeLegacyPayload(storage);
+    removeLegacyPayloads(storage);
     return true;
   } catch {
     return false;
@@ -431,17 +568,20 @@ export function saveRecipe(
   }
 
   const current = readSavedRecipes(storage);
-  const normalizedSnapshot = isCompleteRecipe(recipe)
-    ? normalizeSnapshot(snapshot, recipe)
-    : null;
-  if (!current.ok || !isCompleteRecipe(recipe) || normalizedSnapshot === null) {
+  if (!current.ok || !isCompleteRecipe(recipe)) {
+    return { ok: false, entries: current.entries };
+  }
+
+  const storedRecipe = projectRecipeForStorage(recipe);
+  const normalizedSnapshot = normalizeSnapshot(snapshot, storedRecipe);
+  if (normalizedSnapshot === null) {
     return { ok: false, entries: current.entries };
   }
 
   const entry: SavedRecipeEntry = {
-    id: nextEntryId(current.entries, recipe),
+    id: nextEntryId(current.entries, storedRecipe),
     savedAt: new Date().toISOString(),
-    recipe,
+    recipe: storedRecipe,
     photo: normalizedSnapshot.photo,
     progress: normalizedSnapshot.progress,
     ingredientSources: normalizedSnapshot.ingredientSources,

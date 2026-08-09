@@ -97,7 +97,10 @@ def cause_chain(error: BaseException) -> list[str]:
             break
         seen.add(id(current))
         chain.append(f"{type(current).__name__}: {str(current)[:_MAX_CAUSE_TEXT]}")
-        current = current.__cause__ or current.__context__
+        next_error = current.__cause__
+        if next_error is None and not current.__suppress_context__:
+            next_error = current.__context__
+        current = next_error
     return chain
 
 

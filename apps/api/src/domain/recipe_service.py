@@ -245,6 +245,25 @@ def restore_after_recipe_failure(
     return rollback.model_copy(deep=True)
 
 
+def recipe_preview_artifact_ids(session: Session) -> frozenset[str]:
+    """Return every unique preview artifact referenced by one session snapshot."""
+    return frozenset(
+        recipe.preview.artifact_id
+        for recipe in session.complete_recipes.values()
+        if recipe.preview is not None
+    )
+
+
+def superseded_recipe_preview_artifact_ids(
+    previous: Session,
+    committed: Session,
+) -> frozenset[str]:
+    """Return old preview IDs no longer referenced after a committed replacement."""
+    return recipe_preview_artifact_ids(previous) - recipe_preview_artifact_ids(
+        committed
+    )
+
+
 def _require_recipe_entry_stage(session: Session) -> None:
     if not any(session.stage is stage for stage in _RECIPE_ENTRY_STAGES):
         raise AppError(

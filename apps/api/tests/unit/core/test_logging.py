@@ -7,7 +7,12 @@ from contextlib import contextmanager
 import pytest
 
 from core.errors import AppError, ErrorCode
-from core.logging import configure_logging, current_log_context, log_context
+from core.logging import (
+    cause_chain,
+    configure_logging,
+    current_log_context,
+    log_context,
+)
 from domain.jobs import JobOperation
 from orchestration.job_runner import JobRunner
 from repositories.job_store import JobStore
@@ -171,6 +176,21 @@ def test_formatter_drops_exception_text_and_traceback(
     assert "canary" not in output
     assert "provider_secret" not in output
     assert "Traceback" not in output
+
+
+def test_cause_chain_stops_at_suppressed_exception_context() -> None:
+    try:
+        raise ValueError("Bearer secret-context-canary")
+    except ValueError:
+        try:
+            raise RuntimeError("safe normalized failure") from None
+        except RuntimeError as error:
+            normalized = error
+
+    assert normalized.__cause__ is None
+    assert normalized.__context__ is not None
+    assert normalized.__suppress_context__ is True
+    assert cause_chain(normalized) == ["RuntimeError: safe normalized failure"]
 
 
 def test_configure_logging_is_idempotent(

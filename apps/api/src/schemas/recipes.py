@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from domain.images import DishPreview
 from domain.recipes import CompleteRecipe, RecipeFailure
 
 COMPLETE_RECIPE_EXAMPLE = {
@@ -59,6 +60,7 @@ COMPLETE_RECIPE_EXAMPLE = {
     },
     "nutrition_notice": "Estimated values; not medical advice.",
     "allergen_notice": "Check ingredient labels for allergens.",
+    "preview": None,
     "assumptions": ["Salt and cooking oil are available."],
     "warnings": ["Pasta must be purchased before cooking."],
 }
@@ -105,6 +107,8 @@ class CompleteRecipeResponse(CompleteRecipe):
         from_attributes=True,
         json_schema_extra={"examples": [COMPLETE_RECIPE_EXAMPLE]},
     )
+
+    preview: DishPreview | None
 
 
 class RecipeFailureResponse(RecipeFailure):

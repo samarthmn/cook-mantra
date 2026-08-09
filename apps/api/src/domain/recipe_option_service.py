@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.errors import AppError, ErrorCode
 from domain.recipe_options import (
-    NutritionEstimate,
     RecipeOption,
     RecipeOptionDraft,
     RecipePreferences,
@@ -132,30 +131,15 @@ def begin_option_generation(
 def commit_option_batch(
     session: Session,
     drafts: Sequence[RecipeOptionDraft],
-    nutrition: Sequence[NutritionEstimate | None],
     context: OptionGenerationContext,
 ) -> Session:
     """Commit one validated batch and return a detached options-ready session."""
     require_stage(session, SessionStage.GENERATING_OPTIONS)
     _require_matching_context(session, context)
-    if len(drafts) != len(nutrition):
-        raise AppError(
-            code=ErrorCode.INVALID_REQUEST,
-            message="Each recipe option must have a nutrition result.",
-            status_code=422,
-            retryable=False,
-            session_id=session.id,
-        )
     validate_option_names(drafts, session.excluded_recipe_names)
     validate_option_ingredients(drafts, confirmed_ingredient_names(session))
 
-    new_options = [
-        RecipeOption(
-            **draft.model_dump(),
-            nutrition=estimate.model_copy(deep=True) if estimate is not None else None,
-        )
-        for draft, estimate in zip(drafts, nutrition, strict=True)
-    ]
+    new_options = [RecipeOption(**draft.model_dump()) for draft in drafts]
     previous_options = (
         [option.model_copy(deep=True) for option in session.recipe_options]
         if context.more

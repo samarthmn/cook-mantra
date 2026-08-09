@@ -59,6 +59,8 @@ const fullRecipe: CompleteRecipeView = {
   allergenNotice: "Check ingredient labels for allergens.",
   assumptions: ["A wide skillet is available."],
   warnings: ["Paneer contains milk."],
+  previewArtifactId: null,
+  previewLabel: null,
 };
 
 afterEach(() => {
@@ -116,18 +118,6 @@ describe("recipeToMarkdown", () => {
 
 - Paneer contains milk.
 
-## Nutrition
-
-- **Calories:** 510 kcal
-- **Protein:** 28 g
-- **Carbohydrates:** 20 g
-- **Fat:** 35 g
-- **Diet tags:** vegetarian, gluten-free
-- **Allergen warnings:** milk
-- **Disclaimer:** Values are estimates per serving.
-
-> **Nutrition notice:** Estimated values; not medical advice.
->
 > **Allergen notice:** Check ingredient labels for allergens.
 `);
   });
@@ -178,8 +168,6 @@ describe("recipeToMarkdown", () => {
 
 1. Steam the rice.
 
-> **Nutrition notice:** Estimated values; not medical advice.
->
 > **Allergen notice:** Check ingredient labels for allergens.
 `);
   });
@@ -253,18 +241,6 @@ describe("recipeToMarkdown", () => {
 
 - Handle the hot pan carefully.
 
-## Nutrition
-
-- **Calories:** 510 kcal
-- **Protein:** 28 g
-- **Carbohydrates:** 20 g
-- **Fat:** 35 g
-- **Diet tags:** high protein
-- **Allergen warnings:** tree nuts
-- **Disclaimer:** Values are estimates.
-
-> **Nutrition notice:** Estimated values; not medical advice.
->
 > **Allergen notice:** Check ingredient labels for allergens.
 `);
   });

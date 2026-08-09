@@ -18,113 +18,24 @@ def test_settings_resolve_env_file_from_project_root(
     assert configured_env_file.is_absolute()
 
 
-def test_settings_require_ollama_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-
-    with pytest.raises(ValidationError, match="ollama_base_url"):
-        Settings(_env_file=None)
-
-
-def test_settings_read_ollama_base_url_from_environment(
+def test_model_endpoint_is_no_longer_required_in_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://configured-ollama.test:11434")
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
 
-    settings = Settings(_env_file=None)
+    Settings(_env_file=None)
 
-    assert str(settings.ollama_base_url).rstrip("/") == (
-        "http://configured-ollama.test:11434"
-    )
+    assert "ollama_base_url" not in Settings.model_fields
 
 
-def test_dish_previews_are_disabled_by_default(
+def test_legacy_dish_preview_environment_flag_is_not_a_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("DISH_PREVIEWS_ENABLED", raising=False)
 
-    settings = Settings(_env_file=None)
+    Settings(_env_file=None)
 
-    assert settings.dish_previews_enabled is False
-
-
-@pytest.mark.parametrize(
-    ("beast_base_url", "beast_api_key"),
-    [
-        (None, None),
-        ("http://beast.test:4900", None),
-        (None, "secret-key"),
-    ],
-)
-def test_enabled_previews_require_complete_beast_configuration(
-    beast_base_url: str | None,
-    beast_api_key: str | None,
-) -> None:
-    with pytest.raises(
-        ValidationError,
-        match="dish previews require both beast_base_url and beast_api_key",
-    ):
-        Settings(
-            _env_file=None,
-            dish_previews_enabled=True,
-            beast_base_url=beast_base_url,
-            beast_api_key=beast_api_key,
-        )
-
-
-def test_disabled_previews_allow_missing_beast_configuration() -> None:
-    settings = Settings(
-        _env_file=None,
-        dish_previews_enabled=False,
-        beast_base_url=None,
-        beast_api_key=None,
-    )
-
-    assert settings.beast_base_url is None
-    assert settings.beast_api_key is None
-
-
-def test_nutrition_lookup_is_disabled_by_default() -> None:
-    settings = Settings(_env_file=None)
-
-    assert settings.nutrition_lookup_enabled is False
-    assert settings.nutrition_api_base_url is None
-
-
-def test_enabled_nutrition_lookup_requires_base_url() -> None:
-    with pytest.raises(
-        ValidationError,
-        match="nutrition lookup requires nutrition_api_base_url when enabled",
-    ):
-        Settings(
-            _env_file=None,
-            nutrition_lookup_enabled=True,
-            nutrition_api_base_url=None,
-        )
-
-
-def test_enabled_nutrition_lookup_accepts_base_url() -> None:
-    settings = Settings(
-        _env_file=None,
-        nutrition_lookup_enabled=True,
-        nutrition_api_base_url="http://nutrition.test:5900",
-    )
-
-    assert str(settings.nutrition_api_base_url).rstrip("/") == (
-        "http://nutrition.test:5900"
-    )
-
-
-def test_enabled_previews_accept_complete_beast_configuration() -> None:
-    settings = Settings(
-        _env_file=None,
-        dish_previews_enabled=True,
-        beast_base_url="http://beast.test:4900",
-        beast_api_key="secret-key",
-    )
-
-    assert str(settings.beast_base_url).rstrip("/") == "http://beast.test:4900"
-    assert settings.beast_api_key is not None
-    assert settings.beast_api_key.get_secret_value() == "secret-key"
+    assert "dish_previews_enabled" not in Settings.model_fields
 
 
 def test_settings_have_safe_local_defaults() -> None:
@@ -138,8 +49,19 @@ def test_settings_have_safe_local_defaults() -> None:
     assert settings.max_upload_bytes == 10 * 1024 * 1024
     assert settings.session_ttl_seconds == 21_600
     assert settings.artifact_root == PROJECT_ROOT / "tmp" / "cook-mantra-api"
-    assert settings.beast_image_model == "z-image-turbo"
-    assert settings.beast_poll_interval_seconds == 2.0
+
+
+def test_beast_and_image_tuning_are_not_parallel_settings_sources() -> None:
+    assert {
+        "beast_base_url",
+        "beast_api_key",
+        "beast_image_model",
+        "beast_poll_interval_seconds",
+        "image_width",
+        "image_height",
+        "image_steps",
+        "image_timeout_seconds",
+    }.isdisjoint(Settings.model_fields)
 
 
 def test_langsmith_is_optional() -> None:
@@ -164,8 +86,6 @@ def test_settings_reject_an_unknown_log_level() -> None:
         ("max_concurrent_model_calls", -1),
         ("cleanup_interval_seconds", 9),
         ("cleanup_interval_seconds", 0),
-        ("beast_poll_interval_seconds", 0),
-        ("beast_poll_interval_seconds", -1),
     ],
 )
 def test_settings_reject_invalid_positive_tuning_values(
@@ -210,7 +130,6 @@ def test_agent_model_assignments_are_deliberate() -> None:
     assert AGENT_MODELS == {
         Agent.INGREDIENT_EXTRACTION: Model.QWEN_SMALL,
         Agent.MASTER_CHEF: Model.GPT_OSS,
-        Agent.NUTRITION: Model.GPT_OSS,
         Agent.SPECIALIZED_RECIPE: Model.GPT_OSS,
     }
 

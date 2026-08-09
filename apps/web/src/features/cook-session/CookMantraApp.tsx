@@ -20,12 +20,22 @@ import {
   CookMantraClient,
   DEFAULT_API_BASE_URL,
 } from "@/lib/api/cook-mantra-client";
-import type { JobErrorResponse, SessionStage, TerminalJobResponse } from "@/types/api";
+import type {
+  JobErrorResponse,
+  RuntimeStatusResponse,
+  SessionStage,
+  TerminalJobResponse,
+} from "@/types/api";
 
 import { ConfirmScreen } from "./components/ConfirmScreen";
 import { JobScreen } from "./components/JobScreen";
 import { OptionsScreen } from "./components/OptionsScreen";
 import { RecipesScreen } from "./components/RecipesScreen";
+import { RemoteMediaDisclosureDialog } from "./components/RemoteMediaDisclosureDialog";
+import {
+  RuntimeStatusPanel,
+  type RuntimeStatusState,
+} from "./components/RuntimeStatusPanel";
 import { SavedRecipesScreen } from "./components/SavedRecipesScreen";
 import { UploadScreen } from "./components/UploadScreen";
 import {
@@ -56,6 +66,11 @@ import {
   demoPantryIngredients,
 } from "./model/demo-data";
 import { loadPantryStaples, savePantryStaples } from "./model/pantry-staples";
+import {
+  hasMatchingRemoteMediaAcknowledgement,
+  persistRemoteMediaAcknowledgement,
+  type RemoteMediaDisclosureTarget,
+} from "./model/remote-media-disclosure";
 import {
   loadSavedRecipes,
   SAVED_RECIPES_STORAGE_KEY,
@@ -89,6 +104,45 @@ interface PendingRecipeJob {
   entryStage: "options_ready" | "recipes_ready";
   merge: boolean;
   returnView: "options" | "recipes";
+}
+
+interface UploadAttempt {
+  id: number;
+  file: File;
+  controller: AbortController;
+  staleRefreshes: number;
+  previewUrl: string | null;
+  submitting: boolean;
+}
+
+interface PendingUploadRemoteDisclosure {
+  kind: "upload";
+  attemptId: number;
+  target: RemoteMediaDisclosureTarget;
+  runtime: AdmittedIngredientRuntime;
+}
+
+interface PendingReviewRemoteDisclosure {
+  kind: "review";
+  target: RemoteMediaDisclosureTarget;
+  runtime: AdmittedIngredientRuntime;
+}
+
+type PendingRemoteDisclosure =
+  PendingUploadRemoteDisclosure | PendingReviewRemoteDisclosure;
+
+interface ReviewDisclosureContinuation {
+  target: RemoteMediaDisclosureTarget;
+  signal: AbortSignal;
+  onAbort: () => void;
+  resolve: () => void;
+  reject: (reason: unknown) => void;
+}
+
+interface AdmittedIngredientRuntime {
+  runtimeRevision: string;
+  provider: "ollama" | "openrouter" | "codex";
+  model: string;
 }
 
 class JobRunError extends Error {
@@ -146,25 +200,99 @@ function ConnectedCookMantraApp({
   );
   const [savedRecipes, setSavedRecipes] = useSavedRecipeEntries();
   const [savedViewOpen, setSavedViewOpen] = useState(false);
+  const [runtimeStatusState, setRuntimeStatusState] = useState<RuntimeStatusState>({
+    phase: "loading",
+  });
+  const [pendingRemoteDisclosure, setPendingRemoteDisclosure] =
+    useState<PendingRemoteDisclosure | null>(null);
+  const [disclosureError, setDisclosureError] = useState<string | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
   const activeController = useRef<AbortController | null>(null);
+  const runtimeStatusController = useRef<AbortController | null>(null);
+  const runtimeStatusRequestId = useRef(0);
+  const uploadAttemptId = useRef(0);
+  const activeUploadAttempt = useRef<UploadAttempt | null>(null);
+  const reviewDisclosureContinuation = useRef<ReviewDisclosureContinuation | null>(
+    null,
+  );
+  const uploadReturnFocusRef = useRef<HTMLElement | null>(null);
+  const disclosureReturnFocusRef = useRef<HTMLElement | null>(null);
+  const restoreDisclosureFocus = useRef(false);
   const activeJobMode = useRef<"api" | "demo" | null>(null);
   const apiSessionStage = useRef<SessionStage | null>(null);
   const uploadedPhotoFile = useRef<File | null>(null);
+  const uploadedPhotoRuntimeRevision = useRef<string | null>(null);
   const manualEntry = useRef(false);
   const photoPreviewUrl = useRef<string | null>(null);
   const lastRetry = useRef<(() => void) | null>(null);
   const savedReturnScrollY = useRef(0);
   const activeAppView: AppView = savedViewOpen ? "saved" : state.view;
   const previousView = useRef<AppView>(activeAppView);
+
+  const readRuntimeStatus = useCallback(
+    async (signal: AbortSignal): Promise<RuntimeStatusResponse> => {
+      const requestId = ++runtimeStatusRequestId.current;
+      setRuntimeStatusState({ phase: "loading" });
+      try {
+        const snapshot = await client.getRuntimeStatus({ signal });
+        if (requestId === runtimeStatusRequestId.current && !signal.aborted) {
+          setRuntimeStatusState({ phase: "available", snapshot });
+        }
+        return snapshot;
+      } catch (error) {
+        if (
+          requestId === runtimeStatusRequestId.current &&
+          !signal.aborted &&
+          !isAbortError(error)
+        ) {
+          setRuntimeStatusState({ phase: "unavailable" });
+        }
+        throw error;
+      }
+    },
+    [client],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    runtimeStatusController.current = controller;
+    queueMicrotask(() => {
+      if (!controller.signal.aborted) {
+        void readRuntimeStatus(controller.signal).catch(() => undefined);
+      }
+    });
+    return () => {
+      controller.abort();
+      if (runtimeStatusController.current === controller) {
+        runtimeStatusController.current = null;
+      }
+    };
+  }, [readRuntimeStatus]);
+
   useEffect(() => {
     dispatch({ type: "set-pantry-staples", names: loadPantryStaples() });
   }, []);
 
   useEffect(
     () => () => {
+      const disclosure = reviewDisclosureContinuation.current;
+      if (disclosure) {
+        disclosure.signal.removeEventListener("abort", disclosure.onAbort);
+        reviewDisclosureContinuation.current = null;
+        disclosure.reject(new DOMException("The operation was aborted.", "AbortError"));
+      }
+      runtimeStatusController.current?.abort();
       activeController.current?.abort();
+      const uploadAttempt = activeUploadAttempt.current;
+      uploadAttempt?.controller.abort();
+      if (
+        uploadAttempt?.previewUrl &&
+        uploadAttempt.previewUrl !== photoPreviewUrl.current
+      ) {
+        URL.revokeObjectURL(uploadAttempt.previewUrl);
+        uploadAttempt.previewUrl = null;
+      }
       if (photoPreviewUrl.current) URL.revokeObjectURL(photoPreviewUrl.current);
     },
     [],
@@ -186,6 +314,23 @@ function ConnectedCookMantraApp({
       previousView.current = activeAppView;
     }
   }, [activeAppView]);
+
+  useEffect(() => {
+    if (pendingRemoteDisclosure || !restoreDisclosureFocus.current) return;
+
+    restoreDisclosureFocus.current = false;
+    const returnTarget = disclosureReturnFocusRef.current;
+    disclosureReturnFocusRef.current = null;
+    const targetIsVisible =
+      returnTarget?.isConnected &&
+      !returnTarget.closest("[hidden], [aria-hidden='true']");
+    const viewSelector =
+      activeAppView === "saved" ? ".saved-view-shell" : ".cook-session-view";
+    const target = targetIsVisible
+      ? returnTarget
+      : document.querySelector<HTMLElement>(`${viewSelector} h1`);
+    target?.focus({ preventScroll: true });
+  }, [activeAppView, pendingRemoteDisclosure]);
 
   const beginOperation = useCallback(() => {
     activeController.current?.abort();
@@ -246,8 +391,10 @@ function ConnectedCookMantraApp({
 
   function failCurrentOperation(error: unknown) {
     if (isAbortError(error)) return;
+    const appError = toAppError(error);
+    if (!appError.retryable) lastRetry.current = null;
     logOperationFailure(error, stateRef.current);
-    dispatch({ type: "fail-job", error: toAppError(error) });
+    dispatch({ type: "fail-job", error: appError });
   }
 
   function showLifecycleError(
@@ -380,7 +527,371 @@ function ConnectedCookMantraApp({
       .finally(() => finishOperation(controller));
   }
 
-  function handleUpload(file: File) {
+  function isCurrentUploadAttempt(attempt: UploadAttempt): boolean {
+    return (
+      activeUploadAttempt.current?.id === attempt.id &&
+      !attempt.controller.signal.aborted
+    );
+  }
+
+  function clearUploadAttempt(attempt: UploadAttempt) {
+    if (activeUploadAttempt.current?.id !== attempt.id) return;
+    activeUploadAttempt.current = null;
+    if (activeController.current === attempt.controller) {
+      activeController.current = null;
+    }
+  }
+
+  function discardAttemptPreview(attempt: UploadAttempt) {
+    const preview = attempt.previewUrl;
+    if (!preview) return;
+    if (photoPreviewUrl.current === preview) {
+      replacePhotoPreview(null);
+    } else {
+      URL.revokeObjectURL(preview);
+    }
+    attempt.previewUrl = null;
+  }
+
+  function cancelUploadAttempt() {
+    const attempt = activeUploadAttempt.current;
+    const startedJob = attempt?.submitting === true;
+    activeUploadAttempt.current = null;
+    uploadAttemptId.current += 1;
+    attempt?.controller.abort();
+    if (activeController.current === attempt?.controller) {
+      activeController.current = null;
+    }
+    if (attempt) {
+      discardAttemptPreview(attempt);
+      lastRetry.current = null;
+    }
+    if (startedJob) {
+      activeJobMode.current = null;
+      apiSessionStage.current = null;
+      dispatch({ type: "cancel-job" });
+    }
+    setPendingRemoteDisclosure((pending) =>
+      pending?.kind === "upload" ? null : pending,
+    );
+    setDisclosureError(null);
+  }
+
+  function blockUploadAttempt(attempt: UploadAttempt, title: string, message: string) {
+    if (!isCurrentUploadAttempt(attempt)) return;
+    clearUploadAttempt(attempt);
+    attempt.controller.abort();
+    discardAttemptPreview(attempt);
+    lastRetry.current = null;
+    setPendingRemoteDisclosure((pending) =>
+      pending?.kind === "upload" ? null : pending,
+    );
+    setDisclosureError(null);
+    dispatch({
+      type: "fail-job",
+      error: { title, message, retryable: false },
+    });
+  }
+
+  function admittedIngredientRuntime(
+    snapshot: RuntimeStatusResponse,
+  ): AdmittedIngredientRuntime | null {
+    const ingredientRole = snapshot.model_runtime.roles.ingredient_extractor;
+    if (
+      !ingredientRole.enabled ||
+      !ingredientRole.ready ||
+      !ingredientRole.provider ||
+      !ingredientRole.model ||
+      ingredientRole.model.trim().length === 0 ||
+      !["ollama", "openrouter", "codex"].includes(ingredientRole.provider) ||
+      !/^[A-Za-z0-9_-]{32,128}$/.test(snapshot.runtime_revision)
+    ) {
+      return null;
+    }
+    return {
+      runtimeRevision: snapshot.runtime_revision,
+      provider: ingredientRole.provider,
+      model: ingredientRole.model,
+    };
+  }
+
+  function browserStorage(): Storage | null {
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
+  }
+
+  function submitPhoto(
+    file: File,
+    runtime: AdmittedIngredientRuntime,
+    signal: AbortSignal,
+    onPreview?: (previewUrl: string) => void,
+  ) {
+    if (onPreview) onPreview(URL.createObjectURL(file));
+    return client.createSession(file, {
+      runtimeRevision: runtime.runtimeRevision,
+      signal,
+    });
+  }
+
+  function requireReviewRuntime(
+    snapshot: RuntimeStatusResponse,
+  ): AdmittedIngredientRuntime {
+    const runtime = admittedIngredientRuntime(snapshot);
+    if (!runtime) {
+      throw new CapabilityError(
+        "Ingredient recognition needs attention",
+        "Return to the photo step after fixing the local model, or type ingredients instead.",
+      );
+    }
+    if (!snapshot.model_runtime.ready) {
+      throw new CapabilityError(
+        "Cooking models need attention",
+        "Return after fixing the required cooking models and restarting the local API.",
+      );
+    }
+    return runtime;
+  }
+
+  function waitForReviewDisclosure(
+    runtime: AdmittedIngredientRuntime,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (runtime.provider === "ollama") return Promise.resolve();
+    const target: RemoteMediaDisclosureTarget = {
+      provider: runtime.provider,
+      model: runtime.model,
+    };
+    const storage = browserStorage();
+    if (storage && hasMatchingRemoteMediaAcknowledgement(storage, target)) {
+      return Promise.resolve();
+    }
+
+    signal.throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        const current = reviewDisclosureContinuation.current;
+        if (!current || current.signal !== signal) return;
+        signal.removeEventListener("abort", onAbort);
+        reviewDisclosureContinuation.current = null;
+        setPendingRemoteDisclosure((pending) =>
+          pending?.kind === "review" ? null : pending,
+        );
+        setDisclosureError(null);
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      };
+      reviewDisclosureContinuation.current = {
+        target,
+        signal,
+        onAbort,
+        resolve,
+        reject,
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      const activeElement = document.activeElement;
+      disclosureReturnFocusRef.current =
+        activeElement instanceof HTMLElement && activeElement !== document.body
+          ? activeElement
+          : null;
+      setDisclosureError(null);
+      setPendingRemoteDisclosure({ kind: "review", target, runtime });
+    });
+  }
+
+  function settleReviewDisclosure(error?: Error) {
+    const continuation = reviewDisclosureContinuation.current;
+    if (!continuation) return;
+    continuation.signal.removeEventListener("abort", continuation.onAbort);
+    reviewDisclosureContinuation.current = null;
+    setPendingRemoteDisclosure((pending) =>
+      pending?.kind === "review" ? null : pending,
+    );
+    setDisclosureError(null);
+    if (error) continuation.reject(error);
+    else continuation.resolve();
+  }
+
+  async function evaluateUploadAttempt(attempt: UploadAttempt) {
+    let snapshot: RuntimeStatusResponse;
+    try {
+      snapshot = await readRuntimeStatus(attempt.controller.signal);
+    } catch (error) {
+      if (isAbortError(error) || !isCurrentUploadAttempt(attempt)) return;
+      blockUploadAttempt(
+        attempt,
+        "Could not read local model status",
+        "Check that the local API is running before sending a photo. You can still type ingredients instead.",
+      );
+      return;
+    }
+
+    if (!isCurrentUploadAttempt(attempt)) return;
+    const runtime = admittedIngredientRuntime(snapshot);
+    if (!runtime) {
+      blockUploadAttempt(
+        attempt,
+        "Ingredient recognition needs attention",
+        "Restart the local API after fixing the ingredient-recognition model, or type ingredients instead.",
+      );
+      return;
+    }
+    if (!snapshot.model_runtime.ready) {
+      blockUploadAttempt(
+        attempt,
+        "Cooking models need attention",
+        "Restart the local API after fixing the required cooking models, or type ingredients instead.",
+      );
+      return;
+    }
+
+    if (runtime.provider === "ollama") {
+      await runUploadAttempt(attempt, runtime);
+      return;
+    }
+
+    const target: RemoteMediaDisclosureTarget = {
+      provider: runtime.provider,
+      model: runtime.model,
+    };
+    const storage = browserStorage();
+    if (storage && hasMatchingRemoteMediaAcknowledgement(storage, target)) {
+      await runUploadAttempt(attempt, runtime);
+      return;
+    }
+
+    const uploadReturnTarget = uploadReturnFocusRef.current;
+    const activeElement = document.activeElement;
+    disclosureReturnFocusRef.current =
+      uploadReturnTarget?.isConnected === true
+        ? uploadReturnTarget
+        : activeElement instanceof HTMLElement && activeElement !== document.body
+          ? activeElement
+          : null;
+    setDisclosureError(null);
+    setPendingRemoteDisclosure({
+      kind: "upload",
+      attemptId: attempt.id,
+      target,
+      runtime,
+    });
+  }
+
+  async function runUploadAttempt(
+    attempt: UploadAttempt,
+    runtime: AdmittedIngredientRuntime,
+  ) {
+    if (!isCurrentUploadAttempt(attempt) || attempt.submitting) return;
+    attempt.submitting = true;
+    setPendingRemoteDisclosure((pending) =>
+      pending?.kind === "upload" ? null : pending,
+    );
+    setDisclosureError(null);
+
+    manualEntry.current = false;
+    apiSessionStage.current = null;
+    lastRetry.current = () => handleUpload(attempt.file, uploadReturnFocusRef.current);
+    activeController.current = attempt.controller;
+    activeJobMode.current = "api";
+    dispatch({
+      type: "start-job",
+      kind: "extraction",
+      returnView: "upload",
+      selectedNames: [],
+    });
+
+    try {
+      const queued = await submitPhoto(
+        attempt.file,
+        runtime,
+        attempt.controller.signal,
+        (preview) => {
+          attempt.previewUrl = preview;
+        },
+      );
+      if (!isCurrentUploadAttempt(attempt)) return;
+      apiSessionStage.current = "extracting";
+      dispatch({ type: "update-job-progress", progress: 2 });
+      const terminal = await client.pollJob(queued.job_id, {
+        intervalMs: 750,
+        signal: attempt.controller.signal,
+        onProgress: (job) => {
+          if (isCurrentUploadAttempt(attempt)) {
+            dispatch({ type: "update-job-progress", progress: job.progress });
+          }
+        },
+      });
+      if (!isCurrentUploadAttempt(attempt)) return;
+      assertSuccessfulJob(terminal);
+      apiSessionStage.current = "reviewing_ingredients";
+      const session = await client.getSession(queued.session_id, {
+        signal: attempt.controller.signal,
+      });
+      if (!isCurrentUploadAttempt(attempt)) return;
+      apiSessionStage.current = session.stage;
+      const detected = session.ingredients.filter(
+        (ingredient) => ingredient.source === "detected",
+      );
+      const weakDetection =
+        detected.length === 0 ||
+        detected.every((ingredient) => (ingredient.confidence ?? 0) < 0.7);
+      const preview = attempt.previewUrl;
+      if (preview === null) {
+        throw new Error("The accepted photo preview was not created.");
+      }
+      replacePhotoPreview(preview);
+      uploadedPhotoFile.current = attempt.file;
+      uploadedPhotoRuntimeRevision.current = runtime.runtimeRevision;
+      dispatch({
+        type: "receive-ingredients",
+        mode: "api",
+        sessionId: session.id,
+        photoPreviewUrl: preview,
+        weakDetection,
+        ingredients: ingredientsFromApi(session.ingredients),
+      });
+      lastRetry.current = null;
+      clearUploadAttempt(attempt);
+    } catch (error) {
+      if (!isCurrentUploadAttempt(attempt)) return;
+      if (error instanceof ApiError && error.code === "runtime_status_stale") {
+        discardAttemptPreview(attempt);
+        attempt.submitting = false;
+        activeJobMode.current = null;
+        apiSessionStage.current = null;
+        dispatch({ type: "cancel-job" });
+        if (attempt.staleRefreshes >= 1) {
+          blockUploadAttempt(
+            attempt,
+            "Local model status changed again",
+            "Refresh local status and choose the photo again, or type ingredients instead.",
+          );
+          return;
+        }
+        attempt.staleRefreshes += 1;
+        await evaluateUploadAttempt(attempt);
+        return;
+      }
+      if (isAbortError(error)) return;
+      discardAttemptPreview(attempt);
+      clearUploadAttempt(attempt);
+      failCurrentOperation(error);
+    } finally {
+      finishOperation(attempt.controller);
+    }
+  }
+
+  function handleUpload(file: File, returnFocus: HTMLElement | null = null) {
+    cancelUploadAttempt();
+    runtimeStatusController.current?.abort();
+    lastRetry.current = null;
+    uploadReturnFocusRef.current = returnFocus;
+
     if (!ACCEPTED_IMAGE_TYPES.has(file.type)) {
       lastRetry.current = null;
       dispatch({
@@ -406,64 +917,111 @@ function ConnectedCookMantraApp({
       return;
     }
 
-    const preview = URL.createObjectURL(file);
-    replacePhotoPreview(preview);
-    uploadedPhotoFile.current = file;
-    manualEntry.current = false;
-    apiSessionStage.current = null;
-    lastRetry.current = () => handleUpload(file);
-    const controller = beginOperation();
-    activeJobMode.current = "api";
-    dispatch({
-      type: "start-job",
-      kind: "extraction",
-      returnView: "upload",
-      selectedNames: [],
-    });
+    const controller = new AbortController();
+    const attempt: UploadAttempt = {
+      id: ++uploadAttemptId.current,
+      file,
+      controller,
+      staleRefreshes: 0,
+      previewUrl: null,
+      submitting: false,
+    };
+    activeUploadAttempt.current = attempt;
+    activeController.current = controller;
+    void evaluateUploadAttempt(attempt);
+  }
 
-    void (async () => {
-      try {
-        const queued = await client.createSession(file, { signal: controller.signal });
-        apiSessionStage.current = "extracting";
-        // The photo is on the server now; nudge progress off zero so the job
-        // screen marks the upload line done and shows the agent as running.
-        dispatch({ type: "update-job-progress", progress: 2 });
-        const terminal = await client.pollJob(queued.job_id, {
-          intervalMs: 750,
-          signal: controller.signal,
-          onProgress: (job) =>
-            dispatch({ type: "update-job-progress", progress: job.progress }),
-        });
-        assertSuccessfulJob(terminal);
-        apiSessionStage.current = "reviewing_ingredients";
-        const session = await client.getSession(queued.session_id, {
-          signal: controller.signal,
-        });
-        apiSessionStage.current = session.stage;
-        const detected = session.ingredients.filter(
-          (ingredient) => ingredient.source === "detected",
+  function handleRuntimeStatusRefresh() {
+    cancelUploadAttempt();
+    runtimeStatusController.current?.abort();
+    const controller = new AbortController();
+    runtimeStatusController.current = controller;
+    void readRuntimeStatus(controller.signal).catch(() => undefined);
+  }
+
+  function handleRemoteDisclosureAccept() {
+    const pending = pendingRemoteDisclosure;
+    if (!pending) return;
+    const attempt = pending.kind === "upload" ? activeUploadAttempt.current : null;
+    const continuation =
+      pending.kind === "review" ? reviewDisclosureContinuation.current : null;
+    if (
+      (pending.kind === "upload" &&
+        (!attempt ||
+          attempt.id !== pending.attemptId ||
+          !isCurrentUploadAttempt(attempt) ||
+          attempt.submitting)) ||
+      (pending.kind === "review" &&
+        (!continuation ||
+          continuation.signal.aborted ||
+          continuation.target.provider !== pending.target.provider ||
+          continuation.target.model !== pending.target.model))
+    ) {
+      return;
+    }
+    const storage = browserStorage();
+    if (!storage || !persistRemoteMediaAcknowledgement(storage, pending.target)) {
+      setDisclosureError(
+        "Could not save your photo-sharing choice. Check browser storage, or keep the photo on this device.",
+      );
+      return;
+    }
+    setDisclosureError(null);
+    restoreDisclosureFocus.current = true;
+    if (pending.kind === "review") {
+      settleReviewDisclosure();
+      return;
+    }
+    if (!attempt) return;
+    void runUploadAttempt(attempt, pending.runtime);
+  }
+
+  function handleRemoteDisclosureDecline() {
+    restoreDisclosureFocus.current = true;
+    if (pendingRemoteDisclosure?.kind === "review") {
+      settleReviewDisclosure(
+        new CapabilityError(
+          "Photo kept on this device",
+          "No photo was sent to the changed provider. Return to the photo step to choose another photo, or type ingredients instead.",
+        ),
+      );
+      return;
+    }
+    cancelUploadAttempt();
+  }
+
+  function handleRemoteDisclosureManualEntry() {
+    restoreDisclosureFocus.current = true;
+    if (pendingRemoteDisclosure?.kind === "review") {
+      disclosureReturnFocusRef.current = null;
+      const controller = activeController.current;
+      if (controller) {
+        controller.abort();
+        if (activeController.current === controller) activeController.current = null;
+      } else {
+        settleReviewDisclosure(
+          new DOMException("The operation was aborted.", "AbortError"),
         );
-        const weakDetection =
-          detected.length === 0 ||
-          detected.every((ingredient) => (ingredient.confidence ?? 0) < 0.7);
-        dispatch({
-          type: "receive-ingredients",
-          mode: "api",
-          sessionId: session.id,
-          photoPreviewUrl: preview,
-          weakDetection,
-          ingredients: ingredientsFromApi(session.ingredients),
-        });
-      } catch (error) {
-        failCurrentOperation(error);
-      } finally {
-        finishOperation(controller);
       }
-    })();
+      activeJobMode.current = null;
+      uploadedPhotoFile.current = null;
+      uploadedPhotoRuntimeRevision.current = null;
+      manualEntry.current = true;
+      apiSessionStage.current = null;
+      replacePhotoPreview(null);
+      lastRetry.current = null;
+      setSavedViewOpen(false);
+      dispatch({ type: "continue-with-manual-entry" });
+      return;
+    }
+    handleManualEntry();
   }
 
   function handleWeakDetection() {
+    cancelUploadAttempt();
     uploadedPhotoFile.current = null;
+    uploadedPhotoRuntimeRevision.current = null;
+    replacePhotoPreview(null);
     manualEntry.current = false;
     apiSessionStage.current = null;
     lastRetry.current = handleWeakDetection;
@@ -483,9 +1041,11 @@ function ConnectedCookMantraApp({
   }
 
   function handleManualEntry() {
+    cancelUploadAttempt();
     activeController.current?.abort();
     activeJobMode.current = null;
     uploadedPhotoFile.current = null;
+    uploadedPhotoRuntimeRevision.current = null;
     manualEntry.current = true;
     apiSessionStage.current = null;
     replacePhotoPreview(null);
@@ -523,19 +1083,51 @@ function ConnectedCookMantraApp({
       );
     }
 
-    const extraction = await client.createSession(sourcePhoto, {
-      signal: controller.signal,
-    });
+    let extraction: Awaited<ReturnType<CookMantraClient["createSession"]>>;
+    let acceptedRuntime: AdmittedIngredientRuntime;
+    let staleRefreshes = 0;
+    while (true) {
+      const snapshot = await readRuntimeStatus(controller.signal);
+      controller.signal.throwIfAborted();
+      const runtime = requireReviewRuntime(snapshot);
+      await waitForReviewDisclosure(runtime, controller.signal);
+      controller.signal.throwIfAborted();
+      try {
+        extraction = await submitPhoto(sourcePhoto, runtime, controller.signal);
+        controller.signal.throwIfAborted();
+        acceptedRuntime = runtime;
+        break;
+      } catch (error) {
+        if (
+          error instanceof ApiError &&
+          error.code === "runtime_status_stale" &&
+          staleRefreshes < 1
+        ) {
+          staleRefreshes += 1;
+          continue;
+        }
+        throw error;
+      }
+    }
+    uploadedPhotoRuntimeRevision.current = acceptedRuntime.runtimeRevision;
     apiSessionStage.current = "extracting";
     const extractionTerminal = await client.pollJob(extraction.job_id, {
       intervalMs: 750,
       signal: controller.signal,
-      onProgress: (job) =>
-        dispatch({ type: "update-job-progress", progress: job.progress }),
+      onProgress: (job) => {
+        if (!controller.signal.aborted) {
+          dispatch({ type: "update-job-progress", progress: job.progress });
+        }
+      },
     });
+    controller.signal.throwIfAborted();
     assertSuccessfulJob(extractionTerminal);
     apiSessionStage.current = "reviewing_ingredients";
-    return client.getSession(extraction.session_id, { signal: controller.signal });
+    const session = await client.getSession(extraction.session_id, {
+      signal: controller.signal,
+    });
+    controller.signal.throwIfAborted();
+    return session;
   }
 
   function handleGenerateOptions() {
@@ -860,10 +1452,12 @@ function ConnectedCookMantraApp({
   }
 
   function handleReset() {
+    cancelUploadAttempt();
     activeController.current?.abort();
     activeController.current = null;
     activeJobMode.current = null;
     uploadedPhotoFile.current = null;
+    uploadedPhotoRuntimeRevision.current = null;
     manualEntry.current = false;
     apiSessionStage.current = null;
     replacePhotoPreview(null);
@@ -872,7 +1466,11 @@ function ConnectedCookMantraApp({
   }
 
   function handleOpenSavedRecipes() {
-    if (savedViewOpen) return;
+    if (savedViewOpen || reviewDisclosureContinuation.current) return;
+    if (!activeUploadAttempt.current?.submitting) {
+      cancelUploadAttempt();
+      if (stateRef.current.view === "upload") lastRetry.current = null;
+    }
     savedReturnScrollY.current = window.scrollY;
     setSavedViewOpen(true);
   }
@@ -889,7 +1487,18 @@ function ConnectedCookMantraApp({
       "recipes",
     ];
     const view = views[index];
-    if (view) dispatch({ type: "navigate", view });
+    if (view) {
+      if (stateRef.current.view === "upload" && view !== "upload") {
+        cancelUploadAttempt();
+        lastRetry.current = null;
+      }
+      dispatch({ type: "navigate", view });
+    }
+  }
+
+  function handleDismissError() {
+    if (stateRef.current.view === "upload") lastRetry.current = null;
+    dispatch({ type: "dismiss-error" });
   }
 
   const currentStepIndex = viewStepIndex(state.view, state.job);
@@ -924,7 +1533,7 @@ function ConnectedCookMantraApp({
                   ? () => lastRetry.current?.()
                   : undefined
               }
-              onDismiss={() => dispatch({ type: "dismiss-error" })}
+              onDismiss={handleDismissError}
             />
           ) : null}
 
@@ -934,11 +1543,23 @@ function ConnectedCookMantraApp({
               onManualEntry={handleManualEntry}
               onWeakDetection={handleWeakDetection}
               showWeakDetection={devControls}
+              runtimeStatus={
+                <RuntimeStatusPanel
+                  state={runtimeStatusState}
+                  onRefresh={handleRuntimeStatusRefresh}
+                />
+              }
             />
           ) : null}
           {state.view === "job" && state.job ? (
             <JobScreen
               job={state.job}
+              imageRoleStatus={
+                activeJobMode.current === "api" &&
+                runtimeStatusState.phase === "available"
+                  ? runtimeStatusState.snapshot.model_runtime.roles.image_generator
+                  : undefined
+              }
               allowInterruption={activeJobMode.current !== "api"}
               onCancel={handleCancelJob}
               onSimulateFailure={handleSimulateFailure}
@@ -983,7 +1604,6 @@ function ConnectedCookMantraApp({
                   ? "To get more ideas, edit your ingredients — Cook Mantra will re-read your photo and start fresh. You can still create recipes from the ideas already shown."
                   : null
               }
-              previewUrl={(artifactId) => client.artifactUrl(artifactId)}
               onToggleOption={(id) => dispatch({ type: "toggle-option", id })}
               onMoreIdeas={handleMoreIdeas}
               onEditIngredients={() => dispatch({ type: "navigate", view: "confirm" })}
@@ -1022,6 +1642,17 @@ function ConnectedCookMantraApp({
           </div>
         ) : null}
       </main>
+      {pendingRemoteDisclosure ? (
+        <RemoteMediaDisclosureDialog
+          provider={pendingRemoteDisclosure.target.provider}
+          model={pendingRemoteDisclosure.target.model}
+          returnFocusRef={disclosureReturnFocusRef}
+          errorMessage={disclosureError}
+          onAccept={handleRemoteDisclosureAccept}
+          onDecline={handleRemoteDisclosureDecline}
+          onManualEntry={handleRemoteDisclosureManualEntry}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1220,13 +1851,57 @@ function toAppError(error: unknown): AppErrorView {
 // Offline codes carry server-internal wording ("Ollama is unavailable."), so
 // they get a user-facing message instead of the raw one.
 function apiErrorMessage(error: ApiError): string {
+  if (error.code === "runtime_status_stale") {
+    return "Local model settings changed before the photo was sent. Refresh local status and try again.";
+  }
+  if (
+    error.code === "model_configuration_invalid" ||
+    error.code === "model_capability_missing"
+  ) {
+    return "Check the local model runtime settings and restart Cook Mantra.";
+  }
+  if (error.code === "provider_authentication_failed") {
+    return "The selected provider needs valid credentials. Update them and restart Cook Mantra.";
+  }
+  if (error.code === "provider_payment_required") {
+    return "The selected provider requires an active balance or payment method.";
+  }
+  if (error.code === "provider_rate_limited") {
+    return "The selected provider is handling too many requests. Wait a moment and try again.";
+  }
   if (error.code === "ollama_unavailable" || error.code === "model_not_found") {
     return "The recipe agents are not reachable right now. Try again in a few minutes.";
+  }
+  if (
+    error.code === "provider_unavailable" ||
+    error.code === "provider_protocol_error"
+  ) {
+    return "The selected cooking-agent provider is not reachable right now. Try again shortly.";
   }
   return error.message;
 }
 
 function apiErrorTitle(error: ApiError): string {
+  if (error.code === "runtime_status_stale") return "Local model status changed";
+  if (
+    error.code === "model_configuration_invalid" ||
+    error.code === "model_capability_missing"
+  ) {
+    return "The cooking agents need configuration";
+  }
+  if (
+    error.code === "provider_authentication_failed" ||
+    error.code === "provider_payment_required"
+  ) {
+    return "The model provider needs attention";
+  }
+  if (error.code === "provider_rate_limited") return "The model provider is busy";
+  if (
+    error.code === "provider_unavailable" ||
+    error.code === "provider_protocol_error"
+  ) {
+    return "The cooking agents are offline";
+  }
   if (error.code === "ollama_unavailable" || error.code === "model_not_found") {
     return "The cooking agents are offline";
   }

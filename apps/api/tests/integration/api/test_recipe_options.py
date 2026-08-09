@@ -11,19 +11,16 @@ from httpx import ASGITransport, AsyncClient
 
 from agents.ingredient_extraction import IngredientExtractor
 from agents.master_chef import OllamaMasterChef
-from agents.nutrition import OllamaNutritionAgent
 from api.app import create_app
 from api.dependencies import get_job_runner, get_session_store
 from api.routes import recipe_options as recipe_option_routes
 from core.config import Settings
 from core.errors import AppError, ErrorCode
-from domain.images import DishPreview
 from domain.ingredients import ExtractionResult, Ingredient, IngredientSource
 from domain.jobs import JobOperation
 from domain.recipe_option_service import OptionGenerationContext
 from domain.recipe_options import (
     Difficulty,
-    NutritionEstimate,
     RecipeOption,
     RecipeOptionDraft,
     RecipePreferences,
@@ -39,7 +36,7 @@ class ReadyOllama:
     async def inspect(self) -> dict[str, object]:
         return {
             "reachable": True,
-            "available_models": [],
+            "available_models": ["qwen3.5:9b", "gpt-oss:20b"],
             "missing": [],
         }
 
@@ -102,42 +99,6 @@ class FakeMasterChef:
             option.model_copy(deep=True)
             for option in self.responses[len(self.calls) - 1]
         ]
-
-
-class FakeNutritionAgent:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, RecipePreferences]] = []
-
-    async def estimate(
-        self,
-        option: RecipeOptionDraft,
-        preferences: RecipePreferences,
-    ) -> NutritionEstimate:
-        self.calls.append(
-            (option.name, preferences.model_copy(deep=True)),
-        )
-        return NutritionEstimate(
-            calories_kcal=240,
-            protein_g=8,
-            carbohydrates_g=32,
-            fat_g=9,
-        )
-
-
-class FakeDishPreviewService:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
-
-    async def generate(
-        self,
-        session_id: str,
-        option: RecipeOptionDraft,
-        progress: ProgressReporter,
-    ) -> DishPreview:
-        self.calls.append((session_id, option.name))
-        return DishPreview(
-            artifact_id=f"preview-{option.name.casefold().replace(' ', '-')}"
-        )
 
 
 class FailingJobRunner:
@@ -666,25 +627,22 @@ def test_app_wires_recipe_graph_to_exact_settings_stores_and_shared_limiter(
 
     dependencies = application.state.recipe_options_dependencies
     assert isinstance(dependencies.master_chef, OllamaMasterChef)
-    assert isinstance(dependencies.nutrition_agent, OllamaNutritionAgent)
     assert dependencies.master_chef._settings is settings
-    assert dependencies.nutrition_agent._settings is settings
     assert dependencies.session_store is application.state.session_store
     assert dependencies.model_call_limiter is application.state.model_call_limiter
+    assert not hasattr(dependencies, "dish_previews")
+    assert not hasattr(dependencies, "dish_previews_enabled")
 
 
 def test_first_successful_job_polls_to_committed_session_through_real_boundaries(
     project_tmp_path: Path,
 ) -> None:
     chef = FakeMasterChef([[draft("Tomato Curry"), draft("Tomato Soup")]])
-    nutrition = FakeNutritionAgent()
     application = create_app(
         settings=Settings(_env_file=None, artifact_root=project_tmp_path),
         ollama_health=ReadyOllama(),
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=chef,
-        nutrition_agent=nutrition,
-        dish_previews=FakeDishPreviewService(),
     )
 
     with TestClient(application) as test_client:
@@ -716,7 +674,10 @@ def test_first_successful_job_polls_to_committed_session_through_real_boundaries
         "Tomato Soup",
     ]
     assert all(
-        item["nutrition"] is not None
+        item["nutrition"] is None for item in session_response.json()["recipe_options"]
+    )
+    assert all(
+        "preview" not in item and "warnings" not in item
         for item in session_response.json()["recipe_options"]
     )
     assert job_response.json()["result"] == {
@@ -732,10 +693,6 @@ def test_first_successful_job_polls_to_committed_session_through_real_boundaries
             set(),
         )
     ]
-    assert [name for name, _ in nutrition.calls] == [
-        "Tomato Curry",
-        "Tomato Soup",
-    ]
 
 
 def test_more_crosses_domain_and_real_graph_with_all_canonical_shown_names(
@@ -747,8 +704,6 @@ def test_more_crosses_domain_and_real_graph_with_all_canonical_shown_names(
         ollama_health=ReadyOllama(),
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=chef,
-        nutrition_agent=FakeNutritionAgent(),
-        dish_previews=FakeDishPreviewService(),
     )
 
     with TestClient(application) as test_client:
@@ -812,8 +767,6 @@ def test_overlapping_jobs_report_their_own_committed_batch(
         ollama_health=ReadyOllama(),
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=chef,
-        nutrition_agent=FakeNutritionAgent(),
-        dish_previews=FakeDishPreviewService(),
     )
     delayed_runner = DelayedFirstCommittedResult(
         application.state.recipe_options_runner
@@ -882,7 +835,6 @@ def test_submit_failure_restores_complete_previous_option_context(
         ollama_health=ReadyOllama(),
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=FakeMasterChef([[draft("Unused")]]),
-        nutrition_agent=FakeNutritionAgent(),
     )
     application.dependency_overrides[get_job_runner] = FailingJobRunner
 
@@ -941,7 +893,6 @@ async def test_request_cancellation_drains_full_rollback_despite_repeated_cancel
         ollama_health=ReadyOllama(),
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=FakeMasterChef([[draft("Unused")]]),
-        nutrition_agent=FakeNutritionAgent(),
     )
     session_store = PausingRollbackSessionStore()
     job_runner = BlockingJobRunner()
@@ -1042,7 +993,6 @@ async def test_submit_error_rollback_drains_when_request_is_repeatedly_cancelled
         ollama_health=ReadyOllama(),
         ingredient_extractor=UnusedIngredientExtractor(),
         master_chef=FakeMasterChef([[draft("Unused")]]),
-        nutrition_agent=FakeNutritionAgent(),
     )
     session_store = PausingRollbackSessionStore()
     previous = await store_session(

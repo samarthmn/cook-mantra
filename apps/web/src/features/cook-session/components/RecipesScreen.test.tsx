@@ -60,6 +60,8 @@ const recipe: CompleteRecipeView = {
   allergenNotice: "Check ingredient labels for allergens.",
   assumptions: [],
   warnings: [],
+  previewArtifactId: null,
+  previewLabel: null,
 };
 
 const confirmedIngredients: IngredientView[] = [
@@ -87,9 +89,6 @@ function optionWithNutrition(
     missingIngredients: [],
     optionalIngredients: [],
     nutrition,
-    previewArtifactId: null,
-    previewLabel: null,
-    warnings: [],
     batchNumber: 1,
   };
 }
@@ -134,9 +133,11 @@ function renderRecipe(
 }
 
 function SavedRecipeHarness({
+  recipeView = recipe,
   options = [],
   completedSteps = {},
 }: {
+  recipeView?: CompleteRecipeView;
   options?: RecipeOptionView[];
   completedSteps?: Record<string, number[]>;
 } = {}) {
@@ -144,11 +145,11 @@ function SavedRecipeHarness({
 
   return (
     <RecipesScreen
-      recipes={{ [recipe.optionId]: recipe }}
+      recipes={{ [recipeView.optionId]: recipeView }}
       failures={{}}
       options={options}
       confirmedIngredients={confirmedIngredients}
-      activeRecipeId={recipe.optionId}
+      activeRecipeId={recipeView.optionId}
       completedSteps={completedSteps}
       previewUrl={previewUrl}
       onSetActiveRecipe={vi.fn()}
@@ -162,6 +163,252 @@ function SavedRecipeHarness({
 }
 
 describe("RecipesScreen", () => {
+  describe("completed recipe previews", () => {
+    it("renders the active complete recipe preview as a labelled editorial figure", () => {
+      renderRecipe({
+        ...recipe,
+        previewArtifactId: "private-preview-1",
+        previewLabel: "AI-generated image",
+      });
+
+      const image = screen.getByRole("img", {
+        name: "Test Curry, AI-generated image",
+      });
+      expect(image).toHaveAttribute("src", "/artifacts/private-preview-1");
+      expect(image).toHaveClass("recipe-preview-image");
+
+      const caption = screen.getByText("AI image", { selector: "figcaption" });
+      const figure = caption.closest("figure");
+      expect(figure).not.toBeNull();
+      expect(figure).toHaveClass("recipe-preview-figure");
+      expect(within(figure as HTMLElement).getByRole("img")).toBe(image);
+    });
+
+    it("keeps a recipe with no preview free of empty image chrome", () => {
+      const view = renderRecipe(recipe);
+
+      expect(screen.queryByRole("img")).not.toBeInTheDocument();
+      expect(screen.queryByText("AI image")).not.toBeInTheDocument();
+      expect(view.container.querySelector(".recipe-preview-figure")).toBeNull();
+      expect(screen.getByRole("button", { name: "Save recipe" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Download" })).toBeEnabled();
+    });
+
+    it("hides only a failed preview while warnings and recipe actions stay usable", () => {
+      renderRecipe({
+        ...recipe,
+        warnings: ["Taste before adding more salt."],
+        previewArtifactId: "private-preview-1",
+        previewLabel: "AI-generated image",
+      });
+
+      const image = screen.getByRole("img", {
+        name: "Test Curry, AI-generated image",
+      });
+      const warningStatus = screen.getByRole("status", {
+        name: "Recipe warnings",
+      });
+      expect(
+        within(warningStatus).getByText("Taste before adding more salt."),
+      ).toBeVisible();
+
+      fireEvent.error(image);
+
+      expect(
+        screen.queryByRole("img", { name: "Test Curry, AI-generated image" }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("AI image")).not.toBeInTheDocument();
+      expect(
+        within(warningStatus).getByText("Taste before adding more salt."),
+      ).toBeVisible();
+      expect(screen.getByRole("button", { name: "Save recipe" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Download" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Ingredients (1)" })).toBeEnabled();
+    });
+
+    it("switches active preview tabs without letting one failed artifact hide another", async () => {
+      const user = userEvent.setup();
+      const firstRecipe = {
+        ...recipe,
+        previewArtifactId: "private-preview-1",
+        previewLabel: "AI-generated image",
+      };
+      const secondRecipe = {
+        ...recipe,
+        optionId: "option-2",
+        name: "Second Curry",
+        previewArtifactId: "private-preview-2",
+        previewLabel: "AI-generated image",
+      };
+
+      function PreviewTabsHarness() {
+        const [activeRecipeId, setActiveRecipeId] = useState(firstRecipe.optionId);
+
+        return (
+          <RecipesScreen
+            recipes={{
+              [firstRecipe.optionId]: firstRecipe,
+              [secondRecipe.optionId]: secondRecipe,
+            }}
+            failures={{}}
+            options={[]}
+            confirmedIngredients={confirmedIngredients}
+            activeRecipeId={activeRecipeId}
+            completedSteps={{}}
+            previewUrl={previewUrl}
+            onSetActiveRecipe={setActiveRecipeId}
+            onToggleStep={vi.fn()}
+            onRetryFailed={vi.fn()}
+            onBack={vi.fn()}
+            onReset={vi.fn()}
+            onSavedRecipesChange={vi.fn()}
+          />
+        );
+      }
+
+      render(<PreviewTabsHarness />);
+      const firstImage = screen.getByRole("img", {
+        name: "Test Curry, AI-generated image",
+      });
+      expect(firstImage).toHaveAttribute("src", "/artifacts/private-preview-1");
+      fireEvent.error(firstImage);
+      expect(screen.queryByRole("img")).not.toBeInTheDocument();
+
+      await user.click(screen.getByRole("tab", { name: "Second Curry" }));
+      expect(
+        screen.getByRole("img", { name: "Second Curry, AI-generated image" }),
+      ).toHaveAttribute("src", "/artifacts/private-preview-2");
+
+      await user.click(screen.getByRole("tab", { name: "Test Curry" }));
+      expect(screen.queryByRole("img")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Save recipe" })).toBeEnabled();
+    });
+
+    it("keeps the active preview visible when the previous tab reports a delayed error", async () => {
+      const user = userEvent.setup();
+      const firstRecipe = {
+        ...recipe,
+        previewArtifactId: "private-preview-1",
+        previewLabel: "AI-generated image",
+      };
+      const secondRecipe = {
+        ...recipe,
+        optionId: "option-2",
+        name: "Second Curry",
+        previewArtifactId: "private-preview-2",
+        previewLabel: "AI-generated image",
+      };
+
+      function DelayedErrorTabsHarness() {
+        const [activeRecipeId, setActiveRecipeId] = useState(firstRecipe.optionId);
+
+        return (
+          <RecipesScreen
+            recipes={{
+              [firstRecipe.optionId]: firstRecipe,
+              [secondRecipe.optionId]: secondRecipe,
+            }}
+            failures={{}}
+            options={[]}
+            confirmedIngredients={confirmedIngredients}
+            activeRecipeId={activeRecipeId}
+            completedSteps={{}}
+            previewUrl={previewUrl}
+            onSetActiveRecipe={setActiveRecipeId}
+            onToggleStep={vi.fn()}
+            onRetryFailed={vi.fn()}
+            onBack={vi.fn()}
+            onReset={vi.fn()}
+            onSavedRecipesChange={vi.fn()}
+          />
+        );
+      }
+
+      render(<DelayedErrorTabsHarness />);
+      const firstImage = screen.getByRole("img", {
+        name: "Test Curry, AI-generated image",
+      });
+
+      await user.click(screen.getByRole("tab", { name: "Second Curry" }));
+      const secondImage = screen.getByRole("img", {
+        name: "Second Curry, AI-generated image",
+      });
+      expect(secondImage).toHaveAttribute("src", "/artifacts/private-preview-2");
+
+      fireEvent.error(firstImage);
+
+      expect(
+        screen.getByRole("img", { name: "Second Curry, AI-generated image" }),
+      ).toBe(secondImage);
+    });
+
+    it("captures the active complete recipe private artifact and ignores stale option data", async () => {
+      const user = userEvent.setup();
+      const privateArtifactUrl = vi.fn(
+        (artifactId: string) => `/api/v1/artifacts/${encodeURIComponent(artifactId)}`,
+      );
+      const completeRecipe = {
+        ...recipe,
+        previewArtifactId: "complete/recipe preview",
+        previewLabel: "AI-generated image",
+      };
+      const staleOption = {
+        ...optionWithNutrition({
+          caloriesKcal: 420,
+          proteinG: 12,
+          carbohydratesG: 54,
+          fatG: 16,
+          dietTags: [],
+          allergenWarnings: [],
+          disclaimer: "Estimated values; not medical advice.",
+        }),
+        previewArtifactId: "stale-option-preview",
+        previewLabel: "AI-generated image",
+      } as RecipeOptionView;
+      captureDishPhotoThumbnail.mockResolvedValueOnce(
+        "data:image/jpeg;base64,cHJpdmF0ZS1zbmFwc2hvdA==",
+      );
+
+      render(
+        <RecipesScreen
+          recipes={{ [completeRecipe.optionId]: completeRecipe }}
+          failures={{}}
+          options={[staleOption]}
+          confirmedIngredients={confirmedIngredients}
+          activeRecipeId={completeRecipe.optionId}
+          completedSteps={{}}
+          previewUrl={privateArtifactUrl}
+          onSetActiveRecipe={vi.fn()}
+          onToggleStep={vi.fn()}
+          onRetryFailed={vi.fn()}
+          onBack={vi.fn()}
+          onReset={vi.fn()}
+          onSavedRecipesChange={vi.fn()}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Save recipe" }));
+
+      await waitFor(() => expect(loadSavedRecipes()).toHaveLength(1));
+      expect(privateArtifactUrl).toHaveBeenCalledWith("complete/recipe preview");
+      expect(captureDishPhotoThumbnail).toHaveBeenCalledWith(
+        "/api/v1/artifacts/complete%2Frecipe%20preview",
+        expect.any(AbortSignal),
+      );
+      expect(captureDishPhotoThumbnail).not.toHaveBeenCalledWith(
+        expect.stringContaining("stale-option-preview"),
+        expect.anything(),
+      );
+      expect(loadSavedRecipes()[0]).toMatchObject({
+        photo: "data:image/jpeg;base64,cHJpdmF0ZS1zbmFwc2hvdA==",
+        recipe: {
+          previewArtifactId: null,
+          previewLabel: null,
+        },
+      });
+    });
+  });
+
   it("captures an async point-in-time snapshot and returns to an enabled save action", async () => {
     const user = userEvent.setup();
     let resolvePhoto!: (photo: string | null) => void;
@@ -171,20 +418,23 @@ describe("RecipesScreen", () => {
           resolvePhoto = resolve;
         }),
     );
-    const option = {
-      ...optionWithNutrition({
-        caloriesKcal: 420,
-        proteinG: 12,
-        carbohydratesG: 54,
-        fatG: 16,
-        dietTags: [],
-        allergenWarnings: [],
-        disclaimer: "Estimated values; not medical advice.",
-      }),
+    const option = optionWithNutrition({
+      caloriesKcal: 420,
+      proteinG: 12,
+      carbohydratesG: 54,
+      fatG: 16,
+      dietTags: [],
+      allergenWarnings: [],
+      disclaimer: "Estimated values; not medical advice.",
+    });
+    const recipeWithPreview = {
+      ...recipe,
       previewArtifactId: "preview-1",
+      previewLabel: "AI-generated image",
     };
     render(
       <SavedRecipeHarness
+        recipeView={recipeWithPreview}
         options={[option]}
         completedSteps={{ [recipe.optionId]: [1] }}
       />,
@@ -214,13 +464,49 @@ describe("RecipesScreen", () => {
         ingredientsExpanded: true,
       },
       ingredientSources: { salt: "pantry_suggestion" },
+      recipe: expect.objectContaining({
+        previewArtifactId: null,
+        previewLabel: null,
+      }),
     });
+    expect(window.localStorage.getItem("cook-mantra:saved-recipes:v3")).not.toContain(
+      "preview-1",
+    );
 
     await user.click(screen.getByRole("button", { name: "Save recipe" }));
     await waitFor(() => {
       expect(loadSavedRecipes()).toHaveLength(2);
     });
     expect(loadSavedRecipes()[1]?.photo).toBeNull();
+  });
+
+  it("never captures a preview from stale recipe-option data", async () => {
+    const user = userEvent.setup();
+    const staleOption = {
+      ...optionWithNutrition({
+        caloriesKcal: 420,
+        proteinG: 12,
+        carbohydratesG: 54,
+        fatG: 16,
+        dietTags: [],
+        allergenWarnings: [],
+        disclaimer: "Estimated values; not medical advice.",
+      }),
+      previewArtifactId: "stale-option-preview",
+      previewLabel: "AI-generated image",
+    } as RecipeOptionView;
+    render(<SavedRecipeHarness options={[staleOption]} />);
+
+    await user.click(screen.getByRole("button", { name: "Save recipe" }));
+
+    expect(captureDishPhotoThumbnail).not.toHaveBeenCalled();
+    expect(loadSavedRecipes()[0]).toMatchObject({
+      photo: null,
+      recipe: {
+        previewArtifactId: null,
+        previewLabel: null,
+      },
+    });
   });
 
   it("shows an inline notice when browser storage rejects a save", async () => {
@@ -247,19 +533,21 @@ describe("RecipesScreen", () => {
           resolvePhoto = resolve;
         }),
     );
-    const option = {
-      ...optionWithNutrition({
-        caloriesKcal: 420,
-        proteinG: 12,
-        carbohydratesG: 54,
-        fatG: 16,
-        dietTags: [],
-        allergenWarnings: [],
-        disclaimer: "Estimated values; not medical advice.",
-      }),
+    const option = optionWithNutrition({
+      caloriesKcal: 420,
+      proteinG: 12,
+      carbohydratesG: 54,
+      fatG: 16,
+      dietTags: [],
+      allergenWarnings: [],
+      disclaimer: "Estimated values; not medical advice.",
+    });
+    const recipeWithPreview = {
+      ...recipe,
       previewArtifactId: "preview-1",
+      previewLabel: "AI-generated image",
     };
-    render(<SavedRecipeHarness options={[option]} />);
+    render(<SavedRecipeHarness recipeView={recipeWithPreview} options={[option]} />);
     const saveButton = screen.getByRole("button", { name: "Save recipe" });
 
     act(() => {
@@ -283,19 +571,23 @@ describe("RecipesScreen", () => {
           signal?.addEventListener("abort", () => resolve(null), { once: true });
         }),
     );
-    const option = {
-      ...optionWithNutrition({
-        caloriesKcal: 420,
-        proteinG: 12,
-        carbohydratesG: 54,
-        fatG: 16,
-        dietTags: [],
-        allergenWarnings: [],
-        disclaimer: "Estimated values; not medical advice.",
-      }),
+    const option = optionWithNutrition({
+      caloriesKcal: 420,
+      proteinG: 12,
+      carbohydratesG: 54,
+      fatG: 16,
+      dietTags: [],
+      allergenWarnings: [],
+      disclaimer: "Estimated values; not medical advice.",
+    });
+    const recipeWithPreview = {
+      ...recipe,
       previewArtifactId: "preview-1",
+      previewLabel: "AI-generated image",
     };
-    const view = render(<SavedRecipeHarness options={[option]} />);
+    const view = render(
+      <SavedRecipeHarness recipeView={recipeWithPreview} options={[option]} />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Save recipe" }));
     expect(screen.getByRole("status")).toHaveTextContent("Saving recipe…");
@@ -332,7 +624,7 @@ describe("RecipesScreen", () => {
     expect(downloadCapture.markdown).toContain("salt");
   });
 
-  it("saves and downloads the fallback nutrition shown on screen", async () => {
+  it("does not save, display, or download deprecated option nutrition", async () => {
     const user = userEvent.setup();
     const fallbackNutrition = {
       caloriesKcal: 420,
@@ -362,17 +654,15 @@ describe("RecipesScreen", () => {
       />,
     );
 
-    expect(screen.getByText("420")).toBeVisible();
+    expect(screen.queryByText("420")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save recipe" }));
 
     const savedEntries = loadSavedRecipes();
-    expect(savedEntries[0]?.recipe.nutrition).toEqual(fallbackNutrition);
+    expect(savedEntries[0]?.recipe.nutrition).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Download" }));
 
-    expect(downloadCapture.markdown).toContain("## Nutrition");
-    expect(downloadCapture.markdown).toContain("**Calories:** 420 kcal");
-    expect(downloadCapture.markdown).toContain("**Protein:** 12 g");
+    expect(downloadCapture.markdown).not.toContain("## Nutrition");
   });
 
   it("keeps a confirmed pantry ingredient visibly sourced as pantry", () => {
@@ -435,8 +725,8 @@ describe("RecipesScreen", () => {
     );
     expect(disclosure).toHaveAttribute("aria-expanded", "false");
     expect(list).not.toBeVisible();
-    expect(screen.getByText("420")).toBeVisible();
-    expect(screen.getByText("Per serving — estimate")).toBeVisible();
+    expect(screen.queryByText("420")).not.toBeInTheDocument();
+    expect(screen.queryByText("Per serving — estimate")).not.toBeInTheDocument();
 
     await user.click(disclosure);
     expect(disclosure).toHaveAttribute("aria-expanded", "true");
@@ -445,10 +735,10 @@ describe("RecipesScreen", () => {
     await user.click(disclosure);
     expect(disclosure).toHaveAttribute("aria-expanded", "false");
     expect(list).not.toBeVisible();
-    expect(screen.getByText("420")).toBeVisible();
+    expect(screen.queryByText("420")).not.toBeInTheDocument();
   });
 
-  it("prefers recipe-stage nutrition over the option estimate", () => {
+  it("does not render deprecated recipe-stage or option nutrition", () => {
     const option = optionWithNutrition({
       caloriesKcal: 420,
       proteinG: 12,
@@ -475,11 +765,11 @@ describe("RecipesScreen", () => {
       { options: [option] },
     );
 
-    expect(screen.getByText("515")).toBeVisible();
+    expect(screen.queryByText("515")).not.toBeInTheDocument();
     expect(screen.queryByText("420")).not.toBeInTheDocument();
   });
 
-  it("falls back to option nutrition when recipe nutrition is absent", () => {
+  it("does not fall back to deprecated option nutrition", () => {
     const option = optionWithNutrition({
       caloriesKcal: 420,
       proteinG: 12,
@@ -492,8 +782,8 @@ describe("RecipesScreen", () => {
 
     renderRecipe({ ...recipe, nutrition: null }, { options: [option] });
 
-    expect(screen.getByText("420")).toBeVisible();
-    expect(screen.getByText("Per serving — estimate")).toBeVisible();
+    expect(screen.queryByText("420")).not.toBeInTheDocument();
+    expect(screen.queryByText("Per serving — estimate")).not.toBeInTheDocument();
   });
 
   it("keeps long quantities, ingredient names, and source tags in separate row areas", async () => {
@@ -726,9 +1016,6 @@ describe("RecipesScreen", () => {
             missingIngredients: [],
             optionalIngredients: [],
             nutrition: null,
-            previewArtifactId: null,
-            previewLabel: null,
-            warnings: [],
             batchNumber: 1,
           },
         ]}
